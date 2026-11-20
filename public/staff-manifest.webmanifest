@@ -1,0 +1,32 @@
+{
+  "id": "/?portal=staff",
+  "name": "House of Muktai — Staff Incentive App",
+  "short_name": "Muktai Staff",
+  "description": "Official Employee Sales & Incentive Mobile App for House of Muktai (SHRIMUKTAI MART PRIVATE LIMITED, Baramati, Pune).",
+  "theme_color": "#9F1239",
+  "background_color": "#F6F7F9",
+  "display": "standalone",
+  "orientation": "portrait",
+  "start_url": "/?portal=staff",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

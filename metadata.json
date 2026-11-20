@@ -1,0 +1,6 @@
+{
+  "name": "House of Muktai — Employee Incentive Management System",
+  "description": "Standalone 12-branch Employee Incentive Management System for House of Muktai featuring Super Admin Panel, Branch & Employee Masters, ExcelJS Daily Import/Validation/Approval/Publishing Engine, Versioned Corrections, Audit Logs, and Secure Employee Portal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

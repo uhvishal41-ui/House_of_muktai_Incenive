@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: house-of-muktai-incentives
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_URL
+        value: https://houseofmuktai.co.in
+      - key: ALLOWED_ORIGINS
+        value: https://houseofmuktai.co.in,https://www.houseofmuktai.co.in,https://staff.houseofmuktai.co.in
