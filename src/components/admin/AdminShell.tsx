@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import {
   BarChart3,
   Building2,
@@ -9,11 +9,13 @@ import {
   LogOut,
   Menu,
   RefreshCw,
+  Search,
   Smartphone,
   Users,
   Wallet,
   X,
 } from 'lucide-react';
+import { AnimatePresence, motion } from 'motion/react';
 import { useAuth } from '../../context/AuthContext';
 import {
   DEFAULT_12_BRANCHES,
@@ -48,39 +50,52 @@ import type {
 } from '../../types/incentive';
 import { COMPANY_BRAND, getShareableStaffAppUrl } from '../../lib/companyBrand';
 import { BrandLogo, CompanyFooter } from '../common/BrandLogo';
+import { PageTransition, WorkspaceSkeleton } from '../common/MotionPrimitives';
 import { OfflineIndicator } from '../common/OfflineIndicator';
 import { PWAInstallButton } from '../common/PWAInstallButton';
-import { AdminAnalytics } from './AdminAnalytics';
+import { AdminGlobalSearch, type AdminNavTab } from './AdminGlobalSearch';
+import { AdminNotificationCenter } from './AdminNotificationCenter';
 import { AdminOverview } from './AdminOverview';
-import { AdminPayoutsAndQueries } from './AdminPayoutsAndQueries';
-import { BranchMaster } from './BranchMaster';
-import { EmployeeMaster } from './EmployeeMaster';
-import { ExcelImportWorkflow } from './ExcelImportWorkflow';
-import { HistoryAndReports } from './HistoryAndReports';
 
-type AdminTab =
-  | 'overview'
-  | 'analytics'
-  | 'payouts'
-  | 'branches'
-  | 'employees'
-  | 'import'
-  | 'history';
+// Route/tab-level code splitting for faster initial Admin Panel load (H2)
+const AdminAnalytics = lazy(() =>
+  import('./AdminAnalytics').then((m) => ({ default: m.AdminAnalytics })),
+);
+const AdminPayoutsAndQueries = lazy(() =>
+  import('./AdminPayoutsAndQueries').then((m) => ({ default: m.AdminPayoutsAndQueries })),
+);
+const BranchMaster = lazy(() =>
+  import('./BranchMaster').then((m) => ({ default: m.BranchMaster })),
+);
+const EmployeeMaster = lazy(() =>
+  import('./EmployeeMaster').then((m) => ({ default: m.EmployeeMaster })),
+);
+const ExcelImportWorkflow = lazy(() =>
+  import('./ExcelImportWorkflow').then((m) => ({ default: m.ExcelImportWorkflow })),
+);
+const HistoryAndReports = lazy(() =>
+  import('./HistoryAndReports').then((m) => ({ default: m.HistoryAndReports })),
+);
 
-const NAV_ITEMS: Array<{ id: AdminTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'analytics', label: 'Analytics & Targets', icon: BarChart3 },
+const NAV_ITEMS: Array<{
+  id: AdminNavTab;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}> = [
+  { id: 'overview', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'import', label: 'Excel Upload', icon: FileSpreadsheet },
+  { id: 'employees', label: 'Employees', icon: Users },
+  { id: 'branches', label: 'Branches', icon: Building2 },
   { id: 'payouts', label: 'Payouts & Queries', icon: Wallet },
-  { id: 'branches', label: 'Branch Master', icon: Building2 },
-  { id: 'employees', label: 'Employee Master', icon: Users },
-  { id: 'import', label: 'Daily Excel Import', icon: FileSpreadsheet },
-  { id: 'history', label: 'Reports & Audit', icon: History },
+  { id: 'analytics', label: 'Analytics & Targets', icon: BarChart3 },
+  { id: 'history', label: 'Approvals & Reports', icon: History },
 ];
 
 export function AdminShell() {
   const { user, logout } = useAuth();
-  const [activeTab, setActiveTab] = useState<AdminTab>('overview');
+  const [activeTab, setActiveTab] = useState<AdminNavTab>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
 
   const [branches, setBranches] = useState<Branch[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -97,6 +112,18 @@ export function AdminShell() {
   const [syncWarning, setSyncWarning] = useState<string | null>(null);
   const [copiedStaffLink, setCopiedStaffLink] = useState(false);
   const autoSyncedBranchesRef = useRef(false);
+
+  // Global keyboard shortcut Cmd+K / Ctrl+K for Global Search
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const handleCopyStaffAppLink = async () => {
     const staffUrl = getShareableStaffAppUrl();
@@ -189,55 +216,70 @@ export function AdminShell() {
     refreshAll();
   }, [refreshAll]);
 
-  const currentNavLabel = NAV_ITEMS.find((n) => n.id === activeTab)?.label || 'Overview';
+  const currentNavLabel = NAV_ITEMS.find((n) => n.id === activeTab)?.label || 'Dashboard';
+  const pendingApprovalCount = batches.filter(
+    (b) =>
+      b.status === 'VALIDATED' ||
+      b.status === 'APPROVED' ||
+      b.status === 'FAILED' ||
+      b.status === 'PROCESSING',
+  ).length;
+  const openQueriesCount = employeeQueries.filter((q) => q.status !== 'RESOLVED').length;
+  const adminInitials = (user?.email || 'SA').slice(0, 2).toUpperCase();
 
   return (
-    <div className="min-h-screen bg-[#F6F7F9] flex">
-      {/* Desktop Left Sidebar (264px) */}
-      <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-white border-r border-slate-200 z-20">
-        <div className="h-1 w-full bg-gradient-to-r from-[#B91C1C] via-[#DC2626] to-[#EA580C]" />
-        <div className="px-4 py-3.5 flex items-center gap-3 border-b border-slate-200">
-          <BrandLogo size="sm" />
+    <div className="min-h-screen bg-[#F5F7FA] flex">
+      {/* Desktop Executive Corporate Navy Sidebar (256px) */}
+      <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-[#0F1F3D] text-white border-r border-[#1E3A5F]/60 z-20">
+        <div className="h-1 w-full bg-gradient-to-r from-[#B8923A] via-[#DFC27D] to-[#B8923A]" />
+        <div className="px-4 py-4 flex items-center gap-3 border-b border-white/10">
+          <BrandLogo size="sm" className="border-[#B8923A]/40" />
           <div className="min-w-0">
-            <span className="text-sm font-bold tracking-tight text-slate-900 block truncate">
+            <span className="text-sm font-bold tracking-tight text-white block truncate">
               {COMPANY_BRAND.brandName}
             </span>
-            <span className="text-[10px] font-semibold text-[#9F1239] block truncate">
+            <span className="text-[10px] font-semibold text-[#DFC27D] block truncate">
               SHRIMUKTAI MART PVT. LTD.
             </span>
           </div>
         </div>
 
-        <nav className="flex-1 p-3.5 space-y-1 overflow-y-auto">
+        <nav className="flex-1 p-3 space-y-1 overflow-y-auto" aria-label="Admin Navigation">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const active = activeTab === item.id;
-            const openQueries =
+            const countBadge =
               item.id === 'payouts'
-                ? employeeQueries.filter((q) => q.status !== 'RESOLVED').length
-                : 0;
+                ? openQueriesCount
+                : item.id === 'history'
+                  ? pendingApprovalCount
+                  : 0;
             return (
               <button
                 key={item.id}
                 type="button"
                 onClick={() => setActiveTab(item.id)}
-                className={`w-full h-10 px-3 rounded-lg text-sm font-medium inline-flex items-center justify-between gap-2 transition-colors whitespace-nowrap cursor-pointer ${
+                className={`w-full h-10 px-3 rounded-xl text-sm font-medium inline-flex items-center justify-between gap-2 transition-all whitespace-nowrap cursor-pointer ${
                   active
-                    ? 'bg-[#9F1239] text-white shadow-xs'
-                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                    ? 'bg-white text-[#0F1F3D] font-semibold shadow-xs'
+                    : 'text-slate-300 hover:bg-white/10 hover:text-white'
                 }`}
               >
                 <span className="inline-flex items-center gap-3 min-w-0">
-                  <Icon className="w-4 h-4 shrink-0" />
+                  <Icon
+                    className={`w-4 h-4 shrink-0 ${
+                      active ? 'text-[#B8923A]' : 'text-slate-400'
+                    }`}
+                  />
                   <span className="truncate">{item.label}</span>
                 </span>
-                {openQueries > 0 && (
+                {countBadge > 0 && (
                   <span
-                    className={`text-[11px] font-mono font-semibold ${
-                      active ? 'text-amber-200' : 'text-[#9F1239]'
+                    className={`text-[11px] font-mono font-bold ${
+                      active ? 'text-[#9A7625]' : 'text-[#DFC27D]'
                     }`}
                   >
-                    {openQueries}
+                    {countBadge}
                   </span>
                 )}
               </button>
@@ -245,16 +287,20 @@ export function AdminShell() {
           })}
         </nav>
 
-        <div className="p-4 border-t border-slate-200 bg-slate-50/60">
-          <div className="mb-3 px-1">
-            <p className="text-xs font-semibold text-slate-900 truncate">Super Admin</p>
-            <p className="text-[11px] text-slate-500 truncate">{user?.email}</p>
-            <p className="text-[10px] text-slate-400 mt-1 truncate">Baramati, Pune · 413102</p>
+        <div className="p-4 border-t border-white/10 bg-[#0B172E]">
+          <div className="mb-3 flex items-center gap-2.5 px-1">
+            <div className="w-8 h-8 rounded-lg bg-[#1E3A5F] border border-[#B8923A]/40 text-[#DFC27D] text-xs font-bold flex items-center justify-center shrink-0">
+              {adminInitials}
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-white truncate">Super Admin</p>
+              <p className="text-[11px] text-slate-400 truncate">{user?.email}</p>
+            </div>
           </div>
           <button
             type="button"
             onClick={logout}
-            className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center justify-center gap-2 cursor-pointer"
+            className="w-full h-9 px-3 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 text-xs font-medium text-slate-200 inline-flex items-center justify-center gap-2 cursor-pointer transition-colors"
           >
             <LogOut className="w-3.5 h-3.5" />
             Sign Out
@@ -262,130 +308,175 @@ export function AdminShell() {
         </div>
       </aside>
 
-      {/* Mobile Drawer */}
-      {mobileMenuOpen && (
-        <div className="fixed inset-0 z-40 lg:hidden flex">
-          <div
-            className="fixed inset-0 bg-slate-900/40"
-            onClick={() => setMobileMenuOpen(false)}
-          />
-          <div className="relative w-72 max-w-[85vw] bg-white h-full flex flex-col border-r border-slate-200 z-50">
-            <div className="h-1 w-full bg-gradient-to-r from-[#B91C1C] via-[#DC2626] to-[#EA580C]" />
-            <div className="px-4 py-3.5 flex items-center justify-between border-b border-slate-200">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <BrandLogo size="sm" />
-                <div className="min-w-0">
-                  <span className="text-sm font-bold text-slate-900 block truncate">
-                    {COMPANY_BRAND.brandName}
-                  </span>
-                  <span className="text-[10px] font-semibold text-[#9F1239] block truncate">
-                    SHRIMUKTAI MART PVT. LTD.
-                  </span>
+      {/* Mobile Animated Navigation Drawer */}
+      <AnimatePresence>
+        {mobileMenuOpen && (
+          <div className="fixed inset-0 z-40 lg:hidden flex">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.16 }}
+              className="fixed inset-0 bg-[#0F1F3D]/50 backdrop-blur-xs"
+              onClick={() => setMobileMenuOpen(false)}
+            />
+            <motion.div
+              initial={{ x: '-100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-100%' }}
+              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+              className="relative w-72 max-w-[85vw] bg-[#0F1F3D] text-white h-full flex flex-col border-r border-white/10 z-50"
+            >
+              <div className="h-1 w-full bg-gradient-to-r from-[#B8923A] via-[#DFC27D] to-[#B8923A]" />
+              <div className="px-4 py-3.5 flex items-center justify-between border-b border-white/10">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <BrandLogo size="sm" className="border-[#B8923A]/40" />
+                  <div className="min-w-0">
+                    <span className="text-sm font-bold text-white block truncate">
+                      {COMPANY_BRAND.brandName}
+                    </span>
+                    <span className="text-[10px] font-semibold text-[#DFC27D] block truncate">
+                      SHRIMUKTAI MART PVT. LTD.
+                    </span>
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="p-2 text-slate-300 hover:text-white cursor-pointer"
+                  aria-label="Close navigation"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setMobileMenuOpen(false)}
-                className="p-2 text-slate-500 hover:text-slate-900"
-                aria-label="Close navigation"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
-              {NAV_ITEMS.map((item) => {
-                const Icon = item.icon;
-                const active = activeTab === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => {
-                      setActiveTab(item.id);
-                      setMobileMenuOpen(false);
-                    }}
-                    className={`w-full h-11 px-3 rounded-lg text-sm font-medium inline-flex items-center gap-3 ${
-                      active ? 'bg-[#9F1239] text-white' : 'text-slate-700 hover:bg-slate-100'
-                    }`}
-                  >
-                    <Icon className="w-4 h-4 shrink-0" />
-                    <span>{item.label}</span>
-                  </button>
-                );
-              })}
-            </nav>
-            <div className="p-4 border-t border-slate-200 bg-slate-50/70 space-y-3">
-              <p className="text-[11px] text-slate-500 leading-snug">
-                {COMPANY_BRAND.legalName} · Baramati, Pune - 413102
-              </p>
-              <button
-                type="button"
-                onClick={logout}
-                className="w-full h-10 px-3 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-700 inline-flex items-center justify-center gap-2"
-              >
-                <LogOut className="w-4 h-4" />
-                Sign Out
-              </button>
-            </div>
+              <nav className="flex-1 p-3.5 space-y-1 overflow-y-auto">
+                {NAV_ITEMS.map((item) => {
+                  const Icon = item.icon;
+                  const active = activeTab === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => {
+                        setActiveTab(item.id);
+                        setMobileMenuOpen(false);
+                      }}
+                      className={`w-full h-11 px-3 rounded-xl text-sm font-medium inline-flex items-center gap-3 cursor-pointer transition-colors ${
+                        active
+                          ? 'bg-white text-[#0F1F3D] font-semibold'
+                          : 'text-slate-200 hover:bg-white/10'
+                      }`}
+                    >
+                      <Icon
+                        className={`w-4 h-4 shrink-0 ${
+                          active ? 'text-[#B8923A]' : 'text-slate-400'
+                        }`}
+                      />
+                      <span>{item.label}</span>
+                    </button>
+                  );
+                })}
+              </nav>
+              <div className="p-4 border-t border-white/10 bg-[#0B172E] space-y-3">
+                <p className="text-[11px] text-slate-400 leading-snug">
+                  {COMPANY_BRAND.legalName} · Baramati, Pune - 413102
+                </p>
+                <button
+                  type="button"
+                  onClick={logout}
+                  className="w-full h-10 px-3 rounded-lg border border-white/15 bg-white/5 text-sm font-medium text-white inline-flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <LogOut className="w-4 h-4" />
+                  Sign Out
+                </button>
+              </div>
+            </motion.div>
           </div>
-        </div>
-      )}
+        )}
+      </AnimatePresence>
 
       {/* Main Content Viewport */}
       <div className="flex-1 lg:pl-64 flex flex-col min-w-0">
-        <header className="sticky top-0 z-10 h-16 bg-white border-b border-slate-200 px-6 flex items-center justify-between gap-4">
+        <header className="sticky top-0 z-10 h-16 bg-white/95 backdrop-blur-md border-b border-slate-200/90 px-4 sm:px-6 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
-              className="lg:hidden p-2 -ml-2 text-slate-600 hover:text-slate-900"
+              className="lg:hidden p-2 -ml-2 text-slate-600 hover:text-[#0F1F3D] cursor-pointer"
               aria-label="Open navigation"
             >
               <Menu className="w-5 h-5" />
             </button>
             <div className="flex items-center gap-2 text-sm min-w-0">
-              <span className="text-slate-400 hidden sm:inline whitespace-nowrap">Admin Panel</span>
+              <span className="text-slate-400 hidden sm:inline whitespace-nowrap">
+                Admin Panel
+              </span>
               <span className="text-slate-300 hidden sm:inline">/</span>
-              <h1 className="font-semibold text-slate-900 truncate">{currentNavLabel}</h1>
+              <h1 className="font-semibold text-[#0F1F3D] truncate">{currentNavLabel}</h1>
             </div>
           </div>
 
-          <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
+            {/* Global Search Trigger */}
             <button
               type="button"
-              onClick={handleCopyStaffAppLink}
-              title="Copy Employee Mobile App link (/?portal=staff)"
-              className="h-8 px-2.5 sm:px-3 rounded-lg bg-white hover:bg-rose-50 border border-slate-200/80 text-xs font-semibold text-[#9F1239] inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+              onClick={() => setSearchOpen(true)}
+              className="h-8 px-2.5 sm:px-3 rounded-lg bg-[#F5F7FA] hover:bg-slate-100 border border-slate-200/90 text-xs text-slate-600 inline-flex items-center gap-2 cursor-pointer transition-colors"
+              title="Global Search (Ctrl+K)"
             >
-              {copiedStaffLink ? (
-                <>
-                  <Check className="w-3.5 h-3.5 text-emerald-700" />
-                  <span className="text-emerald-800">Copied</span>
-                </>
-              ) : (
-                <>
-                  <Smartphone className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Staff App Link</span>
-                  <span className="sm:hidden">Staff App</span>
-                </>
-              )}
+              <Search className="w-3.5 h-3.5 text-[#1E3A5F]" />
+              <span className="hidden md:inline">Search...</span>
+              <kbd className="hidden lg:inline px-1.5 py-0.5 text-[10px] font-mono bg-white border border-slate-200 rounded text-slate-400">
+                Ctrl K
+              </kbd>
             </button>
-            <PWAInstallButton />
-            <button
-              type="button"
-              onClick={refreshAll}
-              disabled={loadingData}
-              className="h-8 px-2.5 sm:px-3 rounded-lg bg-white hover:bg-slate-50 border border-slate-200/80 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 transition-colors"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loadingData ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">Refresh</span>
-            </button>
+
+            {/* Notification Center Bell */}
+            <AdminNotificationCenter
+              batches={batches}
+              employeeQueries={employeeQueries}
+              onNavigate={(tab) => setActiveTab(tab)}
+            />
+
+            {/* Staff App Link + Install + Refresh */}
+            <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80 shrink-0">
+              <button
+                type="button"
+                onClick={handleCopyStaffAppLink}
+                title={`Copy Employee Mobile App link (${COMPANY_BRAND.staffDomain})`}
+                className="h-8 px-2.5 sm:px-3 rounded-lg bg-white hover:bg-slate-50 border border-slate-200/80 text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+              >
+                {copiedStaffLink ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-700" />
+                    <span className="text-emerald-800">Copied</span>
+                  </>
+                ) : (
+                  <>
+                    <Smartphone className="w-3.5 h-3.5 text-[#B8923A]" />
+                    <span className="hidden sm:inline">Staff App Link</span>
+                    <span className="sm:hidden">Staff</span>
+                  </>
+                )}
+              </button>
+              <PWAInstallButton />
+              <button
+                type="button"
+                onClick={refreshAll}
+                disabled={loadingData}
+                aria-label="Refresh workspace data"
+                className="h-8 px-2.5 sm:px-3 rounded-lg bg-white hover:bg-slate-50 border border-slate-200/80 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 transition-colors"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingData ? 'animate-spin' : ''}`} />
+                <span className="hidden md:inline">Refresh</span>
+              </button>
+            </div>
           </div>
         </header>
 
-        <main className="flex-1 p-6 max-w-7xl w-full mx-auto">
+        <main className="flex-1 p-4 sm:p-6 max-w-7xl w-full mx-auto">
           {syncWarning && (
-            <div className="mb-4 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center justify-between gap-3">
+            <div className="mb-4 px-4 py-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center justify-between gap-3">
               <span className="truncate">{syncWarning}</span>
               <button
                 type="button"
@@ -394,97 +485,116 @@ export function AdminShell() {
                   autoSyncedBranchesRef.current = false;
                   void refreshAll();
                 }}
-                className="px-2.5 py-1 rounded bg-amber-900 text-white font-medium shrink-0 cursor-pointer hover:bg-amber-800"
+                className="px-2.5 py-1 rounded-lg bg-[#0F1F3D] text-white font-medium shrink-0 cursor-pointer hover:bg-[#162B50]"
               >
                 Retry Sync
               </button>
             </div>
           )}
+
           {loadingData && branches.length === 0 && batches.length === 0 ? (
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-                {[1, 2, 3, 4].map((n) => (
-                  <div
-                    key={n}
-                    className="h-28 bg-white border border-slate-200 rounded-xl animate-pulse"
-                  />
-                ))}
-              </div>
-              <div className="h-80 bg-white border border-slate-200 rounded-xl animate-pulse" />
-            </div>
+            <WorkspaceSkeleton />
           ) : (
-            <>
-              {activeTab === 'overview' && (
-                <AdminOverview
-                  branches={branches}
-                  employees={employees}
-                  batches={batches}
-                  incentives={incentives}
-                  monthlySummaries={monthlySummaries}
-                  onNavigate={(tab) => setActiveTab(tab)}
-                />
-              )}
-              {activeTab === 'analytics' && (
-                <AdminAnalytics
-                  branches={branches}
-                  employees={employees}
-                  incentives={incentives}
-                  monthlySummaries={monthlySummaries}
-                  payoutRecords={payoutRecords}
-                  adjustments={adjustments}
-                  salesTargets={salesTargets}
-                  onRefresh={refreshAll}
-                />
-              )}
-              {activeTab === 'payouts' && (
-                <AdminPayoutsAndQueries
-                  branches={branches}
-                  employees={employees}
-                  incentives={incentives}
-                  monthlySummaries={monthlySummaries}
-                  payoutRecords={payoutRecords}
-                  adjustments={adjustments}
-                  employeeQueries={employeeQueries}
-                  onRefresh={refreshAll}
-                />
-              )}
-              {activeTab === 'branches' && (
-                <BranchMaster branches={branches} employees={employees} onRefresh={refreshAll} />
-              )}
-              {activeTab === 'employees' && (
-                <EmployeeMaster
-                  branches={branches}
-                  employees={employees}
-                  onRefresh={refreshAll}
-                />
-              )}
-              {activeTab === 'import' && (
-                <ExcelImportWorkflow
-                  branches={branches}
-                  employees={employees}
-                  publishedIncentives={incentives}
-                  onRefresh={refreshAll}
-                />
-              )}
-              {activeTab === 'history' && (
-                <HistoryAndReports
-                  branches={branches}
-                  employees={employees}
-                  batches={batches}
-                  incentives={incentives}
-                  monthlySummaries={monthlySummaries}
-                  versions={versions}
-                  auditLogs={auditLogs}
-                  payoutRecords={payoutRecords}
-                  adjustments={adjustments}
-                  onRefresh={refreshAll}
-                />
-              )}
-            </>
+            <AnimatePresence mode="wait">
+              <PageTransition key={activeTab}>
+                {activeTab === 'overview' && (
+                  <AdminOverview
+                    branches={branches}
+                    employees={employees}
+                    batches={batches}
+                    incentives={incentives}
+                    monthlySummaries={monthlySummaries}
+                    employeeQueries={employeeQueries}
+                    onNavigate={(tab) => setActiveTab(tab)}
+                  />
+                )}
+                {activeTab === 'analytics' && (
+                  <Suspense fallback={<WorkspaceSkeleton />}>
+                    <AdminAnalytics
+                      branches={branches}
+                      employees={employees}
+                      incentives={incentives}
+                      monthlySummaries={monthlySummaries}
+                      payoutRecords={payoutRecords}
+                      adjustments={adjustments}
+                      salesTargets={salesTargets}
+                      onRefresh={refreshAll}
+                    />
+                  </Suspense>
+                )}
+                {activeTab === 'payouts' && (
+                  <Suspense fallback={<WorkspaceSkeleton />}>
+                    <AdminPayoutsAndQueries
+                      branches={branches}
+                      employees={employees}
+                      incentives={incentives}
+                      monthlySummaries={monthlySummaries}
+                      payoutRecords={payoutRecords}
+                      adjustments={adjustments}
+                      employeeQueries={employeeQueries}
+                      onRefresh={refreshAll}
+                    />
+                  </Suspense>
+                )}
+                {activeTab === 'branches' && (
+                  <Suspense fallback={<WorkspaceSkeleton />}>
+                    <BranchMaster
+                      branches={branches}
+                      employees={employees}
+                      onRefresh={refreshAll}
+                    />
+                  </Suspense>
+                )}
+                {activeTab === 'employees' && (
+                  <Suspense fallback={<WorkspaceSkeleton />}>
+                    <EmployeeMaster
+                      branches={branches}
+                      employees={employees}
+                      onRefresh={refreshAll}
+                    />
+                  </Suspense>
+                )}
+                {activeTab === 'import' && (
+                  <Suspense fallback={<WorkspaceSkeleton />}>
+                    <ExcelImportWorkflow
+                      branches={branches}
+                      employees={employees}
+                      publishedIncentives={incentives}
+                      onRefresh={refreshAll}
+                    />
+                  </Suspense>
+                )}
+                {activeTab === 'history' && (
+                  <Suspense fallback={<WorkspaceSkeleton />}>
+                    <HistoryAndReports
+                      branches={branches}
+                      employees={employees}
+                      batches={batches}
+                      incentives={incentives}
+                      monthlySummaries={monthlySummaries}
+                      versions={versions}
+                      auditLogs={auditLogs}
+                      payoutRecords={payoutRecords}
+                      adjustments={adjustments}
+                      onRefresh={refreshAll}
+                    />
+                  </Suspense>
+                )}
+              </PageTransition>
+            </AnimatePresence>
           )}
           <CompanyFooter />
         </main>
       </div>
+
+      <AdminGlobalSearch
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        branches={branches}
+        employees={employees}
+        batches={batches}
+        onNavigate={(tab) => setActiveTab(tab)}
+      />
       <OfflineIndicator />
     </div>
   );

@@ -1,5 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import {
+  Award,
+  BarChart3,
   Bell,
   Calendar,
   Check,
@@ -7,10 +9,10 @@ import {
   EyeOff,
   FileDown,
   Home,
-  KeyRound,
   Lock,
   LogOut,
   MessageSquare,
+  Settings,
   ShieldCheck,
   ShieldOff,
   Target,
@@ -19,6 +21,7 @@ import {
   User,
   Wallet,
 } from 'lucide-react';
+import { AnimatePresence, motion } from 'motion/react';
 import { useAuth } from '../../context/AuthContext';
 import { COMPANY_BRAND, DEFAULT_EMPLOYEE_PASSWORD } from '../../lib/companyBrand';
 import {
@@ -39,6 +42,10 @@ import {
   partitionEmployeeRecords,
 } from '../../lib/incentiveEngine';
 import { downloadEmployeeIncentiveSlipPdf } from '../../lib/pdfGenerator';
+import {
+  computeGrowthPctOverBaseline,
+  computeTargetProgress,
+} from '../../lib/targetCalculations';
 import {
   markNotificationRead,
   subscribeOwnMonthlySummaries,
@@ -64,10 +71,17 @@ import type {
   SalesTarget,
 } from '../../types/incentive';
 import { BrandLogo, CompanyFooter } from '../common/BrandLogo';
+import { AnimatedCounter, PageTransition, WorkspaceSkeleton } from '../common/MotionPrimitives';
 import { OfflineIndicator } from '../common/OfflineIndicator';
 import { PWAInstallButton } from '../common/PWAInstallButton';
+import { EmployeeSettingsTab } from './EmployeeSettingsTab';
 
-type StaffTab = 'home' | 'statements' | 'history' | 'queries' | 'profile';
+const EmployeeReportsTab = lazy(() =>
+  import('./EmployeeReportsTab').then((m) => ({ default: m.EmployeeReportsTab })),
+);
+
+type StaffTab = 'home' | 'statements' | 'reports' | 'profile' | 'settings';
+type ProfileSubView = 'details' | 'queries';
 
 interface StatementRowProps {
   rec: PublishedIncentive;
@@ -108,10 +122,10 @@ function StatementRecordCard({ rec, t, onDownloadPdf }: StatementRowProps) {
     <div className="p-4 sm:p-5 space-y-3.5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-[#9F1239]">
+          <p className="text-[11px] font-semibold tracking-wide text-[#9A7625]">
             {typeLabel}
           </p>
-          <p className="text-sm font-semibold text-slate-900 mt-0.5 leading-snug">{dateRange}</p>
+          <p className="text-sm font-semibold text-[#0F1F3D] mt-0.5 leading-snug">{dateRange}</p>
           <p className="text-xs text-slate-500 mt-0.5 truncate">
             {rec.branchName}
             {rec.version > 1 ? ` · Revised v${rec.version}` : ''}
@@ -119,7 +133,7 @@ function StatementRecordCard({ rec, t, onDownloadPdf }: StatementRowProps) {
         </div>
 
         <div className="text-right shrink-0">
-          <p className="text-base sm:text-lg font-bold font-mono tabular-nums text-slate-900 leading-tight">
+          <p className="text-base sm:text-lg font-bold font-mono tabular-nums text-[#0F1F3D] leading-tight">
             {formatINRFromPaise(rec.totalPaise)}
           </p>
           <p className="text-[11px] font-mono tabular-nums text-slate-500 mt-1">
@@ -132,7 +146,7 @@ function StatementRecordCard({ rec, t, onDownloadPdf }: StatementRowProps) {
       </div>
 
       {/* 3-Slab Clean Aligned Rows on Mobile, 3 Equal Columns on Tablet/Desktop */}
-      <div className="rounded-xl bg-slate-50/90 border border-slate-100 divide-y divide-slate-200/70 sm:divide-y-0 sm:grid sm:grid-cols-3 sm:divide-x">
+      <div className="rounded-xl bg-[#F8FAFC] border border-slate-200/70 divide-y divide-slate-200/70 sm:divide-y-0 sm:grid sm:grid-cols-3 sm:divide-x">
         {slabs.map((slab) => (
           <div
             key={slab.label}
@@ -144,7 +158,7 @@ function StatementRecordCard({ rec, t, onDownloadPdf }: StatementRowProps) {
                 {t.saleLabel}: {formatINRFromPaise(slab.sale)} · {t.qtyLabel}: {formatQty(slab.qty)}
               </p>
             </div>
-            <p className="text-sm font-mono tabular-nums font-semibold text-slate-900 shrink-0 sm:mt-1.5">
+            <p className="text-sm font-mono tabular-nums font-semibold text-[#0F1F3D] shrink-0 sm:mt-1.5">
               {formatINRFromPaise(slab.inc)}
             </p>
           </div>
@@ -155,9 +169,9 @@ function StatementRecordCard({ rec, t, onDownloadPdf }: StatementRowProps) {
         <button
           type="button"
           onClick={() => onDownloadPdf(rec)}
-          className="min-h-[38px] px-3.5 rounded-lg border border-rose-200 bg-rose-50/70 hover:bg-rose-100/80 text-xs font-semibold text-[#9F1239] inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+          className="min-h-[40px] px-3.5 rounded-lg border border-[#0F1F3D]/20 bg-[#0F1F3D]/[0.04] hover:bg-[#0F1F3D]/[0.08] active:scale-[0.98] text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1.5 cursor-pointer transition-all"
         >
-          <FileDown className="w-3.5 h-3.5" />
+          <FileDown className="w-3.5 h-3.5 text-[#B8923A]" />
           <span>{t.downloadPdfSlip}</span>
         </button>
       </div>
@@ -179,6 +193,7 @@ export function EmployeePortal() {
   const isMr = lang === 'mr';
 
   const [activeTab, setActiveTab] = useState<StaffTab>('home');
+  const [profileSubView, setProfileSubView] = useState<ProfileSubView>('details');
   const [incentives, setIncentives] = useState<PublishedIncentive[]>([]);
   const [summaries, setSummaries] = useState<MonthlySummary[]>([]);
   const [notifications, setNotifications] = useState<EmployeeNotification[]>([]);
@@ -187,7 +202,9 @@ export function EmployeePortal() {
   const [salesTargets, setSalesTargets] = useState<SalesTarget[]>([]);
   const [queries, setQueries] = useState<EmployeeQuery[]>([]);
   const [selectedMonth, setSelectedMonth] = useState('');
+  const [selectedTargetMonth, setSelectedTargetMonth] = useState('');
   const [loading, setLoading] = useState(true);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Query form state
   const [queryMonth, setQueryMonth] = useState(getCurrentMonthKeyIST());
@@ -199,12 +216,14 @@ export function EmployeePortal() {
     null,
   );
 
-  // Profile form state
+  // Profile form state (H3 fix: structured ok/err feedback)
   const [phone, setPhone] = useState(employeeProfile?.phone || '');
   const [address, setAddress] = useState(employeeProfile?.address || '');
   const [emergencyContact, setEmergencyContact] = useState(employeeProfile?.emergencyContact || '');
   const [profileSaving, setProfileSaving] = useState(false);
-  const [profileMessage, setProfileMessage] = useState<string | null>(null);
+  const [profileMessage, setProfileMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(
+    null,
+  );
 
   // Change password state
   const [newPassword, setNewPassword] = useState('');
@@ -223,8 +242,6 @@ export function EmployeePortal() {
   const requiresFirstLoginPasswordChange = Boolean(employeeProfile?.mustChangePassword);
 
   // Real-time Firestore live subscriptions across ALL employee-scoped collections.
-  // Any Admin publish, batch edit/delete, payout update, bonus/deduction, sales target,
-  // or query reply syncs automatically in real time without manual refresh.
   useEffect(() => {
     if (!employeeLoginGate.allowed || requiresFirstLoginPasswordChange || !user?.uid) {
       setIncentives([]);
@@ -247,7 +264,6 @@ export function EmployeePortal() {
       }
     };
 
-    // Safety fallback so initial spinner never hangs if a listener takes long offline
     const fallbackTimer = window.setTimeout(() => setLoading(false), 3500);
 
     const uid = user.uid;
@@ -360,24 +376,71 @@ export function EmployeePortal() {
     [payoutRecords, selectedMonth],
   );
 
-  const selectedMonthTarget = useMemo(() => {
-    if (!employeeProfile) return null;
-    const personal = salesTargets.find(
-      (tgt) =>
-        tgt.monthKey === selectedMonth &&
+  // All months that have a Personal or Branch target for this employee
+  const relevantTargetMonths = useMemo(() => {
+    if (!employeeProfile) return [];
+    const set = new Set<string>();
+    for (const tgt of salesTargets) {
+      const isPersonal =
         tgt.scope === 'EMPLOYEE' &&
-        tgt.employeeId?.toUpperCase() === employeeProfile.employeeId.toUpperCase(),
-    );
-    if (personal) return personal;
+        tgt.employeeId?.toUpperCase() === employeeProfile.employeeId.toUpperCase();
+      const isOwnBranch = tgt.scope === 'BRANCH' && tgt.branchId === employeeProfile.branchId;
+      if (isPersonal || isOwnBranch) {
+        set.add(tgt.monthKey);
+      }
+    }
+    return Array.from(set).sort((a, b) => b.localeCompare(a));
+  }, [salesTargets, employeeProfile]);
+
+  // Keep selectedTargetMonth focused on the newest target month (even if that month has 0 sales published yet!)
+  useEffect(() => {
+    if (relevantTargetMonths.length === 0) {
+      if (selectedTargetMonth !== '') setSelectedTargetMonth('');
+      return;
+    }
+    if (!relevantTargetMonths.includes(selectedTargetMonth)) {
+      setSelectedTargetMonth(relevantTargetMonths[0]);
+    }
+  }, [relevantTargetMonths, selectedTargetMonth]);
+
+  const activeTargetMonth = selectedTargetMonth || selectedMonth;
+
+  const personalMonthTarget = useMemo(() => {
+    if (!employeeProfile || !activeTargetMonth) return null;
     return (
       salesTargets.find(
         (tgt) =>
-          tgt.monthKey === selectedMonth &&
+          tgt.monthKey === activeTargetMonth &&
+          tgt.scope === 'EMPLOYEE' &&
+          tgt.employeeId?.toUpperCase() === employeeProfile.employeeId.toUpperCase(),
+      ) || null
+    );
+  }, [salesTargets, activeTargetMonth, employeeProfile]);
+
+  const branchMonthTarget = useMemo(() => {
+    if (!employeeProfile || !activeTargetMonth) return null;
+    return (
+      salesTargets.find(
+        (tgt) =>
+          tgt.monthKey === activeTargetMonth &&
           tgt.scope === 'BRANCH' &&
           tgt.branchId === employeeProfile.branchId,
       ) || null
     );
-  }, [salesTargets, selectedMonth, employeeProfile]);
+  }, [salesTargets, activeTargetMonth, employeeProfile]);
+
+  const selectedMonthTarget = personalMonthTarget || branchMonthTarget;
+
+  const targetMonthAgg = useMemo(() => {
+    if (!employeeProfile || !activeTargetMonth) return null;
+    return aggregateEmployeeMonth(incentives, employeeProfile.employeeId, activeTargetMonth);
+  }, [incentives, employeeProfile, activeTargetMonth]);
+
+  const targetBaselineMonth = activeTargetMonth ? getPreviousMonthKey(activeTargetMonth) : '';
+  const targetBaselineAgg = useMemo(() => {
+    if (!employeeProfile || !targetBaselineMonth) return null;
+    return aggregateEmployeeMonth(incentives, employeeProfile.employeeId, targetBaselineMonth);
+  }, [incentives, employeeProfile, targetBaselineMonth]);
 
   const momDelta = useMemo(() => {
     const curr = selectedMonthAgg?.grandTotalPaise || 0;
@@ -410,17 +473,18 @@ export function EmployeePortal() {
       .filter((agg) => agg.sourceType !== 'NO_DATA');
   }, [availableMonths, incentives, employeeProfile]);
 
+  // All-time total published incentive (strictly double-counting-safe across all published months)
+  const allTimePublishedPaise = useMemo(
+    () => safeMonthlyHistory.reduce((acc, m) => acc + m.grandTotalPaise, 0),
+    [safeMonthlyHistory],
+  );
+
   const latestRecord = useMemo(
     () => incentives.find((r) => r.status === 'PUBLISHED') || null,
     [incentives],
   );
   const unreadCount = notifications.filter((n) => !n.read).length;
   const openQueriesCount = queries.filter((q) => q.status !== 'RESOLVED').length;
-
-  const maxHistoryPaise = useMemo(
-    () => Math.max(1, ...safeMonthlyHistory.map((s) => s.grandTotalPaise)),
-    [safeMonthlyHistory],
-  );
 
   const initials = useMemo(() => {
     const parts = (employeeProfile?.fullName || 'HM').trim().split(/\s+/);
@@ -531,6 +595,7 @@ export function EmployeePortal() {
     }
   };
 
+  // H3 Fix: Proper try/catch error feedback for profile save
   const handleProfileSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!employeeProfile) return;
@@ -543,9 +608,17 @@ export function EmployeePortal() {
         emergencyContact,
       });
       await refreshEmployeeProfile();
-      setProfileMessage(
-        isMr ? 'तुमची माहिती यशस्वीरित्या सेव्ह झाली.' : 'Profile details updated successfully.',
-      );
+      setProfileMessage({
+        type: 'ok',
+        text: isMr
+          ? 'तुमची माहिती यशस्वीरित्या सेव्ह झाली.'
+          : 'Profile details updated successfully.',
+      });
+    } catch (err) {
+      setProfileMessage({
+        type: 'err',
+        text: err instanceof Error && err.message ? err.message : t.profileSaveError,
+      });
     } finally {
       setProfileSaving(false);
     }
@@ -616,37 +689,50 @@ export function EmployeePortal() {
     }
   };
 
+  // H3 Fix: Proper try/catch error handling for marking notifications read
   const handleMarkRead = async (notificationId: string) => {
-    await markNotificationRead(notificationId);
+    setActionError(null);
+    try {
+      await markNotificationRead(notificationId);
+    } catch {
+      setActionError(
+        isMr
+          ? 'सूचना अपडेट करता आली नाही. कृपया पुन्हा प्रयत्न करा.'
+          : 'Unable to update notification right now. Please try again.',
+      );
+    }
   };
 
   // Strict Deactivated Employee Block
   if (!employeeLoginGate.allowed) {
     const isDeactivated = employeeLoginGate.code === 'ACCOUNT_DEACTIVATED';
     return (
-      <div className="min-h-screen bg-[#F6F7F9] flex items-center justify-center p-5">
-        <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl p-7 text-center space-y-4 shadow-xs">
-          <div className="w-12 h-12 rounded-xl bg-red-50 text-red-700 flex items-center justify-center mx-auto">
-            <ShieldOff className="w-6 h-6" />
+      <div className="min-h-screen bg-[#F5F7FA] flex items-center justify-center p-5">
+        <div className="max-w-md w-full bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-xs">
+          <div className="h-1 w-full bg-red-600" />
+          <div className="p-7 text-center space-y-4">
+            <div className="w-12 h-12 rounded-xl bg-red-50 text-red-700 flex items-center justify-center mx-auto">
+              <ShieldOff className="w-6 h-6" />
+            </div>
+            <h1 className="text-lg font-semibold text-[#0F1F3D]">
+              {isDeactivated
+                ? 'Employee Account Deactivated'
+                : 'Account Not Linked to Employee Master'}
+            </h1>
+            <p className="text-sm text-slate-600 leading-relaxed">{employeeLoginGate.message}</p>
+            {isDeactivated && employeeProfile && (
+              <p className="text-xs font-mono text-slate-500">
+                Salesman No: {employeeProfile.employeeId} · Status: INACTIVE
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={logout}
+              className="h-11 px-5 rounded-xl bg-[#0F1F3D] hover:bg-[#162B50] text-white text-sm font-semibold cursor-pointer transition-colors"
+            >
+              {t.signOut}
+            </button>
           </div>
-          <h1 className="text-lg font-semibold text-slate-900">
-            {isDeactivated
-              ? 'Employee Account Deactivated'
-              : 'Account Not Linked to Employee Master'}
-          </h1>
-          <p className="text-sm text-slate-600 leading-relaxed">{employeeLoginGate.message}</p>
-          {isDeactivated && employeeProfile && (
-            <p className="text-xs font-mono text-slate-500">
-              Salesman No: {employeeProfile.employeeId} · Status: INACTIVE
-            </p>
-          )}
-          <button
-            type="button"
-            onClick={logout}
-            className="h-11 px-5 rounded-xl bg-slate-900 text-white text-sm font-medium cursor-pointer"
-          >
-            {t.signOut}
-          </button>
         </div>
       </div>
     );
@@ -655,13 +741,13 @@ export function EmployeePortal() {
   // Strict Mandatory First-Login Password Setup Gate
   if (requiresFirstLoginPasswordChange && employeeProfile) {
     return (
-      <div className="min-h-[100dvh] w-full overflow-x-hidden bg-[#F6F7F9] flex flex-col">
-        <div className="h-1 w-full bg-gradient-to-r from-[#B91C1C] via-[#DC2626] to-[#EA580C]" />
-        <header className="sticky top-0 z-30 h-14 bg-white/95 backdrop-blur-md border-b border-slate-200">
+      <div className="min-h-[100dvh] w-full overflow-x-hidden bg-[#F5F7FA] flex flex-col">
+        <div className="h-1 w-full bg-gradient-to-r from-[#0F1F3D] via-[#1E3A5F] to-[#B8923A]" />
+        <header className="sticky top-0 z-30 h-14 bg-white/95 backdrop-blur-md border-b border-slate-200/90">
           <div className="max-w-md mx-auto px-3.5 h-full flex items-center justify-between gap-2">
             <div className="flex items-center gap-2.5 min-w-0">
               <BrandLogo size="xs" />
-              <p className="text-sm font-bold text-slate-900 truncate leading-tight">
+              <p className="text-sm font-bold text-[#0F1F3D] truncate leading-tight">
                 {COMPANY_BRAND.brandName}
               </p>
             </div>
@@ -671,7 +757,7 @@ export function EmployeePortal() {
                   type="button"
                   onClick={() => toggleLang('en')}
                   className={`h-7 px-2 rounded-lg font-semibold cursor-pointer ${
-                    lang === 'en' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                    lang === 'en' ? 'bg-[#0F1F3D] text-white shadow-xs' : 'text-slate-600'
                   }`}
                 >
                   EN
@@ -680,7 +766,7 @@ export function EmployeePortal() {
                   type="button"
                   onClick={() => toggleLang('mr')}
                   className={`h-7 px-2 rounded-lg font-semibold cursor-pointer ${
-                    lang === 'mr' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                    lang === 'mr' ? 'bg-[#0F1F3D] text-white shadow-xs' : 'text-slate-600'
                   }`}
                 >
                   मराठी
@@ -690,7 +776,7 @@ export function EmployeePortal() {
                 type="button"
                 onClick={logout}
                 aria-label={t.signOut}
-                className="h-7 w-8 rounded-lg bg-white border border-slate-200/80 text-slate-600 hover:text-slate-900 inline-flex items-center justify-center cursor-pointer"
+                className="h-7 w-8 rounded-lg bg-white border border-slate-200/80 text-slate-600 hover:text-[#0F1F3D] inline-flex items-center justify-center cursor-pointer"
               >
                 <LogOut className="w-3.5 h-3.5" />
               </button>
@@ -699,11 +785,11 @@ export function EmployeePortal() {
         </header>
 
         <main className="flex-1 flex items-center justify-center p-3.5 sm:p-6">
-          <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
-            <div className="bg-slate-950 text-white px-4 py-4 relative">
-              <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-[#B91C1C] via-[#DC2626] to-[#EA580C]" />
+          <div className="w-full max-w-md bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-xs">
+            <div className="bg-[#0F1F3D] text-white px-5 py-4 relative">
+              <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-[#B8923A] via-[#DFC27D] to-[#B8923A]" />
               <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-rose-900/40 border border-rose-500/30 text-amber-300 flex items-center justify-center shrink-0">
+                <div className="w-9 h-9 rounded-xl bg-white/10 border border-[#B8923A]/40 text-[#DFC27D] flex items-center justify-center shrink-0">
                   <Lock className="w-4 h-4" />
                 </div>
                 <div className="min-w-0">
@@ -717,7 +803,7 @@ export function EmployeePortal() {
               </div>
             </div>
 
-            <div className="p-4 sm:p-5 space-y-4">
+            <div className="p-5 space-y-4">
               <p className="text-xs text-slate-600 leading-snug">
                 {isMr
                   ? 'प्रथम लॉगिनसाठी किमान ८ अक्षरांचा तुमचा वैयक्तिक पासवर्ड सेट करा.'
@@ -743,7 +829,9 @@ export function EmployeePortal() {
                     htmlFor="first-new-password"
                     className="block text-xs font-semibold text-slate-700 mb-1.5"
                   >
-                    {isMr ? 'नवीन पासवर्ड (किमान ८ अक्षरे)' : 'New Personal Password (min 8 characters)'}
+                    {isMr
+                      ? 'नवीन पासवर्ड (किमान ८ अक्षरे)'
+                      : 'New Personal Password (min 8 characters)'}
                   </label>
                   <div className="relative">
                     <input
@@ -755,13 +843,13 @@ export function EmployeePortal() {
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
                       placeholder={isMr ? 'तुमच्या पसंतीचा नवीन पासवर्ड टाका' : 'Enter your new password'}
-                      className="w-full h-12 pl-3.5 pr-12 rounded-xl border border-slate-300 bg-white text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-rose-900/20 focus:border-rose-900"
+                      className="w-full h-12 pl-3.5 pr-12 rounded-xl border border-slate-300 bg-white text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
                     />
                     <button
                       type="button"
                       onClick={() => setShowNewPassword((prev) => !prev)}
                       aria-label={showNewPassword ? 'Hide password' : 'Show password'}
-                      className="absolute right-1 top-1 h-10 w-10 inline-flex items-center justify-center text-slate-500 hover:text-slate-900 rounded-lg cursor-pointer"
+                      className="absolute right-1 top-1 h-10 w-10 inline-flex items-center justify-center text-slate-500 hover:text-[#0F1F3D] rounded-lg cursor-pointer"
                     >
                       {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
@@ -785,13 +873,13 @@ export function EmployeePortal() {
                       value={confirmPassword}
                       onChange={(e) => setConfirmPassword(e.target.value)}
                       placeholder={isMr ? 'नवीन पासवर्ड पुन्हा टाका' : 'Re-enter your new password'}
-                      className="w-full h-12 pl-3.5 pr-12 rounded-xl border border-slate-300 bg-white text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-rose-900/20 focus:border-rose-900"
+                      className="w-full h-12 pl-3.5 pr-12 rounded-xl border border-slate-300 bg-white text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
                     />
                     <button
                       type="button"
                       onClick={() => setShowConfirmPassword((prev) => !prev)}
                       aria-label={showConfirmPassword ? 'Hide password' : 'Show password'}
-                      className="absolute right-1 top-1 h-10 w-10 inline-flex items-center justify-center text-slate-500 hover:text-slate-900 rounded-lg cursor-pointer"
+                      className="absolute right-1 top-1 h-10 w-10 inline-flex items-center justify-center text-slate-500 hover:text-[#0F1F3D] rounded-lg cursor-pointer"
                     >
                       {showConfirmPassword ? (
                         <EyeOff className="w-4 h-4" />
@@ -805,9 +893,9 @@ export function EmployeePortal() {
                 <button
                   type="submit"
                   disabled={pwdSaving}
-                  className="w-full h-12 px-4 rounded-xl bg-[#9F1239] hover:bg-[#881337] text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-60 cursor-pointer"
+                  className="w-full h-12 px-4 rounded-xl bg-[#0F1F3D] hover:bg-[#162B50] active:scale-[0.99] text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer"
                 >
-                  <ShieldCheck className="w-4 h-4" />
+                  <ShieldCheck className="w-4 h-4 text-[#DFC27D]" />
                   <span>
                     {pwdSaving
                       ? isMr
@@ -832,17 +920,37 @@ export function EmployeePortal() {
 
   const grossIncentivePaise = selectedMonthAgg?.grandTotalPaise || 0;
   const netPayablePaise = grossIncentivePaise + selectedMonthAdjNetPaise;
+  const previousMonthPaise = previousMonthAgg?.grandTotalPaise || 0;
   const achievedSalePaise = selectedMonthAgg?.totalSaleAmtPaise || 0;
   const achievedSaleQty = selectedMonthAgg?.totalSaleQty || 0;
 
-  const targetSalePct =
-    selectedMonthTarget && selectedMonthTarget.targetSaleAmtPaise > 0
-      ? Math.round((achievedSalePaise / selectedMonthTarget.targetSaleAmtPaise) * 100)
-      : 0;
-  const targetRemainingPaise =
-    selectedMonthTarget && selectedMonthTarget.targetSaleAmtPaise > 0
-      ? Math.max(0, selectedMonthTarget.targetSaleAmtPaise - achievedSalePaise)
-      : 0;
+  const targetAchievedSalePaise = targetMonthAgg?.totalSaleAmtPaise || 0;
+  const targetAchievedSaleQty = targetMonthAgg?.totalSaleQty || 0;
+  const targetBaselineSalePaise = targetBaselineAgg?.totalSaleAmtPaise || 0;
+
+  const targetProgress = computeTargetProgress({
+    achievedSalePaise: targetAchievedSalePaise,
+    targetSaleAmtPaise: selectedMonthTarget?.targetSaleAmtPaise || 0,
+    achievedQty: targetAchievedSaleQty,
+    targetSaleQty: selectedMonthTarget?.targetSaleQty || 0,
+  });
+
+  const targetGrowthPct =
+    selectedMonthTarget && selectedMonthTarget.scope === 'EMPLOYEE'
+      ? computeGrowthPctOverBaseline(
+          selectedMonthTarget.targetSaleAmtPaise,
+          targetBaselineSalePaise,
+        )
+      : null;
+
+  const targetStatusBadgeLabel =
+    targetProgress.status === 'ACHIEVED'
+      ? t.targetCompleted
+      : targetProgress.status === 'ON_TRACK'
+        ? t.targetOnTrack
+        : targetProgress.status === 'IN_PROGRESS'
+          ? t.targetInProgress
+          : t.targetNotStarted;
 
   const payoutStatusLabel =
     selectedMonthPayout?.status === 'PAID'
@@ -872,38 +980,48 @@ export function EmployeePortal() {
     },
   ];
 
+  const desktopTabs: Array<[StaffTab, string]> = [
+    ['home', t.tabOverview],
+    ['statements', t.tabStatements],
+    ['reports', t.tabHistory],
+    ['profile', t.tabProfile],
+    ['settings', t.tabSettings],
+  ];
+
+  const mobileNavTabs: Array<
+    [StaffTab, string, React.ComponentType<{ className?: string }>, boolean]
+  > = [
+    ['home', t.tabOverview, Home, unreadCount > 0],
+    ['statements', t.tabStatements, Calendar, false],
+    ['reports', t.tabHistory, BarChart3, false],
+    ['profile', t.tabProfile, User, openQueriesCount > 0],
+    ['settings', t.tabSettings, Settings, false],
+  ];
+
   return (
-    <div className="min-h-[100dvh] w-full overflow-x-hidden bg-[#F6F7F9] pb-[calc(76px+env(safe-area-inset-bottom))] lg:pb-10">
-      <div className="h-1 w-full bg-gradient-to-r from-[#B91C1C] via-[#DC2626] to-[#EA580C]" />
+    <div className="min-h-[100dvh] w-full overflow-x-hidden bg-[#F5F7FA] pb-[calc(76px+env(safe-area-inset-bottom))] lg:pb-10">
+      <div className="h-1 w-full bg-gradient-to-r from-[#0F1F3D] via-[#1E3A5F] to-[#B8923A]" />
 
       {/* Compact Sticky Mobile App Bar (56px) */}
-      <header className="sticky top-0 z-30 h-14 bg-white/95 backdrop-blur-md border-b border-slate-200">
+      <header className="sticky top-0 z-30 h-14 bg-white/95 backdrop-blur-md border-b border-slate-200/90">
         <div className="max-w-5xl mx-auto px-3.5 sm:px-6 h-full flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             <BrandLogo size="xs" />
-            <span className="text-sm font-bold tracking-tight text-slate-900 truncate">
+            <span className="text-sm font-bold tracking-tight text-[#0F1F3D] truncate">
               {t.brand}
             </span>
           </div>
 
           <nav className="hidden lg:flex items-center gap-6 text-sm font-medium">
-            {(
-              [
-                ['home', t.tabOverview],
-                ['statements', t.tabStatements],
-                ['history', t.tabHistory],
-                ['queries', t.tabQueries],
-                ['profile', t.tabProfile],
-              ] as Array<[StaffTab, string]>
-            ).map(([tab, label]) => (
+            {desktopTabs.map(([tab, label]) => (
               <button
                 key={tab}
                 type="button"
                 onClick={() => setActiveTab(tab)}
                 className={`py-1.5 transition-colors whitespace-nowrap cursor-pointer ${
                   activeTab === tab
-                    ? 'text-[#9F1239] border-b-2 border-[#9F1239] font-semibold'
-                    : 'text-slate-600 hover:text-slate-900'
+                    ? 'text-[#0F1F3D] border-b-2 border-[#B8923A] font-semibold'
+                    : 'text-slate-600 hover:text-[#0F1F3D]'
                 }`}
               >
                 {label}
@@ -911,14 +1029,14 @@ export function EmployeePortal() {
             ))}
           </nav>
 
-          {/* Unified Mobile Header Action Tray */}
+          {/* Compact Header Action Tray */}
           <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80 shrink-0">
             <div role="group" aria-label="Language switch" className="inline-flex text-[11px]">
               <button
                 type="button"
                 onClick={() => toggleLang('en')}
                 className={`h-7 px-2 rounded-lg font-semibold cursor-pointer transition-colors ${
-                  lang === 'en' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                  lang === 'en' ? 'bg-[#0F1F3D] text-white shadow-xs' : 'text-slate-600'
                 }`}
               >
                 EN
@@ -927,7 +1045,7 @@ export function EmployeePortal() {
                 type="button"
                 onClick={() => toggleLang('mr')}
                 className={`h-7 px-2 rounded-lg font-semibold cursor-pointer transition-colors ${
-                  lang === 'mr' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                  lang === 'mr' ? 'bg-[#0F1F3D] text-white shadow-xs' : 'text-slate-600'
                 }`}
               >
                 मराठी
@@ -938,7 +1056,7 @@ export function EmployeePortal() {
               type="button"
               onClick={logout}
               aria-label={t.signOut}
-              className="h-7 px-2 rounded-lg bg-white border border-slate-200/80 text-xs font-medium text-slate-600 hover:text-slate-900 inline-flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer"
+              className="h-7 px-2 rounded-lg bg-white border border-slate-200/80 text-xs font-medium text-slate-600 hover:text-[#0F1F3D] inline-flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">{t.signOut}</span>
@@ -947,7 +1065,7 @@ export function EmployeePortal() {
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-3.5 sm:px-6 py-3.5 sm:py-6 space-y-3.5 sm:space-y-5">
+      <main className="max-w-5xl mx-auto px-3.5 sm:px-6 py-4 sm:py-6 space-y-4 sm:space-y-5">
         {justUnlockedPortal && (
           <div className="p-3.5 sm:p-4 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-3 text-xs sm:text-sm text-emerald-900">
             <div className="flex items-center gap-2.5 min-w-0">
@@ -968,18 +1086,34 @@ export function EmployeePortal() {
           </div>
         )}
 
+        {actionError && (
+          <div
+            role="alert"
+            className="p-3 rounded-xl bg-red-50 border border-red-200 flex items-center justify-between gap-3 text-xs text-red-800"
+          >
+            <span>{actionError}</span>
+            <button
+              type="button"
+              onClick={() => setActionError(null)}
+              className="px-2 py-1 rounded text-red-900 font-semibold hover:bg-red-100 cursor-pointer"
+            >
+              OK
+            </button>
+          </div>
+        )}
+
         {/* Executive Employee Identity Card */}
-        <section className="bg-white border border-slate-200 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-2xs">
+        <section className="bg-white border border-slate-200/90 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-2xs">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-11 h-11 rounded-xl bg-rose-50 border border-rose-200/80 text-[#9F1239] font-bold text-sm flex items-center justify-center shrink-0">
+            <div className="w-11 h-11 rounded-xl bg-[#0F1F3D] border border-[#B8923A]/40 text-[#DFC27D] font-bold text-sm flex items-center justify-center shrink-0 shadow-2xs">
               {initials}
             </div>
             <div className="min-w-0">
-              <h1 className="text-base sm:text-lg font-bold text-slate-900 truncate leading-tight">
+              <h1 className="text-base sm:text-lg font-bold text-[#0F1F3D] truncate leading-tight">
                 {employeeProfile!.fullName}
               </h1>
               <p className="text-xs text-slate-500 mt-0.5 truncate">
-                <span className="font-mono font-semibold text-slate-700">
+                <span className="font-mono font-semibold text-[#0F1F3D]">
                   #{employeeProfile!.employeeId}
                 </span>{' '}
                 · {employeeProfile!.branchName}
@@ -994,7 +1128,7 @@ export function EmployeePortal() {
                       behavior: 'smooth',
                     });
                   }}
-                  className="text-[11px] font-semibold text-[#9F1239] inline-flex items-center gap-1 mt-1 cursor-pointer hover:underline"
+                  className="text-[11px] font-semibold text-[#9A7625] inline-flex items-center gap-1 mt-1 cursor-pointer hover:underline"
                 >
                   <Bell className="w-3 h-3" />
                   <span>
@@ -1005,393 +1139,565 @@ export function EmployeePortal() {
             </div>
           </div>
 
-          <div className="shrink-0">
+          <div className="shrink-0 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('profile');
+                setProfileSubView('queries');
+              }}
+              className="hidden sm:inline-flex h-8 px-3 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-semibold text-[#0F1F3D] items-center gap-1.5 cursor-pointer transition-colors"
+            >
+              <MessageSquare className="w-3.5 h-3.5 text-[#B8923A]" />
+              <span>{t.tabQueries}</span>
+              {openQueriesCount > 0 && (
+                <span className="font-mono text-[11px] text-[#9A7625]">({openQueriesCount})</span>
+              )}
+            </button>
             <PWAInstallButton label={t.installApp} />
           </div>
         </section>
 
         {loading ? (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            <div className="lg:col-span-7 h-56 bg-white border border-slate-200 rounded-2xl animate-pulse" />
-            <div className="lg:col-span-5 h-56 bg-white border border-slate-200 rounded-2xl animate-pulse" />
-          </div>
+          <WorkspaceSkeleton />
         ) : (
-          <>
+          <AnimatePresence mode="wait">
             {/* =============================================================== */}
-            {/* OVERVIEW / HOME TAB                                             */}
+            {/* HOME TAB                                                        */}
             {/* =============================================================== */}
             {activeTab === 'home' && (
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6 items-start">
-                {/* Monthly Net Incentive Hero Card */}
-                <section className="lg:col-span-7 bg-slate-950 text-white rounded-2xl p-5 sm:p-6 space-y-5 relative overflow-hidden shadow-xs">
-                  <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-[#B91C1C] via-[#DC2626] to-[#EA580C]" />
-
-                  {/* Row 1: Month Selector + MoM Delta */}
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 min-w-0">
-                      {availableMonths.length > 1 ? (
-                        <select
-                          aria-label="Select incentive month"
-                          value={selectedMonth}
-                          onChange={(e) => setSelectedMonth(e.target.value)}
-                          className="h-9 px-3 rounded-xl bg-white/10 border border-white/15 text-xs font-semibold text-white focus:outline-none focus:ring-2 focus:ring-rose-400/50 cursor-pointer"
-                        >
-                          {availableMonths.map((m) => (
-                            <option key={m} value={m} className="text-slate-900">
-                              {formatMonthLabel(m)}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span className="text-xs font-semibold text-slate-200">
-                          {selectedMonth ? formatMonthLabel(selectedMonth) : t.noPublishedYet}
-                        </span>
-                      )}
-                    </div>
-
-                    {prevMonth && (
-                      <div className="text-right shrink-0">
-                        <span
-                          className={`inline-flex items-center gap-1 text-xs font-semibold font-mono tabular-nums ${
-                            momDelta.diff >= 0 ? 'text-emerald-300' : 'text-rose-300'
-                          }`}
-                        >
-                          {momDelta.diff >= 0 ? (
-                            <TrendingUp className="w-3.5 h-3.5" />
-                          ) : (
-                            <TrendingDown className="w-3.5 h-3.5" />
-                          )}
-                          <span>
-                            {momDelta.diff >= 0 ? '+' : ''}
-                            {momDelta.pct}%
-                          </span>
-                        </span>
-                        <p className="text-[10px] text-slate-400 leading-tight mt-0.5">
-                          {t.vsMonth} {formatMonthLabel(prevMonth)}
-                        </p>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Row 2: Main KPI Figure */}
-                  <div>
-                    <p className="text-xs text-slate-400 font-medium">{t.monthlyIncentive}</p>
-                    <p className="text-3xl sm:text-4xl font-bold font-mono tabular-nums tracking-tight text-white mt-1">
-                      {formatINRFromPaise(netPayablePaise)}
-                    </p>
-                    {selectedMonthAdjNetPaise !== 0 && (
-                      <p className="text-[11px] font-mono tabular-nums text-slate-300 mt-1.5">
-                        {t.grossIncentive}: {formatINRFromPaise(grossIncentivePaise)} ·{' '}
-                        {t.adjustments}: {selectedMonthAdjNetPaise > 0 ? '+' : ''}
-                        {formatINRFromPaise(selectedMonthAdjNetPaise)}
+              <PageTransition key="tab-home" className="space-y-4 sm:space-y-5">
+                {/* Executive Top Summary Strip: All-Time Published + Previous Month */}
+                <div className="grid grid-cols-2 gap-3 sm:gap-4">
+                  <div className="bg-white border border-slate-200/90 rounded-2xl p-3.5 sm:p-4 shadow-2xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[11px] font-medium text-slate-500 truncate">
+                        {t.allTimeIncentive}
                       </p>
-                    )}
-                    <p className="text-[11px] text-slate-400 mt-1">
-                      {selectedMonthAgg?.sourceType === 'MONTHLY_RECORD'
-                        ? t.sourceMonthly
-                        : selectedMonthAgg?.sourceType === 'DAILY_AGGREGATE'
-                          ? `${t.sourceDailyPrefix} ${selectedMonthAgg.publishedDaysCount} ${t.sourceDailySuffix}`
-                          : t.sourceNoData}
+                      <Award className="w-4 h-4 text-[#B8923A] shrink-0" />
+                    </div>
+                    <p className="text-lg sm:text-xl font-bold text-[#0F1F3D] mt-1.5">
+                      <AnimatedCounter value={allTimePublishedPaise} mode="paise" />
+                    </p>
+                    <p className="text-[11px] text-slate-400 mt-0.5 truncate">
+                      {safeMonthlyHistory.length} {t.activeMonthsLabel}
                     </p>
                   </div>
 
-                  {/* Row 3: Aligned 2-Column Sale & Qty Strip */}
-                  <div className="grid grid-cols-2 gap-3 rounded-xl bg-white/[0.06] border border-white/10 p-3.5">
-                    <div>
-                      <p className="text-[11px] text-slate-400">{t.totalSale}</p>
-                      <p className="text-sm sm:text-base font-bold font-mono tabular-nums text-white mt-0.5">
-                        {formatINRFromPaise(achievedSalePaise)}
+                  <div className="bg-white border border-slate-200/90 rounded-2xl p-3.5 sm:p-4 shadow-2xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[11px] font-medium text-slate-500 truncate">
+                        {prevMonth ? `${t.previousMonthLabel} · ${formatMonthLabel(prevMonth)}` : t.previousMonthLabel}
                       </p>
+                      <Calendar className="w-4 h-4 text-[#1E3A5F] shrink-0" />
                     </div>
-                    <div className="border-l border-white/10 pl-3.5">
-                      <p className="text-[11px] text-slate-400">{t.totalQty}</p>
-                      <p className="text-sm sm:text-base font-bold font-mono tabular-nums text-white mt-0.5">
-                        {formatQty(achievedSaleQty)}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Row 4: 3 Incentive Slabs (Structured List on Mobile, 3 Equal Columns on sm+) */}
-                  <div className="rounded-xl bg-white/[0.04] border border-white/10 divide-y divide-white/10 sm:divide-y-0 sm:grid sm:grid-cols-3 sm:divide-x">
-                    {heroSlabs.map((slab) => (
-                      <div
-                        key={slab.label}
-                        className="px-3.5 py-2.5 flex items-center justify-between gap-3 sm:block"
-                      >
-                        <div className="min-w-0">
-                          <p className="text-xs text-slate-200 font-medium truncate">{slab.label}</p>
-                          <p className="text-[11px] font-mono tabular-nums text-slate-400 mt-0.5">
-                            {t.saleLabel}: {formatINRFromPaise(slab.sale)} · {t.qtyLabel}:{' '}
-                            {formatQty(slab.qty)}
-                          </p>
-                        </div>
-                        <p className="text-sm sm:text-base font-mono tabular-nums font-semibold text-white shrink-0 sm:mt-1.5">
-                          {formatINRFromPaise(slab.inc)}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Row 5: Primary Mobile-Friendly PDF CTA */}
-                  {selectedMonthAgg && selectedMonthAgg.sourceType !== 'NO_DATA' && (
+                    <p className="text-lg sm:text-xl font-bold text-[#0F1F3D] mt-1.5">
+                      <AnimatedCounter value={previousMonthPaise} mode="paise" />
+                    </p>
                     <button
                       type="button"
-                      onClick={handleDownloadMonthlyPdf}
-                      className="w-full sm:w-auto h-11 px-4 rounded-xl bg-[#9F1239] hover:bg-[#881337] active:scale-[0.99] text-white text-xs sm:text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all cursor-pointer"
+                      onClick={() => setActiveTab('reports')}
+                      className="text-[11px] font-semibold text-[#1E3A5F] hover:underline mt-0.5 cursor-pointer"
                     >
-                      <FileDown className="w-4 h-4" />
-                      <span>{t.downloadPdfSlip}</span>
+                      {isMr ? 'आलेख पहा →' : 'View Reports →'}
                     </button>
-                  )}
-                </section>
-
-                {/* Right Column: Payout Status & Sales Target Cards */}
-                <div className="lg:col-span-5 space-y-4">
-                  {/* Payout Status Card */}
-                  <section className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3 shadow-2xs">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Wallet className="w-4 h-4 text-[#9F1239] shrink-0" />
-                        <h2 className="text-sm font-semibold text-slate-900 truncate">
-                          {selectedMonth
-                            ? `${t.payoutStatusTitle} · ${formatMonthLabel(selectedMonth)}`
-                            : t.payoutStatusTitle}
-                        </h2>
-                      </div>
-                      <span
-                        className={`text-xs font-bold shrink-0 ${
-                          selectedMonthPayout?.status === 'PAID'
-                            ? 'text-emerald-700'
-                            : selectedMonthPayout?.status === 'APPROVED'
-                              ? 'text-blue-700'
-                              : 'text-amber-700'
-                        }`}
-                      >
-                        {payoutStatusLabel}
-                      </span>
-                    </div>
-
-                    <div className="text-xs text-slate-600 space-y-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span>{t.netPayable}</span>
-                        <span className="font-mono tabular-nums font-bold text-sm text-slate-900">
-                          {formatINRFromPaise(netPayablePaise)}
-                        </span>
-                      </div>
-                      {selectedMonthPayout?.status === 'PAID' ? (
-                        <div className="text-[11px] font-mono text-slate-600 pt-2 border-t border-slate-100 space-y-0.5">
-                          <p>
-                            {t.payoutMode}: {selectedMonthPayout.paymentMode || '—'}
-                            {selectedMonthPayout.paymentReference
-                              ? ` · ${t.payoutRef}: ${selectedMonthPayout.paymentReference}`
-                              : ''}
-                          </p>
-                          {selectedMonthPayout.paidAt && (
-                            <p className="text-slate-500">
-                              {t.payoutDate}: {formatShortDate(selectedMonthPayout.paidAt.slice(0, 10))}
-                            </p>
-                          )}
-                        </div>
-                      ) : (
-                        <p className="text-[11px] text-slate-500 pt-2 border-t border-slate-100">
-                          {t.payoutNotSettled}
-                        </p>
-                      )}
-                    </div>
-
-                    {selectedMonthAdjustments.length > 0 && (
-                      <div className="pt-2.5 border-t border-slate-100 space-y-1.5">
-                        <p className="text-[11px] font-semibold text-slate-700">
-                          {t.adjustmentsSectionTitle} {formatMonthLabel(selectedMonth)}
-                        </p>
-                        {selectedMonthAdjustments.map((adj) => {
-                          const isBonus = adj.type === 'BONUS';
-                          return (
-                            <div
-                              key={adj.adjustmentId}
-                              className="flex items-start justify-between gap-3 text-xs"
-                            >
-                              <span className="text-slate-600 leading-snug">
-                                {adj.type.replace('_', ' ')} — {adj.reason}
-                              </span>
-                              <span
-                                className={`font-mono tabular-nums font-semibold shrink-0 ${
-                                  isBonus ? 'text-emerald-700' : 'text-red-700'
-                                }`}
-                              >
-                                {isBonus ? '+' : '-'}
-                                {formatINRFromPaise(adj.amountPaise)}
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </section>
-
-                  {/* Monthly Sales Target Card */}
-                  <section className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3 shadow-2xs">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Target className="w-4 h-4 text-[#9F1239] shrink-0" />
-                        <h2 className="text-sm font-semibold text-slate-900 truncate">
-                          {t.targetTitle}
-                        </h2>
-                      </div>
-                      {selectedMonthTarget && (
-                        <span className="text-[11px] font-medium text-slate-500 shrink-0">
-                          {selectedMonthTarget.scope === 'EMPLOYEE'
-                            ? t.targetPersonalScope
-                            : t.targetBranchScope}
-                        </span>
-                      )}
-                    </div>
-
-                    {selectedMonthTarget ? (
-                      <div className="space-y-2.5">
-                        <div className="flex items-baseline justify-between gap-2 text-xs">
-                          <span className="font-mono tabular-nums text-slate-700">
-                            {formatINRFromPaise(achievedSalePaise)} /{' '}
-                            {formatINRFromPaise(selectedMonthTarget.targetSaleAmtPaise)}
-                          </span>
-                          <span
-                            className={`font-mono tabular-nums font-bold shrink-0 ${
-                              targetSalePct >= 100 ? 'text-emerald-700' : 'text-[#9F1239]'
-                            }`}
-                          >
-                            {targetSalePct}% {t.targetAchieved}
-                          </span>
-                        </div>
-                        <div className="h-2.5 w-full bg-slate-100 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full rounded-full transition-all ${
-                              targetSalePct >= 100 ? 'bg-emerald-600' : 'bg-[#9F1239]'
-                            }`}
-                            style={{ width: `${Math.min(100, Math.max(2, targetSalePct))}%` }}
-                          />
-                        </div>
-                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 font-mono tabular-nums">
-                          <span>
-                            {targetRemainingPaise === 0
-                              ? t.targetCompleted
-                              : `${t.targetRemaining}: ${formatINRFromPaise(targetRemainingPaise)}`}
-                          </span>
-                          {selectedMonthTarget.targetSaleQty > 0 && (
-                            <span>
-                              {t.qtyLabel}: {formatQty(achievedSaleQty)} /{' '}
-                              {formatQty(selectedMonthTarget.targetSaleQty)}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    ) : (
-                      <p className="text-xs text-slate-500">{t.targetNoTarget}</p>
-                    )}
-                  </section>
+                  </div>
                 </div>
 
-                {/* Latest Published Statement Card */}
-                <section className="lg:col-span-12 bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
-                  <div className="px-4 sm:px-5 py-3.5 border-b border-slate-100 flex items-center justify-between gap-2">
-                    <h2 className="text-sm font-semibold text-slate-900">{t.latestStatement}</h2>
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab('statements')}
-                      className="min-h-[36px] px-2.5 rounded-lg text-xs font-semibold text-[#9F1239] hover:bg-rose-50 cursor-pointer"
-                    >
-                      {t.viewAll}
-                    </button>
-                  </div>
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6 items-start">
+                  {/* Monthly Net Incentive Hero Card (Corporate Navy + Gold) */}
+                  <section className="lg:col-span-7 bg-[#0F1F3D] text-white rounded-2xl p-5 sm:p-6 space-y-5 relative overflow-hidden shadow-xs">
+                    <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-[#B8923A] via-[#DFC27D] to-[#B8923A]" />
 
-                  {latestRecord ? (
-                    <StatementRecordCard
-                      rec={latestRecord}
-                      t={t}
-                      onDownloadPdf={handleDownloadRecordPdf}
-                    />
-                  ) : (
-                    <p className="text-sm text-slate-500 px-5 py-8 text-center">
-                      {t.noPublishedYet}
-                    </p>
-                  )}
-                </section>
+                    {/* Row 1: Month Selector + MoM Delta */}
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 min-w-0">
+                        {availableMonths.length > 1 ? (
+                          <select
+                            aria-label="Select incentive month"
+                            value={selectedMonth}
+                            onChange={(e) => setSelectedMonth(e.target.value)}
+                            className="h-9 px-3 rounded-xl bg-white/10 border border-white/15 text-xs font-semibold text-white focus:outline-none focus:ring-2 focus:ring-[#DFC27D]/50 cursor-pointer"
+                          >
+                            {availableMonths.map((m) => (
+                              <option key={m} value={m} className="text-slate-900">
+                                {formatMonthLabel(m)}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="text-xs font-semibold text-[#DFC27D]">
+                            {selectedMonth ? formatMonthLabel(selectedMonth) : t.noPublishedYet}
+                          </span>
+                        )}
+                      </div>
 
-                {/* Custom Period Statements */}
-                {partitioned.customPeriodRecords.length > 0 && (
-                  <section className="lg:col-span-12 bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
-                    <div className="px-4 sm:px-5 py-3 border-b border-slate-100">
-                      <h2 className="text-sm font-semibold text-slate-900">
-                        {t.customStatementsTitle}
-                      </h2>
+                      {prevMonth && (
+                        <div className="text-right shrink-0">
+                          <span
+                            className={`inline-flex items-center gap-1 text-xs font-semibold font-mono tabular-nums ${
+                              momDelta.diff >= 0 ? 'text-emerald-300' : 'text-red-300'
+                            }`}
+                          >
+                            {momDelta.diff >= 0 ? (
+                              <TrendingUp className="w-3.5 h-3.5" />
+                            ) : (
+                              <TrendingDown className="w-3.5 h-3.5" />
+                            )}
+                            <span>
+                              {momDelta.diff >= 0 ? '+' : ''}
+                              {momDelta.pct}%
+                            </span>
+                          </span>
+                          <p className="text-[10px] text-slate-300 leading-tight mt-0.5">
+                            {t.vsMonth} {formatMonthLabel(prevMonth)}
+                          </p>
+                        </div>
+                      )}
                     </div>
-                    <div className="divide-y divide-slate-100">
-                      {partitioned.customPeriodRecords.slice(0, 4).map((rec) => (
-                        <StatementRecordCard
-                          key={rec.recordId}
-                          rec={rec}
-                          t={t}
-                          onDownloadPdf={handleDownloadRecordPdf}
-                        />
-                      ))}
-                    </div>
-                  </section>
-                )}
 
-                {/* Publish Notifications */}
-                {notifications.length > 0 && (
-                  <section
-                    id="staff-alerts-section"
-                    className="lg:col-span-12 bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-2xs"
-                  >
-                    <div className="px-4 sm:px-5 py-3.5 border-b border-slate-100">
-                      <h2 className="text-sm font-semibold text-slate-900">{t.recentAlerts}</h2>
+                    {/* Row 2: Main KPI Figure */}
+                    <div>
+                      <p className="text-xs text-[#DFC27D] font-medium">{t.monthlyIncentive}</p>
+                      <p className="text-3xl sm:text-4xl font-bold tracking-tight text-white mt-1">
+                        <AnimatedCounter value={netPayablePaise} mode="paise" />
+                      </p>
+                      {selectedMonthAdjNetPaise !== 0 && (
+                        <p className="text-[11px] font-mono tabular-nums text-slate-200 mt-1.5">
+                          {t.grossIncentive}: {formatINRFromPaise(grossIncentivePaise)} ·{' '}
+                          {t.adjustments}: {selectedMonthAdjNetPaise > 0 ? '+' : ''}
+                          {formatINRFromPaise(selectedMonthAdjNetPaise)}
+                        </p>
+                      )}
+                      <p className="text-[11px] text-slate-300 mt-1">
+                        {selectedMonthAgg?.sourceType === 'MONTHLY_RECORD'
+                          ? t.sourceMonthly
+                          : selectedMonthAgg?.sourceType === 'DAILY_AGGREGATE'
+                            ? `${t.sourceDailyPrefix} ${selectedMonthAgg.publishedDaysCount} ${t.sourceDailySuffix}`
+                            : t.sourceNoData}
+                      </p>
                     </div>
-                    <div className="divide-y divide-slate-100">
-                      {notifications.slice(0, 6).map((n) => (
+
+                    {/* Row 3: Aligned 2-Column Sale & Qty Strip */}
+                    <div className="grid grid-cols-2 gap-3 rounded-xl bg-white/[0.07] border border-white/10 p-3.5">
+                      <div>
+                        <p className="text-[11px] text-slate-300">{t.totalSale}</p>
+                        <p className="text-sm sm:text-base font-bold font-mono tabular-nums text-white mt-0.5">
+                          {formatINRFromPaise(achievedSalePaise)}
+                        </p>
+                      </div>
+                      <div className="border-l border-white/10 pl-3.5">
+                        <p className="text-[11px] text-slate-300">{t.totalQty}</p>
+                        <p className="text-sm sm:text-base font-bold font-mono tabular-nums text-white mt-0.5">
+                          {formatQty(achievedSaleQty)}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Row 4: 3 Incentive Slabs */}
+                    <div className="rounded-xl bg-white/[0.05] border border-white/10 divide-y divide-white/10 sm:divide-y-0 sm:grid sm:grid-cols-3 sm:divide-x">
+                      {heroSlabs.map((slab) => (
                         <div
-                          key={n.notificationId}
-                          className="p-4 sm:px-5 flex items-start justify-between gap-3"
+                          key={slab.label}
+                          className="px-3.5 py-2.5 flex items-center justify-between gap-3 sm:block"
                         >
                           <div className="min-w-0">
-                            <p className="text-sm font-semibold text-slate-900 leading-snug">
-                              {n.title}
+                            <p className="text-xs text-slate-200 font-medium truncate">
+                              {slab.label}
                             </p>
-                            <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
-                              {n.message}
+                            <p className="text-[11px] font-mono tabular-nums text-slate-300/80 mt-0.5">
+                              {t.saleLabel}: {formatINRFromPaise(slab.sale)} · {t.qtyLabel}:{' '}
+                              {formatQty(slab.qty)}
                             </p>
                           </div>
-                          {!n.read ? (
-                            <button
-                              type="button"
-                              onClick={() => handleMarkRead(n.notificationId)}
-                              className="min-h-[38px] px-3 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1 shrink-0 cursor-pointer"
-                            >
-                              <Check className="w-3.5 h-3.5" />
-                              <span>{t.markRead}</span>
-                            </button>
-                          ) : (
-                            <span className="text-[11px] font-medium text-slate-400 shrink-0 pt-1">
-                              {t.readLabel}
-                            </span>
-                          )}
+                          <p className="text-sm sm:text-base font-mono tabular-nums font-semibold text-[#DFC27D] shrink-0 sm:mt-1.5">
+                            {formatINRFromPaise(slab.inc)}
+                          </p>
                         </div>
                       ))}
                     </div>
+
+                    {/* Row 5: Primary Mobile-Friendly PDF CTA */}
+                    {selectedMonthAgg && selectedMonthAgg.sourceType !== 'NO_DATA' && (
+                      <button
+                        type="button"
+                        onClick={handleDownloadMonthlyPdf}
+                        className="w-full sm:w-auto h-11 px-4 rounded-xl bg-[#B8923A] hover:bg-[#A6812F] active:scale-[0.985] text-[#0F1F3D] text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-2 transition-all cursor-pointer shadow-xs"
+                      >
+                        <FileDown className="w-4 h-4" />
+                        <span>{t.downloadPdfSlip}</span>
+                      </button>
+                    )}
                   </section>
-                )}
-              </div>
+
+                  {/* Right Column: Payout Status & Sales Target Cards */}
+                  <div className="lg:col-span-5 space-y-4">
+                    {/* Payout Status Card */}
+                    <section className="bg-white border border-slate-200/90 rounded-2xl p-4 sm:p-5 space-y-3 shadow-2xs">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Wallet className="w-4 h-4 text-[#B8923A] shrink-0" />
+                          <h2 className="text-sm font-semibold text-[#0F1F3D] truncate">
+                            {selectedMonth
+                              ? `${t.payoutStatusTitle} · ${formatMonthLabel(selectedMonth)}`
+                              : t.payoutStatusTitle}
+                          </h2>
+                        </div>
+                        <span
+                          className={`text-xs font-bold shrink-0 ${
+                            selectedMonthPayout?.status === 'PAID'
+                              ? 'text-emerald-700'
+                              : selectedMonthPayout?.status === 'APPROVED'
+                                ? 'text-[#1E3A5F]'
+                                : 'text-amber-700'
+                          }`}
+                        >
+                          {payoutStatusLabel}
+                        </span>
+                      </div>
+
+                      <div className="text-xs text-slate-600 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span>{t.netPayable}</span>
+                          <span className="font-mono tabular-nums font-bold text-sm text-[#0F1F3D]">
+                            {formatINRFromPaise(netPayablePaise)}
+                          </span>
+                        </div>
+                        {selectedMonthPayout?.status === 'PAID' ? (
+                          <div className="text-[11px] font-mono text-slate-600 pt-2 border-t border-slate-100 space-y-0.5">
+                            <p>
+                              {t.payoutMode}: {selectedMonthPayout.paymentMode || '—'}
+                              {selectedMonthPayout.paymentReference
+                                ? ` · ${t.payoutRef}: ${selectedMonthPayout.paymentReference}`
+                                : ''}
+                            </p>
+                            {selectedMonthPayout.paidAt && (
+                              <p className="text-slate-500">
+                                {t.payoutDate}:{' '}
+                                {formatShortDate(selectedMonthPayout.paidAt.slice(0, 10))}
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-slate-500 pt-2 border-t border-slate-100">
+                            {t.payoutNotSettled}
+                          </p>
+                        )}
+                      </div>
+
+                      {selectedMonthAdjustments.length > 0 && (
+                        <div className="pt-2.5 border-t border-slate-100 space-y-1.5">
+                          <p className="text-[11px] font-semibold text-slate-700">
+                            {t.adjustmentsSectionTitle} {formatMonthLabel(selectedMonth)}
+                          </p>
+                          {selectedMonthAdjustments.map((adj) => {
+                            const isBonus = adj.type === 'BONUS';
+                            return (
+                              <div
+                                key={adj.adjustmentId}
+                                className="flex items-start justify-between gap-3 text-xs"
+                              >
+                                <span className="text-slate-600 leading-snug">
+                                  {adj.type.replace('_', ' ')} — {adj.reason}
+                                </span>
+                                <span
+                                  className={`font-mono tabular-nums font-semibold shrink-0 ${
+                                    isBonus ? 'text-emerald-700' : 'text-red-700'
+                                  }`}
+                                >
+                                  {isBonus ? '+' : '-'}
+                                  {formatINRFromPaise(adj.amountPaise)}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </section>
+
+                    {/* Monthly Sales Target Progress Card (Live Sync with Admin Branch Targets) */}
+                    <section className="bg-white border border-slate-200/90 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-2xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Target className="w-4 h-4 text-[#B8923A] shrink-0" />
+                          <div className="min-w-0">
+                            <h2 className="text-sm font-semibold text-[#0F1F3D] truncate">
+                              {t.targetTitle}
+                            </h2>
+                            {selectedMonthTarget && (
+                              <p className="text-[11px] text-slate-500">
+                                {selectedMonthTarget.scope === 'EMPLOYEE'
+                                  ? t.targetPersonalScope
+                                  : t.targetBranchScope}{' '}
+                                · {formatMonthLabel(selectedMonthTarget.monthKey)}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        {relevantTargetMonths.length > 1 ? (
+                          <select
+                            aria-label="Select target month"
+                            value={activeTargetMonth}
+                            onChange={(e) => setSelectedTargetMonth(e.target.value)}
+                            className="h-7 px-2 rounded-lg border border-slate-200 bg-slate-50 text-[11px] font-semibold text-[#0F1F3D] cursor-pointer"
+                          >
+                            {relevantTargetMonths.map((mk) => (
+                              <option key={mk} value={mk}>
+                                {formatMonthLabel(mk)}
+                              </option>
+                            ))}
+                          </select>
+                        ) : selectedMonthTarget ? (
+                          <span
+                            className={`text-[11px] font-bold px-2 py-0.5 rounded-md shrink-0 ${
+                              targetProgress.status === 'ACHIEVED'
+                                ? 'bg-emerald-50 text-emerald-700'
+                                : targetProgress.status === 'ON_TRACK'
+                                  ? 'bg-[#0F1F3D]/[0.07] text-[#0F1F3D]'
+                                  : 'bg-[#B8923A]/15 text-[#9A7625]'
+                            }`}
+                          >
+                            {targetStatusBadgeLabel}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {selectedMonthTarget ? (
+                        <div className="space-y-3">
+                          {/* Last Month Baseline & Growth % Comparison Strip */}
+                          {selectedMonthTarget.scope === 'EMPLOYEE' &&
+                            targetBaselineSalePaise > 0 && (
+                              <div className="rounded-xl bg-[#F8FAFC] border border-slate-200/80 px-3 py-2 flex items-center justify-between gap-2 text-[11px]">
+                                <span className="text-slate-600">
+                                  {t.targetLastMonth} ({formatMonthLabel(targetBaselineMonth)}):{' '}
+                                  <strong className="font-mono text-slate-800">
+                                    {formatINRFromPaise(targetBaselineSalePaise)}
+                                  </strong>
+                                </span>
+                                {targetGrowthPct !== null && (
+                                  <span className="font-mono font-bold text-[#9A7625] shrink-0">
+                                    {targetGrowthPct >= 0 ? '+' : ''}
+                                    {targetGrowthPct}%
+                                  </span>
+                                )}
+                              </div>
+                            )}
+
+                          {/* Sale Progress Bar */}
+                          {selectedMonthTarget.targetSaleAmtPaise > 0 && (
+                            <div className="space-y-2">
+                              <div className="flex items-baseline justify-between gap-2">
+                                <span className="text-xs font-medium text-slate-600">
+                                  {t.totalSale}
+                                </span>
+                                <span
+                                  className={`text-sm font-mono tabular-nums font-bold ${
+                                    targetProgress.salePct >= 100
+                                      ? 'text-emerald-700'
+                                      : 'text-[#0F1F3D]'
+                                  }`}
+                                >
+                                  {targetProgress.salePct}% {t.targetAchieved}
+                                </span>
+                              </div>
+                              <div className="h-2.5 w-full bg-slate-100 rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full transition-all duration-500 ${
+                                    targetProgress.salePct >= 100
+                                      ? 'bg-emerald-600'
+                                      : 'bg-gradient-to-r from-[#0F1F3D] to-[#B8923A]'
+                                  }`}
+                                  style={{
+                                    width: `${Math.min(100, Math.max(targetProgress.salePct > 0 ? 3 : 0, targetProgress.salePct))}%`,
+                                  }}
+                                />
+                              </div>
+
+                              {/* 3-Column Target / Achieved / Remaining Breakdown */}
+                              <div className="grid grid-cols-3 gap-2 pt-1 text-center">
+                                <div className="rounded-lg bg-slate-50 border border-slate-200/70 px-2 py-2">
+                                  <p className="text-[10px] text-slate-500 font-medium">
+                                    {t.targetGoalLabel}
+                                  </p>
+                                  <p className="text-[11px] sm:text-xs font-mono tabular-nums font-bold text-[#0F1F3D] mt-0.5 truncate">
+                                    {formatINRFromPaise(selectedMonthTarget.targetSaleAmtPaise)}
+                                  </p>
+                                </div>
+                                <div className="rounded-lg bg-slate-50 border border-slate-200/70 px-2 py-2">
+                                  <p className="text-[10px] text-slate-500 font-medium">
+                                    {t.targetAchievedLabel}
+                                  </p>
+                                  <p className="text-[11px] sm:text-xs font-mono tabular-nums font-bold text-emerald-700 mt-0.5 truncate">
+                                    {formatINRFromPaise(targetAchievedSalePaise)}
+                                  </p>
+                                </div>
+                                <div className="rounded-lg bg-slate-50 border border-slate-200/70 px-2 py-2">
+                                  <p className="text-[10px] text-slate-500 font-medium">
+                                    {t.targetRemaining}
+                                  </p>
+                                  <p className="text-[11px] sm:text-xs font-mono tabular-nums font-bold text-[#9A7625] mt-0.5 truncate">
+                                    {targetProgress.remainingSalePaise === 0
+                                      ? '₹0.00'
+                                      : formatINRFromPaise(targetProgress.remainingSalePaise)}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Optional Sale Qty Progress Bar */}
+                          {selectedMonthTarget.targetSaleQty > 0 && (
+                            <div className="pt-2 border-t border-slate-100 space-y-1.5">
+                              <div className="flex items-center justify-between gap-2 text-[11px]">
+                                <span className="text-slate-600 font-medium">
+                                  {t.targetQtyProgress}
+                                </span>
+                                <span className="font-mono tabular-nums font-semibold text-[#0F1F3D]">
+                                  {formatQty(targetAchievedSaleQty)} /{' '}
+                                  {formatQty(selectedMonthTarget.targetSaleQty)} (
+                                  {targetProgress.qtyPct}%)
+                                </span>
+                              </div>
+                              <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full transition-all duration-500 ${
+                                    targetProgress.qtyPct >= 100
+                                      ? 'bg-emerald-600'
+                                      : 'bg-[#1E3A5F]'
+                                  }`}
+                                  style={{
+                                    width: `${Math.min(100, Math.max(targetProgress.qtyPct > 0 ? 3 : 0, targetProgress.qtyPct))}%`,
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Companion Branch Target Note (when employee has personal target + branch target also exists) */}
+                          {personalMonthTarget && branchMonthTarget && (
+                            <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                              <span>
+                                {t.targetBranchGoalNote} ({branchMonthTarget.branchName})
+                              </span>
+                              <span className="font-mono font-semibold text-slate-700">
+                                {formatINRFromPaise(branchMonthTarget.targetSaleAmtPaise)}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-slate-500">{t.targetNoTarget}</p>
+                      )}
+                    </section>
+                  </div>
+
+                  {/* Latest Published Statement Card */}
+                  <section className="lg:col-span-12 bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
+                    <div className="px-4 sm:px-5 py-3.5 border-b border-slate-100 flex items-center justify-between gap-2">
+                      <h2 className="text-sm font-semibold text-[#0F1F3D]">{t.latestStatement}</h2>
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('statements')}
+                        className="min-h-[36px] px-2.5 rounded-lg text-xs font-semibold text-[#1E3A5F] hover:bg-slate-100 cursor-pointer transition-colors"
+                      >
+                        {t.viewAll}
+                      </button>
+                    </div>
+
+                    {latestRecord ? (
+                      <StatementRecordCard
+                        rec={latestRecord}
+                        t={t}
+                        onDownloadPdf={handleDownloadRecordPdf}
+                      />
+                    ) : (
+                      <p className="text-sm text-slate-500 px-5 py-8 text-center">
+                        {t.noPublishedYet}
+                      </p>
+                    )}
+                  </section>
+
+                  {/* Custom Period Statements */}
+                  {partitioned.customPeriodRecords.length > 0 && (
+                    <section className="lg:col-span-12 bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
+                      <div className="px-4 sm:px-5 py-3 border-b border-slate-100">
+                        <h2 className="text-sm font-semibold text-[#0F1F3D]">
+                          {t.customStatementsTitle}
+                        </h2>
+                      </div>
+                      <div className="divide-y divide-slate-100">
+                        {partitioned.customPeriodRecords.slice(0, 4).map((rec) => (
+                          <StatementRecordCard
+                            key={rec.recordId}
+                            rec={rec}
+                            t={t}
+                            onDownloadPdf={handleDownloadRecordPdf}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  )}
+
+                  {/* Publish Notifications */}
+                  {notifications.length > 0 && (
+                    <section
+                      id="staff-alerts-section"
+                      className="lg:col-span-12 bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs"
+                    >
+                      <div className="px-4 sm:px-5 py-3.5 border-b border-slate-100">
+                        <h2 className="text-sm font-semibold text-[#0F1F3D]">{t.recentAlerts}</h2>
+                      </div>
+                      <div className="divide-y divide-slate-100">
+                        {notifications.slice(0, 6).map((n) => (
+                          <div
+                            key={n.notificationId}
+                            className="p-4 sm:px-5 flex items-start justify-between gap-3"
+                          >
+                            <div className="min-w-0">
+                              <p className="text-sm font-semibold text-slate-900 leading-snug">
+                                {n.title}
+                              </p>
+                              <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
+                                {n.message}
+                              </p>
+                            </div>
+                            {!n.read ? (
+                              <button
+                                type="button"
+                                onClick={() => handleMarkRead(n.notificationId)}
+                                className="min-h-[38px] px-3 rounded-lg border border-slate-200 text-xs font-medium text-[#0F1F3D] hover:bg-slate-50 inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                              >
+                                <Check className="w-3.5 h-3.5 text-[#B8923A]" />
+                                <span>{t.markRead}</span>
+                              </button>
+                            ) : (
+                              <span className="text-[11px] font-medium text-slate-400 shrink-0 pt-1">
+                                {t.readLabel}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+                </div>
+              </PageTransition>
             )}
 
             {/* =============================================================== */}
-            {/* STATEMENTS TAB                                                  */}
+            {/* MY INCENTIVES / STATEMENTS TAB                                  */}
             {/* =============================================================== */}
             {activeTab === 'statements' && (
-              <div className="space-y-3.5 sm:space-y-5">
-                <section className="bg-white border border-slate-200 rounded-2xl p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-                  <h2 className="text-sm sm:text-base font-semibold text-slate-900">
-                    {t.statementsHeader}
-                  </h2>
-                  <div className="grid grid-cols-2 sm:inline-flex items-center gap-1.5 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80">
+              <PageTransition key="tab-statements" className="space-y-4 sm:space-y-5">
+                <section className="bg-white border border-slate-200/90 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+                  <div>
+                    <h2 className="text-sm sm:text-base font-semibold text-[#0F1F3D]">
+                      {t.statementsHeader}
+                    </h2>
+                    <p className="text-[11px] text-slate-500 mt-0.5">{t.statementsSub}</p>
+                  </div>
+                  <div className="grid grid-cols-2 sm:inline-flex items-center gap-1.5 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80 shrink-0">
                     <select
                       aria-label="Select statement month"
                       value={selectedMonth}
@@ -1413,9 +1719,9 @@ export function EmployeePortal() {
                       type="button"
                       disabled={!selectedMonthAgg || selectedMonthAgg.sourceType === 'NO_DATA'}
                       onClick={handleDownloadMonthlyPdf}
-                      className="h-9 px-3 rounded-lg bg-[#9F1239] hover:bg-[#881337] text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-40 transition-colors"
+                      className="h-9 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-40 transition-colors"
                     >
-                      <FileDown className="w-3.5 h-3.5" />
+                      <FileDown className="w-3.5 h-3.5 text-[#DFC27D]" />
                       <span>{isMr ? 'PDF स्लिप' : 'PDF Slip'}</span>
                     </button>
                   </div>
@@ -1423,9 +1729,9 @@ export function EmployeePortal() {
 
                 {/* Monthly Incentive Statements */}
                 {monthMonthlyRecords.length > 0 && (
-                  <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
-                    <div className="px-4 sm:px-5 py-3 border-b border-slate-200 bg-slate-50/70">
-                      <h3 className="text-sm font-semibold text-slate-900">
+                  <section className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
+                    <div className="px-4 sm:px-5 py-3 border-b border-slate-200/80 bg-[#F8FAFC]">
+                      <h3 className="text-sm font-semibold text-[#0F1F3D]">
                         {t.monthlySectionTitle}
                       </h3>
                     </div>
@@ -1444,9 +1750,9 @@ export function EmployeePortal() {
 
                 {/* Custom Period Incentive Statements */}
                 {monthCustomRecords.length > 0 && (
-                  <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
-                    <div className="px-4 sm:px-5 py-3 border-b border-slate-200 bg-slate-50/70">
-                      <h3 className="text-sm font-semibold text-slate-900">
+                  <section className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
+                    <div className="px-4 sm:px-5 py-3 border-b border-slate-200/80 bg-[#F8FAFC]">
+                      <h3 className="text-sm font-semibold text-[#0F1F3D]">
                         {t.customSectionTitle}
                       </h3>
                     </div>
@@ -1464,9 +1770,9 @@ export function EmployeePortal() {
                 )}
 
                 {/* Daily Incentive Breakdown */}
-                <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
-                  <div className="px-4 sm:px-5 py-3 border-b border-slate-200 bg-slate-50/70">
-                    <h3 className="text-sm font-semibold text-slate-900">
+                <section className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
+                  <div className="px-4 sm:px-5 py-3 border-b border-slate-200/80 bg-[#F8FAFC]">
+                    <h3 className="text-sm font-semibold text-[#0F1F3D]">
                       {selectedMonth
                         ? `${t.dailySectionTitle} · ${formatMonthLabel(selectedMonth)}`
                         : t.dailySectionTitle}
@@ -1492,466 +1798,356 @@ export function EmployeePortal() {
                     </div>
                   )}
                 </section>
-              </div>
+              </PageTransition>
             )}
 
             {/* =============================================================== */}
-            {/* HISTORY TAB                                                     */}
+            {/* REPORTS TAB (RECHARTS CHART + YEARLY SUMMARY + MOM HISTORY)     */}
             {/* =============================================================== */}
-            {activeTab === 'history' && (
-              <section className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4 shadow-2xs">
-                <h2 className="text-base font-semibold text-slate-900">{t.historyTitle}</h2>
-
-                {safeMonthlyHistory.length === 0 ? (
-                  <p className="text-sm text-slate-500 py-8 text-center">{t.historyEmpty}</p>
-                ) : (
-                  <div className="space-y-4">
-                    {safeMonthlyHistory.map((s, idx) => {
-                      const prev = safeMonthlyHistory[idx + 1];
-                      const delta = prev ? s.grandTotalPaise - prev.grandTotalPaise : null;
-                      const widthPct = Math.max(
-                        5,
-                        Math.round((s.grandTotalPaise / maxHistoryPaise) * 100),
-                      );
-                      const historySlabs = [
-                        {
-                          label: t.slab1,
-                          inc: s.component1TotalPaise,
-                          sale: s.saleAmt1TotalPaise,
-                          qty: s.saleQty1Total,
-                        },
-                        {
-                          label: t.slab2,
-                          inc: s.component2TotalPaise,
-                          sale: s.saleAmt2TotalPaise,
-                          qty: s.saleQty2Total,
-                        },
-                        {
-                          label: t.slab3,
-                          inc: s.component3TotalPaise,
-                          sale: s.saleAmt3TotalPaise,
-                          qty: s.saleQty3Total,
-                        },
-                      ];
-                      return (
-                        <div
-                          key={s.monthKey}
-                          className="p-4 rounded-xl border border-slate-200/80 bg-slate-50/40 space-y-3"
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="text-sm font-bold text-slate-900">
-                                {formatMonthLabel(s.monthKey)}
-                              </p>
-                              <p className="text-[11px] text-slate-500 mt-0.5">
-                                {s.sourceType === 'MONTHLY_RECORD'
-                                  ? t.monthlyStatementLabel
-                                  : `${s.publishedDaysCount} ${t.dailyRecordsLabel}`}
-                              </p>
-                              <p className="text-[11px] font-mono tabular-nums text-slate-600 mt-0.5">
-                                {t.saleLabel} {formatINRFromPaise(s.totalSaleAmtPaise)} ·{' '}
-                                {t.qtyLabel} {formatQty(s.totalSaleQty)}
-                              </p>
-                            </div>
-                            <div className="text-right shrink-0">
-                              <p className="text-base font-bold font-mono tabular-nums text-slate-900">
-                                {formatINRFromPaise(s.grandTotalPaise)}
-                              </p>
-                              {delta !== null && (
-                                <p
-                                  className={`text-[11px] font-mono tabular-nums font-semibold mt-0.5 ${
-                                    delta >= 0 ? 'text-emerald-700' : 'text-red-700'
-                                  }`}
-                                >
-                                  {delta >= 0 ? '+' : ''}
-                                  {formatINRFromPaise(delta)}
-                                </p>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="h-2 w-full bg-slate-200/80 rounded-full overflow-hidden">
-                            <div
-                              className="h-full bg-[#9F1239] rounded-full"
-                              style={{ width: `${widthPct}%` }}
-                            />
-                          </div>
-
-                          <div className="rounded-xl bg-white border border-slate-100 divide-y divide-slate-100 sm:divide-y-0 sm:grid sm:grid-cols-3 sm:divide-x">
-                            {historySlabs.map((slab) => (
-                              <div
-                                key={slab.label}
-                                className="px-3 py-2 flex items-center justify-between gap-2 sm:block"
-                              >
-                                <div className="min-w-0">
-                                  <p className="text-[11px] text-slate-500 truncate">{slab.label}</p>
-                                  <p className="text-[10px] font-mono tabular-nums text-slate-400">
-                                    {t.saleLabel}: {formatINRFromPaise(slab.sale)} · {t.qtyLabel}:{' '}
-                                    {formatQty(slab.qty)}
-                                  </p>
-                                </div>
-                                <p className="text-xs font-mono tabular-nums font-semibold text-slate-900 shrink-0 sm:mt-1">
-                                  {formatINRFromPaise(slab.inc)}
-                                </p>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
+            {activeTab === 'reports' && (
+              <PageTransition key="tab-reports">
+                <Suspense fallback={<WorkspaceSkeleton />}>
+                  <EmployeeReportsTab
+                    monthlyHistory={safeMonthlyHistory}
+                    t={t}
+                    isMr={isMr}
+                  />
+                </Suspense>
+              </PageTransition>
             )}
 
             {/* =============================================================== */}
-            {/* QUERIES / DISPUTE TICKET TAB                                    */}
-            {/* =============================================================== */}
-            {activeTab === 'queries' && (
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6 items-start">
-                <form
-                  onSubmit={handleQuerySubmit}
-                  className="lg:col-span-5 bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-4 shadow-2xs"
-                >
-                  <h2 className="text-base font-semibold text-slate-900">{t.queriesTitle}</h2>
-
-                  {queryFeedback && (
-                    <div
-                      className={`p-3 rounded-xl border text-xs ${
-                        queryFeedback.type === 'ok'
-                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                          : 'bg-red-50 border-red-200 text-red-800'
-                      }`}
-                    >
-                      {queryFeedback.text}
-                    </div>
-                  )}
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                        {t.queryMonth}
-                      </label>
-                      <select
-                        value={queryMonth}
-                        onChange={(e) => setQueryMonth(e.target.value)}
-                        className="w-full h-11 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-medium text-slate-800"
-                      >
-                        {(availableMonths.length > 0 ? availableMonths : [getCurrentMonthKeyIST()]).map((m) => (
-                          <option key={m} value={m}>
-                            {formatMonthLabel(m)}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                        {t.queryCategory}
-                      </label>
-                      <select
-                        value={queryCategory}
-                        onChange={(e) => setQueryCategory(e.target.value as QueryCategory)}
-                        className="w-full h-11 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-medium text-slate-800"
-                      >
-                        <option value="SALE_AMOUNT">{t.catSaleAmt}</option>
-                        <option value="SALE_QTY">{t.catSaleQty}</option>
-                        <option value="INCENTIVE_MISMATCH">{t.catIncentive}</option>
-                        <option value="PAYOUT_STATUS">{t.catPayout}</option>
-                        <option value="OTHER">{t.catOther}</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                      {t.querySubject}
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      minLength={3}
-                      maxLength={120}
-                      value={querySubject}
-                      onChange={(e) => setQuerySubject(e.target.value)}
-                      placeholder={
-                        isMr
-                          ? 'उदा. ऑक्टोबर न्यू आयटम विक्री तफावत'
-                          : 'e.g. October New Items Sale Qty mismatch'
-                      }
-                      className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-900/20 focus:border-rose-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                      {t.queryMessage}
-                    </label>
-                    <textarea
-                      required
-                      minLength={5}
-                      maxLength={600}
-                      rows={4}
-                      value={queryMessage}
-                      onChange={(e) => setQueryMessage(e.target.value)}
-                      className="w-full p-3.5 rounded-xl border border-slate-300 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-rose-900/20 focus:border-rose-900"
-                    />
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={querySubmitting}
-                    className="w-full h-12 rounded-xl bg-[#9F1239] hover:bg-[#881337] text-white text-sm font-semibold disabled:opacity-60 cursor-pointer"
-                  >
-                    {querySubmitting ? t.submitting : t.raiseQueryBtn}
-                  </button>
-                </form>
-
-                <section className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-4 shadow-2xs">
-                  <h2 className="text-base font-semibold text-slate-900">
-                    {t.myQueries} ({queries.length})
-                  </h2>
-                  {queries.length === 0 ? (
-                    <p className="text-sm text-slate-500 py-8 text-center">{t.noQueriesYet}</p>
-                  ) : (
-                    <div className="divide-y divide-slate-100">
-                      {queries.map((q) => (
-                        <div key={q.queryId} className="py-4 first:pt-0 last:pb-0 space-y-2">
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="text-sm font-semibold text-slate-900 leading-snug">
-                                {q.subject}
-                              </p>
-                              <p className="text-[11px] text-slate-500 mt-0.5">
-                                {formatMonthLabel(q.monthKey)} · {q.category.replace('_', ' ')}
-                              </p>
-                            </div>
-                            <span
-                              className={`text-xs font-bold shrink-0 ${
-                                q.status === 'RESOLVED'
-                                  ? 'text-emerald-700'
-                                  : q.status === 'IN_REVIEW'
-                                    ? 'text-blue-700'
-                                    : 'text-amber-700'
-                              }`}
-                            >
-                              {q.status === 'RESOLVED'
-                                ? t.statusResolved
-                                : q.status === 'IN_REVIEW'
-                                  ? t.statusInReview
-                                  : t.statusOpen}
-                            </span>
-                          </div>
-                          <p className="text-xs text-slate-700 leading-relaxed">{q.message}</p>
-                          {q.adminReply && (
-                            <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-200 text-xs text-emerald-950 leading-relaxed">
-                              <strong className="block text-[11px] text-emerald-800 mb-0.5">
-                                {t.adminReply}
-                              </strong>
-                              {q.adminReply}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              </div>
-            )}
-
-            {/* =============================================================== */}
-            {/* PROFILE & SECURITY TAB                                          */}
+            {/* PROFILE & QUERIES TAB                                           */}
             {/* =============================================================== */}
             {activeTab === 'profile' && (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
-                <form
-                  onSubmit={handleProfileSave}
-                  className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-4 shadow-2xs"
-                >
-                  <h2 className="text-base font-semibold text-slate-900">{t.profileTitle}</h2>
-
-                  {profileMessage && (
-                    <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">
-                      {profileMessage}
-                    </div>
-                  )}
-
-                  <div className="grid grid-cols-2 gap-3 text-xs bg-slate-50 p-3.5 rounded-xl border border-slate-200/70">
-                    <div>
-                      <span className="text-slate-500">{t.salesmanNo}</span>
-                      <p className="font-mono font-semibold text-slate-900 mt-0.5">
-                        {employeeProfile!.employeeId}
-                      </p>
-                    </div>
-                    <div>
-                      <span className="text-slate-500">{t.loginId}</span>
-                      <p className="font-mono font-semibold text-slate-900 mt-0.5">
-                        {employeeProfile!.loginId}
-                      </p>
-                    </div>
-                    <div>
-                      <span className="text-slate-500">{isMr ? 'शाखा' : 'Branch'}</span>
-                      <p className="font-semibold text-slate-900 mt-0.5 truncate">
-                        {employeeProfile!.branchName}
-                      </p>
-                    </div>
-                    <div>
-                      <span className="text-slate-500">{isMr ? 'पद' : 'Designation'}</span>
-                      <p className="font-semibold text-slate-900 mt-0.5 truncate">
-                        {employeeProfile!.designation}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                      {t.phone}
-                    </label>
-                    <input
-                      type="tel"
-                      value={phone}
-                      onChange={(e) => setPhone(e.target.value)}
-                      className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-900/20 focus:border-rose-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                      {t.address}
-                    </label>
-                    <input
-                      type="text"
-                      value={address}
-                      onChange={(e) => setAddress(e.target.value)}
-                      className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-900/20 focus:border-rose-900"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                      {t.emergencyContact}
-                    </label>
-                    <input
-                      type="text"
-                      value={emergencyContact}
-                      onChange={(e) => setEmergencyContact(e.target.value)}
-                      className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-900/20 focus:border-rose-900"
-                    />
-                  </div>
-
+              <PageTransition key="tab-profile" className="space-y-4">
+                {/* Clean segmented switcher between Profile Details & Queries */}
+                <div className="inline-flex p-1 rounded-xl bg-white border border-slate-200/90 shadow-2xs">
                   <button
-                    type="submit"
-                    disabled={profileSaving}
-                    className="w-full h-12 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold disabled:opacity-60 cursor-pointer"
+                    type="button"
+                    onClick={() => setProfileSubView('details')}
+                    className={`h-9 px-4 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                      profileSubView === 'details'
+                        ? 'bg-[#0F1F3D] text-white'
+                        : 'text-slate-600 hover:text-[#0F1F3D]'
+                    }`}
                   >
-                    {profileSaving ? t.saving : t.saveProfile}
+                    {t.profileTitle}
                   </button>
-                </form>
+                  <button
+                    type="button"
+                    onClick={() => setProfileSubView('queries')}
+                    className={`h-9 px-4 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                      profileSubView === 'queries'
+                        ? 'bg-[#0F1F3D] text-white'
+                        : 'text-slate-600 hover:text-[#0F1F3D]'
+                    }`}
+                  >
+                    <span>{t.queriesTitle}</span>
+                    {openQueriesCount > 0 && (
+                      <span
+                        className={`font-mono text-[11px] ${
+                          profileSubView === 'queries' ? 'text-[#DFC27D]' : 'text-[#9A7625]'
+                        }`}
+                      >
+                        ({openQueriesCount})
+                      </span>
+                    )}
+                  </button>
+                </div>
 
-                <form
-                  onSubmit={handlePasswordChange}
-                  className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-4 shadow-2xs"
-                >
-                  <div className="flex items-center gap-2">
-                    <KeyRound className="w-4 h-4 text-[#9F1239]" />
-                    <h2 className="text-base font-semibold text-slate-900">
-                      {t.changePasswordTitle}
-                    </h2>
-                  </div>
+                {profileSubView === 'details' ? (
+                  <form
+                    onSubmit={handleProfileSave}
+                    className="bg-white border border-slate-200/90 rounded-2xl p-4 sm:p-6 space-y-4 shadow-2xs max-w-2xl"
+                  >
+                    <div>
+                      <h2 className="text-base font-semibold text-[#0F1F3D]">{t.profileTitle}</h2>
+                      <p className="text-xs text-slate-500 mt-0.5">{t.profileSub}</p>
+                    </div>
 
-                  {pwdMessage && (
-                    <div
-                      className={`p-3 rounded-xl border text-xs leading-relaxed ${
-                        pwdMessage.type === 'ok'
-                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                          : 'bg-red-50 border-red-200 text-red-800'
-                      }`}
+                    {profileMessage && (
+                      <div
+                        role="alert"
+                        className={`p-3 rounded-xl border text-xs leading-relaxed ${
+                          profileMessage.type === 'ok'
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                            : 'bg-red-50 border-red-200 text-red-800'
+                        }`}
+                      >
+                        {profileMessage.text}
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-3 text-xs bg-[#F8FAFC] p-4 rounded-xl border border-slate-200/70">
+                      <div>
+                        <span className="text-slate-500">{t.salesmanNo}</span>
+                        <p className="font-mono font-semibold text-[#0F1F3D] mt-0.5">
+                          {employeeProfile!.employeeId}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">{t.loginId}</span>
+                        <p className="font-mono font-semibold text-[#0F1F3D] mt-0.5">
+                          {employeeProfile!.loginId}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">{isMr ? 'शाखा' : 'Branch'}</span>
+                        <p className="font-semibold text-[#0F1F3D] mt-0.5 truncate">
+                          {employeeProfile!.branchName}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">{isMr ? 'पद' : 'Designation'}</span>
+                        <p className="font-semibold text-[#0F1F3D] mt-0.5 truncate">
+                          {employeeProfile!.designation}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                        {t.phone}
+                      </label>
+                      <input
+                        type="tel"
+                        value={phone}
+                        onChange={(e) => setPhone(e.target.value)}
+                        className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                        {t.address}
+                      </label>
+                      <input
+                        type="text"
+                        value={address}
+                        onChange={(e) => setAddress(e.target.value)}
+                        className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                        {t.emergencyContact}
+                      </label>
+                      <input
+                        type="text"
+                        value={emergencyContact}
+                        onChange={(e) => setEmergencyContact(e.target.value)}
+                        className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={profileSaving}
+                      className="w-full h-12 rounded-xl bg-[#0F1F3D] hover:bg-[#162B50] active:scale-[0.99] text-white text-sm font-semibold disabled:opacity-60 cursor-pointer transition-all"
                     >
-                      {pwdMessage.text}
-                    </div>
-                  )}
+                      {profileSaving ? t.saving : t.saveProfile}
+                    </button>
+                  </form>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6 items-start">
+                    <form
+                      onSubmit={handleQuerySubmit}
+                      className="lg:col-span-5 bg-white border border-slate-200/90 rounded-2xl p-4 sm:p-6 space-y-4 shadow-2xs"
+                    >
+                      <div>
+                        <h2 className="text-base font-semibold text-[#0F1F3D]">{t.queriesTitle}</h2>
+                        <p className="text-xs text-slate-500 mt-0.5">{t.queriesSub}</p>
+                      </div>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                      {t.newPassword}
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showNewPassword ? 'text' : 'password'}
-                        required
-                        minLength={8}
-                        value={newPassword}
-                        onChange={(e) => setNewPassword(e.target.value)}
-                        className="w-full h-11 pl-3.5 pr-12 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-900/20 focus:border-rose-900"
-                      />
+                      {queryFeedback && (
+                        <div
+                          role="alert"
+                          className={`p-3 rounded-xl border text-xs ${
+                            queryFeedback.type === 'ok'
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                              : 'bg-red-50 border-red-200 text-red-800'
+                          }`}
+                        >
+                          {queryFeedback.text}
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                            {t.queryMonth}
+                          </label>
+                          <select
+                            value={queryMonth}
+                            onChange={(e) => setQueryMonth(e.target.value)}
+                            className="w-full h-11 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-medium text-slate-800"
+                          >
+                            {(availableMonths.length > 0
+                              ? availableMonths
+                              : [getCurrentMonthKeyIST()]
+                            ).map((m) => (
+                              <option key={m} value={m}>
+                                {formatMonthLabel(m)}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                            {t.queryCategory}
+                          </label>
+                          <select
+                            value={queryCategory}
+                            onChange={(e) => setQueryCategory(e.target.value as QueryCategory)}
+                            className="w-full h-11 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-medium text-slate-800"
+                          >
+                            <option value="SALE_AMOUNT">{t.catSaleAmt}</option>
+                            <option value="SALE_QTY">{t.catSaleQty}</option>
+                            <option value="INCENTIVE_MISMATCH">{t.catIncentive}</option>
+                            <option value="PAYOUT_STATUS">{t.catPayout}</option>
+                            <option value="OTHER">{t.catOther}</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                          {t.querySubject}
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          minLength={3}
+                          maxLength={120}
+                          value={querySubject}
+                          onChange={(e) => setQuerySubject(e.target.value)}
+                          placeholder={
+                            isMr
+                              ? 'उदा. ऑक्टोबर न्यू आयटम विक्री तफावत'
+                              : 'e.g. October New Items Sale Qty mismatch'
+                          }
+                          className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                          {t.queryMessage}
+                        </label>
+                        <textarea
+                          required
+                          minLength={5}
+                          maxLength={600}
+                          rows={4}
+                          value={queryMessage}
+                          onChange={(e) => setQueryMessage(e.target.value)}
+                          className="w-full p-3.5 rounded-xl border border-slate-300 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
+                        />
+                      </div>
+
                       <button
-                        type="button"
-                        onClick={() => setShowNewPassword((prev) => !prev)}
-                        aria-label={showNewPassword ? 'Hide password' : 'Show password'}
-                        className="absolute right-1 top-1 h-9 w-9 inline-flex items-center justify-center text-slate-500 hover:text-slate-900 rounded-lg cursor-pointer"
+                        type="submit"
+                        disabled={querySubmitting}
+                        className="w-full h-12 rounded-xl bg-[#0F1F3D] hover:bg-[#162B50] text-white text-sm font-semibold disabled:opacity-60 cursor-pointer transition-colors"
                       >
-                        {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        {querySubmitting ? t.submitting : t.raiseQueryBtn}
                       </button>
-                    </div>
-                  </div>
+                    </form>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                      {t.confirmPassword}
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showConfirmPassword ? 'text' : 'password'}
-                        required
-                        minLength={8}
-                        value={confirmPassword}
-                        onChange={(e) => setConfirmPassword(e.target.value)}
-                        className="w-full h-11 pl-3.5 pr-12 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-900/20 focus:border-rose-900"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowConfirmPassword((prev) => !prev)}
-                        aria-label={showConfirmPassword ? 'Hide password' : 'Show password'}
-                        className="absolute right-1 top-1 h-9 w-9 inline-flex items-center justify-center text-slate-500 hover:text-slate-900 rounded-lg cursor-pointer"
-                      >
-                        {showConfirmPassword ? (
-                          <EyeOff className="w-4 h-4" />
-                        ) : (
-                          <Eye className="w-4 h-4" />
-                        )}
-                      </button>
-                    </div>
+                    <section className="lg:col-span-7 bg-white border border-slate-200/90 rounded-2xl p-4 sm:p-6 space-y-4 shadow-2xs">
+                      <h2 className="text-base font-semibold text-[#0F1F3D]">
+                        {t.myQueries} ({queries.length})
+                      </h2>
+                      {queries.length === 0 ? (
+                        <p className="text-sm text-slate-500 py-8 text-center">{t.noQueriesYet}</p>
+                      ) : (
+                        <div className="divide-y divide-slate-100">
+                          {queries.map((q) => (
+                            <div key={q.queryId} className="py-4 first:pt-0 last:pb-0 space-y-2">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="text-sm font-semibold text-[#0F1F3D] leading-snug">
+                                    {q.subject}
+                                  </p>
+                                  <p className="text-[11px] text-slate-500 mt-0.5">
+                                    {formatMonthLabel(q.monthKey)} · {q.category.replace('_', ' ')}
+                                  </p>
+                                </div>
+                                <span
+                                  className={`text-xs font-bold shrink-0 ${
+                                    q.status === 'RESOLVED'
+                                      ? 'text-emerald-700'
+                                      : q.status === 'IN_REVIEW'
+                                        ? 'text-[#1E3A5F]'
+                                        : 'text-amber-700'
+                                  }`}
+                                >
+                                  {q.status === 'RESOLVED'
+                                    ? t.statusResolved
+                                    : q.status === 'IN_REVIEW'
+                                      ? t.statusInReview
+                                      : t.statusOpen}
+                                </span>
+                              </div>
+                              <p className="text-xs text-slate-700 leading-relaxed">{q.message}</p>
+                              {q.adminReply && (
+                                <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-200 text-xs text-emerald-950 leading-relaxed">
+                                  <strong className="block text-[11px] text-emerald-800 mb-0.5">
+                                    {t.adminReply}
+                                  </strong>
+                                  {q.adminReply}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </section>
                   </div>
-
-                  <button
-                    type="submit"
-                    disabled={pwdSaving}
-                    className="w-full h-12 rounded-xl bg-[#9F1239] hover:bg-[#881337] text-white text-sm font-semibold disabled:opacity-60 cursor-pointer"
-                  >
-                    {pwdSaving ? t.saving : t.updatePassword}
-                  </button>
-                </form>
-              </div>
+                )}
+              </PageTransition>
             )}
-          </>
+
+            {/* =============================================================== */}
+            {/* SETTINGS TAB                                                    */}
+            {/* =============================================================== */}
+            {activeTab === 'settings' && (
+              <PageTransition key="tab-settings">
+                <EmployeeSettingsTab
+                  lang={lang}
+                  isMr={isMr}
+                  t={t}
+                  onToggleLang={toggleLang}
+                  newPassword={newPassword}
+                  setNewPassword={setNewPassword}
+                  confirmPassword={confirmPassword}
+                  setConfirmPassword={setConfirmPassword}
+                  showNewPassword={showNewPassword}
+                  setShowNewPassword={setShowNewPassword}
+                  showConfirmPassword={showConfirmPassword}
+                  setShowConfirmPassword={setShowConfirmPassword}
+                  pwdSaving={pwdSaving}
+                  pwdMessage={pwdMessage}
+                  onPasswordSubmit={handlePasswordChange}
+                  onLogout={logout}
+                />
+              </PageTransition>
+            )}
+          </AnimatePresence>
         )}
-        {activeTab === 'profile' && <CompanyFooter compact />}
+
+        {(activeTab === 'profile' || activeTab === 'settings') && <CompanyFooter compact />}
       </main>
 
-      {/* Native-Style Fixed Bottom Navigation Bar (5 Equal Touch Targets) */}
+      {/* Native-Style Fixed 5-Tab Bottom Navigation Bar (Home / Incentives / Reports / Profile / Settings) */}
       <nav
         aria-label="Employee Navigation"
-        className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 pb-[env(safe-area-inset-bottom)]"
+        className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/90 pb-[env(safe-area-inset-bottom)]"
       >
         <div className="grid grid-cols-5 h-[60px]">
-          {(
-            [
-              ['home', t.tabOverview, Home, unreadCount > 0],
-              ['statements', t.tabStatements, Calendar, false],
-              ['history', t.tabHistory, TrendingUp, false],
-              ['queries', t.tabQueries, MessageSquare, openQueriesCount > 0],
-              ['profile', t.tabProfile, User, false],
-            ] as Array<[StaffTab, string, React.ComponentType<{ className?: string }>, boolean]>
-          ).map(([tab, label, Icon, hasDot]) => {
+          {mobileNavTabs.map(([tab, label, Icon, hasBadge]) => {
             const active = activeTab === tab;
             return (
               <button
@@ -1962,27 +2158,29 @@ export function EmployeePortal() {
                   window.scrollTo({ top: 0, behavior: 'smooth' });
                 }}
                 className={`relative flex flex-col items-center justify-center min-h-[48px] px-1 transition-colors cursor-pointer ${
-                  active ? 'text-[#9F1239]' : 'text-slate-500'
+                  active ? 'text-[#0F1F3D]' : 'text-slate-500'
                 }`}
               >
                 {active && (
-                  <span
+                  <motion.span
+                    layoutId="staff-bottom-nav-indicator"
                     aria-hidden="true"
-                    className="absolute top-0 w-8 h-0.5 rounded-full bg-[#9F1239]"
+                    transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                    className="absolute top-0 w-9 h-0.5 rounded-full bg-[#B8923A]"
                   />
                 )}
                 <span className="relative">
                   <Icon className="w-5 h-5" />
-                  {hasDot && (
+                  {hasBadge && (
                     <span
                       aria-hidden="true"
-                      className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-[#9F1239] ring-2 ring-white"
+                      className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-[#B8923A] ring-2 ring-white"
                     />
                   )}
                 </span>
                 <span
                   className={`text-[10px] mt-1 leading-none truncate max-w-full ${
-                    active ? 'font-bold' : 'font-medium'
+                    active ? 'font-bold text-[#0F1F3D]' : 'font-medium'
                   }`}
                 >
                   {label}

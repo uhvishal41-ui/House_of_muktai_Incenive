@@ -26,7 +26,7 @@ export function BrandLogo({ size = 'sm', framed = true, className = '' }: BrandL
       } ${className}`}
     >
       {failed ? (
-        <span className="font-bold text-rose-900 text-xs tracking-tight select-none">HM</span>
+        <span className="font-bold text-[#0F1F3D] text-xs tracking-tight select-none">HM</span>
       ) : (
         <img
           src={COMPANY_BRAND.logoWebpPath}
@@ -52,17 +52,17 @@ export function CompanyLetterhead({
   rightSlot,
 }: CompanyLetterheadProps) {
   return (
-    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
-      <div className="h-1 w-full bg-gradient-to-r from-[#B91C1C] via-[#DC2626] to-[#EA580C]" />
+    <div className="bg-white border border-slate-200/90 rounded-xl overflow-hidden shadow-2xs">
+      <div className="h-1 w-full bg-gradient-to-r from-[#0F1F3D] via-[#1E3A5F] to-[#B8923A]" />
       <div className="px-4 py-3.5 sm:px-5 sm:py-4 flex flex-col md:flex-row md:items-center justify-between gap-3.5">
         <div className="flex items-center gap-3.5 min-w-0">
           <BrandLogo size="md" />
           <div className="min-w-0">
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-              <h2 className="text-base sm:text-lg font-bold tracking-tight text-slate-900">
+              <h2 className="text-base sm:text-lg font-bold tracking-tight text-[#0F1F3D]">
                 {COMPANY_BRAND.brandName}
               </h2>
-              <span className="text-[11px] font-semibold tracking-wide text-[#9F1239]">
+              <span className="text-[11px] font-semibold tracking-wide text-[#9A7625]">
                 {COMPANY_BRAND.legalName}
               </span>
             </div>

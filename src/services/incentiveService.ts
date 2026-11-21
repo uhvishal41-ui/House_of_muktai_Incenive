@@ -2986,7 +2986,7 @@ export async function markNotificationRead(notificationId: string): Promise<void
   }
 }
 
-// --- STRICTLY READ-ONLY FULL FIRESTORE BACKUP EXPORT (ALL 11 COLLECTIONS) ---
+// --- STRICTLY READ-ONLY FULL FIRESTORE BACKUP EXPORT (ALL 15 COLLECTIONS) ---
 export const BACKUP_COLLECTION_NAMES = [
   'admins',
   'active_auth_uids',
@@ -2999,6 +2999,10 @@ export const BACKUP_COLLECTION_NAMES = [
   'monthly_summaries',
   'notifications',
   'audit_logs',
+  'payout_records',
+  'incentive_adjustments',
+  'sales_targets',
+  'employee_queries',
 ] as const;
 
 export type BackupCollectionName = (typeof BACKUP_COLLECTION_NAMES)[number];
@@ -3043,7 +3047,7 @@ async function computeSha256Hex(text: string): Promise<string> {
 }
 
 /**
- * Super Admin ONLY, STRICTLY READ-ONLY export of all 10 Firestore collections.
+ * Super Admin ONLY, STRICTLY READ-ONLY export of all 15 Firestore collections.
  * Uses unscoped getDocs(collection(db, name)) so zero documents are skipped due to missing sort fields.
  * Performs ZERO Firestore writes.
  */
@@ -3096,7 +3100,7 @@ export async function exportFullFirestoreBackup(): Promise<{
 
   const snapshot: FullFirestoreBackupSnapshot = {
     manifest: {
-      manifestVersion: '2.1.0',
+      manifestVersion: '2.2.0',
       organization: COMPANY_BRAND.brandName,
       legalEntity: COMPANY_BRAND.legalName,
       registeredAddress: COMPANY_BRAND.fullAddress,

@@ -5,8 +5,6 @@ import {
   Download,
   FileSpreadsheet,
   FileText,
-  Target,
-  Trash2,
 } from 'lucide-react';
 import {
   Area,
@@ -23,14 +21,12 @@ import {
   formatINRFromPaise,
   formatMonthLabel,
   formatQty,
+  getCurrentMonthKeyIST,
 } from '../../lib/format';
 import { normalizeRecordPeriod } from '../../lib/incentiveEngine';
 import { downloadManagementBranchSummaryPdf } from '../../lib/pdfGenerator';
-import {
-  deleteSalesTarget,
-  downloadManagementExcelReport,
-  upsertSalesTarget,
-} from '../../services/operationsService';
+import { downloadManagementExcelReport } from '../../services/operationsService';
+import { BranchTargetManager } from './BranchTargetManager';
 import type {
   Branch,
   Employee,
@@ -72,14 +68,6 @@ export function AdminAnalytics({
   const [exportingXlsx, setExportingXlsx] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  // Target form state
-  const [targetScope, setTargetScope] = useState<'BRANCH' | 'EMPLOYEE'>('BRANCH');
-  const [targetBranchId, setTargetBranchId] = useState('');
-  const [targetEmployeeId, setTargetEmployeeId] = useState('');
-  const [targetSaleAmtRupees, setTargetSaleAmtRupees] = useState('');
-  const [targetSaleQty, setTargetSaleQty] = useState('');
-  const [savingTarget, setSavingTarget] = useState(false);
-
   const publishedDailyMonthlyMonthKeys = useMemo(() => {
     const set = new Set<string>();
     for (const rec of incentives) {
@@ -101,7 +89,7 @@ export function AdminAnalytics({
   );
 
   const availableMonths = useMemo(() => {
-    const set = new Set<string>();
+    const set = new Set<string>([getCurrentMonthKeyIST()]);
     for (const s of activeMonthlySummaries) set.add(s.monthKey);
     for (const t of salesTargets) set.add(t.monthKey);
     return Array.from(set).sort((a, b) => b.localeCompare(a));
@@ -113,15 +101,12 @@ export function AdminAnalytics({
       return;
     }
     if (!availableMonths.includes(selectedMonth)) {
-      setSelectedMonth(availableMonths[0]);
+      const latestPublished = activeMonthlySummaries
+        .map((s) => s.monthKey)
+        .sort((a, b) => b.localeCompare(a))[0];
+      setSelectedMonth(latestPublished || availableMonths[0]);
     }
-  }, [availableMonths, selectedMonth]);
-
-  useEffect(() => {
-    if (!targetBranchId && branches.length > 0) {
-      setTargetBranchId(branches[0].branchId);
-    }
-  }, [branches, targetBranchId]);
+  }, [availableMonths, selectedMonth, activeMonthlySummaries]);
 
   const monthSummaries = useMemo(
     () => activeMonthlySummaries.filter((s) => s.monthKey === selectedMonth),
@@ -409,124 +394,6 @@ export function AdminAnalytics({
     });
   }, [employees, monthSummaries, branchAnalytics, selectedBranch]);
 
-  // Month Sales Targets with Live Achievement %
-  const monthTargets = useMemo(() => {
-    const summaryByEmp = new Map<string, MonthlySummary>();
-    for (const s of monthSummaries) summaryByEmp.set(s.employeeId.toUpperCase(), s);
-    const branchById = new Map(branchAnalytics.map((b) => [b.branchId, b]));
-
-    return salesTargets
-      .filter((t) => t.monthKey === selectedMonth)
-      .filter((t) => selectedBranch === 'ALL' || t.branchId === selectedBranch)
-      .map((t) => {
-        let achievedSalePaise = 0;
-        let achievedQty = 0;
-        if (t.scope === 'BRANCH') {
-          const b = branchById.get(t.branchId);
-          achievedSalePaise = b?.saleAmtPaise || 0;
-          achievedQty = b?.saleQty || 0;
-        } else if (t.employeeId) {
-          const s = summaryByEmp.get(t.employeeId.toUpperCase());
-          achievedSalePaise = s
-            ? s.totalSaleAmtPaise ??
-              (s.saleAmt1TotalPaise || 0) +
-                (s.saleAmt2TotalPaise || 0) +
-                (s.saleAmt3TotalPaise || 0)
-            : 0;
-          achievedQty = s
-            ? s.totalSaleQty ??
-              (s.saleQty1Total || 0) + (s.saleQty2Total || 0) + (s.saleQty3Total || 0)
-            : 0;
-        }
-        const salePct =
-          t.targetSaleAmtPaise > 0
-            ? Math.round((achievedSalePaise / t.targetSaleAmtPaise) * 100)
-            : 0;
-        const qtyPct =
-          t.targetSaleQty > 0 ? Math.round((achievedQty / t.targetSaleQty) * 100) : 0;
-        return {
-          ...t,
-          achievedSalePaise,
-          achievedQty,
-          salePct,
-          qtyPct,
-        };
-      });
-  }, [salesTargets, selectedMonth, selectedBranch, monthSummaries, branchAnalytics]);
-
-  const handleSaveTarget = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setFeedback(null);
-    const saleRupees = Number(targetSaleAmtRupees || '0');
-    const qtyNum = Number(targetSaleQty || '0');
-    if (!Number.isFinite(saleRupees) || saleRupees < 0 || !Number.isFinite(qtyNum) || qtyNum < 0) {
-      setFeedback({ type: 'err', text: 'Please enter valid non-negative target numbers.' });
-      return;
-    }
-    if (saleRupees === 0 && qtyNum === 0) {
-      setFeedback({ type: 'err', text: 'Enter at least a Sale Amount or Sale Qty target.' });
-      return;
-    }
-
-    const branch = branches.find((b) => b.branchId === targetBranchId);
-    if (!branch) {
-      setFeedback({ type: 'err', text: 'Please select a branch.' });
-      return;
-    }
-
-    let emp: Employee | undefined;
-    if (targetScope === 'EMPLOYEE') {
-      emp = employees.find((x) => x.employeeId === targetEmployeeId);
-      if (!emp) {
-        setFeedback({ type: 'err', text: 'Please select an employee for personal target.' });
-        return;
-      }
-    }
-
-    setSavingTarget(true);
-    try {
-      await upsertSalesTarget({
-        monthKey: selectedMonth,
-        scope: targetScope,
-        branchId: emp ? emp.branchId : branch.branchId,
-        branchName: emp ? emp.branchName : branch.branchName,
-        employeeId: emp?.employeeId,
-        authUid: emp?.authUid,
-        employeeName: emp?.fullName,
-        targetSaleAmtPaise: Math.round(saleRupees * 100),
-        targetSaleQty: qtyNum,
-      });
-      setTargetSaleAmtRupees('');
-      setTargetSaleQty('');
-      setFeedback({
-        type: 'ok',
-        text: `Saved ${targetScope === 'BRANCH' ? 'branch' : 'employee'} sales target for ${formatMonthLabel(selectedMonth)}.`,
-      });
-      await onRefresh();
-    } catch (err) {
-      setFeedback({
-        type: 'err',
-        text: err instanceof Error ? err.message : 'Unable to save target.',
-      });
-    } finally {
-      setSavingTarget(false);
-    }
-  };
-
-  const handleDeleteTarget = async (targetId: string) => {
-    setFeedback(null);
-    try {
-      await deleteSalesTarget(targetId);
-      setFeedback({ type: 'ok', text: 'Removed monthly sales target.' });
-      await onRefresh();
-    } catch (err) {
-      setFeedback({
-        type: 'err',
-        text: err instanceof Error ? err.message : 'Unable to delete target.',
-      });
-    }
-  };
-
   const handleDownloadXlsx = async () => {
     setExportingXlsx(true);
     setFeedback(null);
@@ -639,14 +506,6 @@ export function AdminAnalytics({
     URL.revokeObjectURL(url);
   };
 
-  const activeBranchEmployees = useMemo(
-    () =>
-      employees
-        .filter((e) => e.status === 'ACTIVE' && (!targetBranchId || e.branchId === targetBranchId))
-        .sort((a, b) => a.fullName.localeCompare(b.fullName)),
-    [employees, targetBranchId],
-  );
-
   return (
     <div className="space-y-6">
       {/* Filter & Export Toolbar */}
@@ -689,7 +548,7 @@ export function AdminAnalytics({
             type="button"
             disabled={exportingXlsx || monthSummaries.length === 0}
             onClick={handleDownloadXlsx}
-            className="h-8 px-3 rounded-lg bg-[#9F1239] hover:bg-[#881337] text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer transition-colors"
+            className="h-8 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer transition-colors"
           >
             <FileSpreadsheet className="w-3.5 h-3.5" />
             {exportingXlsx ? 'Building...' : 'Excel (.xlsx)'}
@@ -732,7 +591,7 @@ export function AdminAnalytics({
 
         <div className="bg-white border border-slate-200 rounded-xl p-4">
           <p className="text-xs text-slate-500 font-medium">Gross Incentive</p>
-          <p className="text-xl font-semibold font-mono tabular-nums text-rose-900 mt-1.5">
+          <p className="text-xl font-semibold font-mono tabular-nums text-[#0F1F3D] mt-1.5">
             {formatINRFromPaise(kpis.grossPaise)}
           </p>
           <p className="text-xs text-slate-500 mt-1">
@@ -848,7 +707,7 @@ export function AdminAnalytics({
                 />
                 <Bar
                   dataKey={chartMetric === 'saleAmt' ? 'saleAmtRupees' : 'grossIncentiveRupees'}
-                  fill={chartMetric === 'saleAmt' ? '#0F172A' : '#881337'}
+                  fill={chartMetric === 'saleAmt' ? '#0F1F3D' : '#B8923A'}
                   radius={[4, 4, 0, 0]}
                 />
               </BarChart>
@@ -876,8 +735,8 @@ export function AdminAnalytics({
                 >
                   <defs>
                     <linearGradient id="muktaiIncGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#881337" stopOpacity={0.22} />
-                      <stop offset="95%" stopColor="#881337" stopOpacity={0.02} />
+                      <stop offset="5%" stopColor="#0F1F3D" stopOpacity={0.22} />
+                      <stop offset="95%" stopColor="#0F1F3D" stopOpacity={0.02} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
@@ -900,7 +759,7 @@ export function AdminAnalytics({
                   <Area
                     type="monotone"
                     dataKey="incentiveRupees"
-                    stroke="#881337"
+                    stroke="#0F1F3D"
                     strokeWidth={2}
                     fill="url(#muktaiIncGrad)"
                   />
@@ -915,7 +774,7 @@ export function AdminAnalytics({
       <section className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div className="p-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Award className="w-4 h-4 text-rose-900" />
+            <Award className="w-4 h-4 text-[#B8923A]" />
             <div>
               <h2 className="text-sm font-semibold text-slate-900">
                 Top Performers Leaderboard ({selectedBranch === 'ALL' ? 'Top 10 Overall' : 'Top 5 in Branch'})
@@ -982,7 +841,7 @@ export function AdminAnalytics({
                     <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
                       {formatQty(row.saleQty)}
                     </td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-rose-900">
+                    <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-[#0F1F3D]">
                       {formatINRFromPaise(row.grandTotalPaise)}
                     </td>
                     <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
@@ -1036,7 +895,7 @@ export function AdminAnalytics({
                   <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">
                     {formatQty(b.saleQty)}
                   </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums font-medium text-rose-900">
+                  <td className="py-2.5 px-3 text-right font-mono tabular-nums font-medium text-[#0F1F3D]">
                     {formatINRFromPaise(b.grossIncentivePaise)}
                   </td>
                   <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">
@@ -1059,177 +918,17 @@ export function AdminAnalytics({
         </div>
       </section>
 
-      {/* Monthly Sales Targets Manager + Achievement Progress */}
-      <section className="bg-white border border-slate-200 rounded-xl p-5 space-y-5">
-        <div className="flex items-center gap-2">
-          <Target className="w-4 h-4 text-rose-900" />
-          <div>
-            <h2 className="text-sm font-semibold text-slate-900">
-              Monthly Sales Targets vs Achievement ({formatMonthLabel(selectedMonth)})
-            </h2>
-            <p className="text-xs text-slate-500">
-              Set monthly Sale Amount &amp; Sale Qty targets for branches or individual employees
-              (visible live on Employee Mobile App)
-            </p>
-          </div>
-        </div>
-
-        <form
-          onSubmit={handleSaveTarget}
-          className="grid grid-cols-1 md:grid-cols-6 gap-3 p-4 rounded-xl bg-slate-50 border border-slate-200"
-        >
-          <div>
-            <label className="block text-[11px] font-medium text-slate-600 mb-1">Scope</label>
-            <select
-              value={targetScope}
-              onChange={(e) => setTargetScope(e.target.value as 'BRANCH' | 'EMPLOYEE')}
-              className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
-            >
-              <option value="BRANCH">Branch Target</option>
-              <option value="EMPLOYEE">Employee Target</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-[11px] font-medium text-slate-600 mb-1">Branch</label>
-            <select
-              value={targetBranchId}
-              onChange={(e) => {
-                setTargetBranchId(e.target.value);
-                setTargetEmployeeId('');
-              }}
-              className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
-            >
-              {branches.map((b) => (
-                <option key={b.branchId} value={b.branchId}>
-                  {b.branchName}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {targetScope === 'EMPLOYEE' && (
-            <div>
-              <label className="block text-[11px] font-medium text-slate-600 mb-1">Employee</label>
-              <select
-                value={targetEmployeeId}
-                onChange={(e) => setTargetEmployeeId(e.target.value)}
-                required
-                className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
-              >
-                <option value="">Select Employee...</option>
-                {activeBranchEmployees.map((emp) => (
-                  <option key={emp.employeeId} value={emp.employeeId}>
-                    {emp.fullName} ({emp.employeeId})
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          <div>
-            <label className="block text-[11px] font-medium text-slate-600 mb-1">
-              Target Sale Amt (₹)
-            </label>
-            <input
-              type="number"
-              min="0"
-              step="100"
-              value={targetSaleAmtRupees}
-              onChange={(e) => setTargetSaleAmtRupees(e.target.value)}
-              placeholder="e.g. 500000"
-              className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-mono"
-            />
-          </div>
-
-          <div>
-            <label className="block text-[11px] font-medium text-slate-600 mb-1">
-              Target Sale Qty
-            </label>
-            <input
-              type="number"
-              min="0"
-              step="1"
-              value={targetSaleQty}
-              onChange={(e) => setTargetSaleQty(e.target.value)}
-              placeholder="e.g. 250"
-              className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-mono"
-            />
-          </div>
-
-          <div className="flex items-end">
-            <button
-              type="submit"
-              disabled={savingTarget}
-              className="w-full h-9 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium disabled:opacity-60 cursor-pointer"
-            >
-              {savingTarget ? 'Saving...' : 'Save Target'}
-            </button>
-          </div>
-        </form>
-
-        {monthTargets.length === 0 ? (
-          <p className="text-xs text-slate-500 text-center py-6">
-            No targets configured for {formatMonthLabel(selectedMonth)} yet. Use the form above to
-            assign targets.
-          </p>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {monthTargets.map((t) => (
-              <div
-                key={t.targetId}
-                className="p-4 rounded-xl border border-slate-200 space-y-2.5"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <p className="text-xs font-semibold text-slate-900">
-                      {t.scope === 'BRANCH'
-                        ? `${t.branchName} · Branch Target`
-                        : `${t.employeeName} (${t.employeeId}) · ${t.branchName}`}
-                    </p>
-                    <p className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
-                      Achieved: {formatINRFromPaise(t.achievedSalePaise)} /{' '}
-                      {formatINRFromPaise(t.targetSaleAmtPaise)}
-                      {t.targetSaleQty > 0
-                        ? ` · Qty ${formatQty(t.achievedQty)} / ${formatQty(t.targetSaleQty)}`
-                        : ''}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span
-                      className={`text-xs font-mono font-semibold ${
-                        t.salePct >= 100
-                          ? 'text-emerald-700'
-                          : t.salePct >= 70
-                            ? 'text-slate-900'
-                            : 'text-amber-700'
-                      }`}
-                    >
-                      {t.salePct}%
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteTarget(t.targetId)}
-                      className="p-1 text-slate-400 hover:text-red-700 cursor-pointer"
-                      aria-label="Delete target"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-                <div className="h-2 w-full bg-slate-100 rounded-sm overflow-hidden">
-                  <div
-                    className={`h-full rounded-sm ${
-                      t.salePct >= 100 ? 'bg-emerald-600' : 'bg-rose-900'
-                    }`}
-                    style={{ width: `${Math.min(100, Math.max(2, t.salePct))}%` }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
+      {/* Branch-Wise & Employee Growth Targets Planner + Live Progress Tracker */}
+      <BranchTargetManager
+        branches={branches}
+        employees={employees}
+        activeMonthlySummaries={activeMonthlySummaries}
+        salesTargets={salesTargets}
+        selectedAnalyticsMonth={selectedMonth}
+        selectedAnalyticsBranch={selectedBranch}
+        onRefresh={onRefresh}
+        onFeedback={setFeedback}
+      />
 
       {/* Zero-Sale & Low-Performer Alerts */}
       <section className="bg-white border border-slate-200 rounded-xl overflow-hidden">

@@ -19,9 +19,9 @@ export const PWAInstallButton: React.FC<Props> = ({ label = 'Install App' }) => 
       <button
         type="button"
         onClick={install}
-        className="h-8 px-3 rounded-lg bg-[#9F1239] hover:bg-[#881337] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+        className="h-8 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] active:scale-[0.98] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-all"
       >
-        <Download className="w-3.5 h-3.5" />
+        <Download className="w-3.5 h-3.5 text-[#DFC27D]" />
         <span>{label}</span>
       </button>
     );

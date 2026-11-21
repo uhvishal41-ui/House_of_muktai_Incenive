@@ -4,13 +4,18 @@
   --font-display: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
   --font-sans: "DM Sans", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-brand-navy: #0F1F3D;
+  --color-brand-navy-light: #162B50;
+  --color-brand-navy-accent: #1E3A5F;
+  --color-brand-gold: #B8923A;
+  --color-brand-gold-soft: #C5A059;
 }
 
 @layer base {
   body {
     font-family: var(--font-sans);
     color: #0f172a;
-    background-color: #f6f7f9;
+    background-color: #F5F7FA;
   }
 
   h1, h2, h3, h4 {
@@ -22,7 +27,7 @@
   input:focus-visible,
   select:focus-visible,
   textarea:focus-visible {
-    outline: 2px solid #9f1239;
+    outline: 2px solid #0F1F3D;
     outline-offset: 2px;
   }
 }
@@ -35,6 +40,17 @@
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 @media print {
   aside,
   header,
@@ -45,6 +61,7 @@
 
   body {
     background: #ffffff !important;
+    color: #0f172a !important;
   }
 
   main {

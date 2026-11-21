@@ -79,10 +79,10 @@ function drawCorporateLetterhead(params: {
   const { doc, logoDataUrl, documentTitle, rightMetaTop, rightMetaBottom, margin } = params;
   const pageWidth = doc.internal.pageSize.getWidth();
 
-  // Top Brand Accent Strip (Crimson + Saffron Orange from official logo)
-  doc.setFillColor(185, 28, 28); // #B91C1C
+  // Top Brand Accent Strip (Corporate Navy + Muted Gold)
+  doc.setFillColor(15, 31, 61); // #0F1F3D
   doc.rect(0, 0, pageWidth * 0.72, 3.2, 'F');
-  doc.setFillColor(234, 88, 12); // #EA580C
+  doc.setFillColor(184, 146, 58); // #B8923A
   doc.rect(pageWidth * 0.72, 0, pageWidth * 0.28, 3.2, 'F');
 
   // Clean White Executive Letterhead Band
@@ -103,12 +103,12 @@ function drawCorporateLetterhead(params: {
   }
 
   // Brand Name & Corporate Legal Entity
-  doc.setTextColor(15, 23, 42);
+  doc.setTextColor(15, 31, 61);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(15);
   doc.text(COMPANY_BRAND.brandNameUpper, textStartX, 13.5);
 
-  doc.setTextColor(159, 18, 57); // #9F1239
+  doc.setTextColor(154, 118, 37); // #9A7625 Muted Gold
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.8);
   doc.text(COMPANY_BRAND.legalName, textStartX, 18.8);
@@ -120,12 +120,12 @@ function drawCorporateLetterhead(params: {
   doc.text(COMPANY_BRAND.addressLine2, textStartX, 27.6);
 
   // Right Document Meta Block
-  doc.setTextColor(15, 23, 42);
+  doc.setTextColor(15, 31, 61);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9.5);
   doc.text(documentTitle, pageWidth - margin, 13.5, { align: 'right' });
 
-  doc.setTextColor(159, 18, 57);
+  doc.setTextColor(154, 118, 37);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.2);
   doc.text(rightMetaTop, pageWidth - margin, 19.2, { align: 'right' });
@@ -266,7 +266,7 @@ export async function downloadEmployeeIncentiveSlipPdf(
   y += 4;
 
   // Table Header
-  doc.setFillColor(15, 23, 42);
+  doc.setFillColor(15, 31, 61);
   doc.rect(margin, y, contentW, 9, 'F');
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
@@ -326,7 +326,7 @@ export async function downloadEmployeeIncentiveSlipPdf(
   doc.text('Gross Total', margin + 3.5, y + 7);
   doc.text(formatRsPdf(input.totalSaleAmtPaise), margin + 96, y + 7, { align: 'right' });
   doc.text(formatQty(input.totalSaleQty), margin + 128, y + 7, { align: 'right' });
-  doc.setTextColor(159, 18, 57);
+  doc.setTextColor(15, 31, 61);
   doc.text(formatRsPdf(input.grossIncentivePaise), pageWidth - margin - 3.5, y + 7, {
     align: 'right',
   });
@@ -375,9 +375,9 @@ export async function downloadEmployeeIncentiveSlipPdf(
 
   // Net Payable Summary Band
   const netPayablePaise = input.grossIncentivePaise + adjustmentsNetPaise;
-  doc.setFillColor(15, 23, 42);
+  doc.setFillColor(15, 31, 61);
   doc.roundedRect(margin, y, contentW, 19, 2, 2, 'F');
-  doc.setFillColor(185, 28, 28);
+  doc.setFillColor(184, 146, 58);
   doc.rect(margin, y, 2.5, 19, 'F');
   doc.setTextColor(203, 213, 225);
   doc.setFont('helvetica', 'normal');
@@ -469,7 +469,7 @@ export async function downloadManagementBranchSummaryPdf(params: {
       margin,
     });
 
-    doc.setFillColor(15, 23, 42);
+    doc.setFillColor(15, 31, 61);
     doc.rect(margin, startY, contentW, 9, 'F');
     doc.setTextColor(255, 255, 255);
     doc.setFont('helvetica', 'bold');
@@ -541,7 +541,7 @@ export async function downloadManagementBranchSummaryPdf(params: {
   doc.rect(margin, y, contentW, 10, 'F');
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
-  doc.setTextColor(159, 18, 57);
+  doc.setTextColor(15, 31, 61);
   doc.text('GRAND TOTAL', margin + 3, y + 6.8);
   doc.setTextColor(15, 23, 42);
   doc.text(String(totStaff), margin + 62, y + 6.8, { align: 'right' });
@@ -550,7 +550,7 @@ export async function downloadManagementBranchSummaryPdf(params: {
   doc.text(formatRsPdf(totGross), margin + 170, y + 6.8, { align: 'right' });
   doc.text(`${grandPct.toFixed(2)}%`, margin + 192, y + 6.8, { align: 'right' });
   doc.text(formatRsPdf(totAdj), margin + 224, y + 6.8, { align: 'right' });
-  doc.setTextColor(159, 18, 57);
+  doc.setTextColor(15, 31, 61);
   doc.text(formatRsPdf(totNet), margin + 256, y + 6.8, { align: 'right' });
   doc.setTextColor(15, 23, 42);
   doc.text(`${totPaid}/${totStaff}`, pageWidth - margin - 2, y + 6.8, { align: 'right' });
@@ -602,12 +602,12 @@ export async function downloadCredentialSheetPdf(params: {
       { align: 'right' },
     );
 
-    doc.setFillColor(255, 241, 242);
-    doc.setDrawColor(253, 164, 175);
+    doc.setFillColor(248, 245, 236);
+    doc.setDrawColor(217, 194, 125);
     doc.roundedRect(margin, afterHead + 3.5, contentW, 7.5, 1.5, 1.5, 'FD');
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
-    doc.setTextColor(159, 18, 57);
+    doc.setTextColor(15, 31, 61);
     doc.text(
       `Default First-Time Password: ${DEFAULT_EMPLOYEE_PASSWORD}   |   Staff must set their own password on first login to view incentives.`,
       margin + 3,
@@ -615,7 +615,7 @@ export async function downloadCredentialSheetPdf(params: {
     );
 
     const tableY = afterHead + 13.5;
-    doc.setFillColor(15, 23, 42);
+    doc.setFillColor(15, 31, 61);
     doc.rect(margin, tableY, contentW, 8, 'F');
     doc.setTextColor(255, 255, 255);
     doc.setFont('helvetica', 'bold');

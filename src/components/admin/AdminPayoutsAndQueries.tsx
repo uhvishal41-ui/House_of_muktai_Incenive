@@ -604,7 +604,7 @@ export function AdminPayoutsAndQueries({
           {editingPayoutRow && (
             <form
               onSubmit={handleSavePayout}
-              className="bg-white border border-rose-300 rounded-xl p-5 space-y-4"
+              className="bg-white border border-[#0F1F3D]/30 rounded-xl p-5 space-y-4"
             >
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -617,7 +617,7 @@ export function AdminPayoutsAndQueries({
                     {formatINRFromPaise(editingPayoutRow.summary.grandTotalPaise)} · Adj{' '}
                     {editingPayoutRow.adjustmentsNetPaise >= 0 ? '+' : ''}
                     {formatINRFromPaise(editingPayoutRow.adjustmentsNetPaise)} · Net Payable{' '}
-                    <strong className="text-rose-900">
+                    <strong className="text-[#0F1F3D]">
                       {formatINRFromPaise(
                         editingPayoutRow.summary.grandTotalPaise +
                           editingPayoutRow.adjustmentsNetPaise,
@@ -690,7 +690,7 @@ export function AdminPayoutsAndQueries({
                 <button
                   type="submit"
                   disabled={savingPayout}
-                  className="h-9 px-4 rounded-lg bg-rose-900 hover:bg-rose-950 text-white text-xs font-medium disabled:opacity-60 cursor-pointer"
+                  className="h-9 px-4 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-medium disabled:opacity-60 cursor-pointer"
                 >
                   {savingPayout ? 'Saving Payout...' : 'Save Payout Status'}
                 </button>
@@ -806,7 +806,7 @@ export function AdminPayoutsAndQueries({
                               <button
                                 type="button"
                                 onClick={() => openPayoutDrawer(row)}
-                                className="inline-flex items-center gap-1 text-xs font-medium text-rose-900 hover:underline cursor-pointer"
+                                className="inline-flex items-center gap-1 text-xs font-medium text-[#0F1F3D] hover:underline cursor-pointer"
                               >
                                 <Wallet className="w-3.5 h-3.5" />
                                 Update
@@ -842,7 +842,7 @@ export function AdminPayoutsAndQueries({
             className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
           >
             <div className="flex items-center gap-2">
-              <PlusCircle className="w-4 h-4 text-rose-900" />
+              <PlusCircle className="w-4 h-4 text-[#0F1F3D]" />
               <div>
                 <h2 className="text-sm font-semibold text-slate-900">
                   Add Bonus, Deduction, Advance, or Return Adjustment ({formatMonthLabel(selectedMonth)})
@@ -1039,7 +1039,7 @@ export function AdminPayoutsAndQueries({
         <div className="space-y-4">
           <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
-              <MessageSquare className="w-4 h-4 text-rose-900" />
+              <MessageSquare className="w-4 h-4 text-[#0F1F3D]" />
               <span className="text-sm font-semibold text-slate-900">
                 Employee Incentive &amp; Sale Queries ({filteredQueries.length})
               </span>

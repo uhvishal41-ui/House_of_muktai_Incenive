@@ -28,8 +28,8 @@ export default defineConfig(() => {
           short_name: 'House of Muktai',
           description:
             'Official 12-Branch Employee Incentive & Sales Tracking Portal for House of Muktai (SHRIMUKTAI MART PRIVATE LIMITED, Baramati, Pune).',
-          theme_color: '#9F1239',
-          background_color: '#F6F7F9',
+          theme_color: '#0F1F3D',
+          background_color: '#F5F7FA',
           display: 'standalone',
           start_url: '/',
           scope: '/',
@@ -105,8 +105,9 @@ export default defineConfig(() => {
           if (error) {
             return;
           }
-          const distDir = path.resolve(__dirname, 'dist');
-          const srcAssets = path.resolve(__dirname, 'src/assets');
+          const rootDir = import.meta.dirname;
+          const distDir = path.resolve(rootDir, 'dist');
+          const srcAssets = path.resolve(rootDir, 'src/assets');
           const distAssets = path.resolve(distDir, 'src/assets');
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
             fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
@@ -116,7 +117,38 @@ export default defineConfig(() => {
     ],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
+      },
+    },
+    build: {
+      chunkSizeWarningLimit: 700,
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              {
+                name: 'vendor-firebase',
+                test: /node_modules[\\/](firebase|@firebase)/,
+                priority: 30,
+              },
+              {
+                name: 'vendor-charts',
+                test: /node_modules[\\/](recharts|d3-|victory-vendor)/,
+                priority: 25,
+              },
+              {
+                name: 'vendor-pdf',
+                test: /node_modules[\\/](jspdf|jspdf-autotable|html2canvas|canvg)/,
+                priority: 25,
+              },
+              {
+                name: 'vendor-motion',
+                test: /node_modules[\\/](motion|framer-motion)/,
+                priority: 20,
+              },
+            ],
+          },
+        },
       },
     },
     server: {

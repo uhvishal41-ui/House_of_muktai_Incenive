@@ -1,5 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowUpRight, FileSpreadsheet, Users } from 'lucide-react';
+import {
+  ArrowUpRight,
+  Award,
+  Building2,
+  Clock,
+  FileSpreadsheet,
+  IndianRupee,
+  MessageSquare,
+  Users,
+} from 'lucide-react';
 import {
   formatINRFromPaise,
   formatMonthLabel,
@@ -9,13 +18,16 @@ import {
 } from '../../lib/format';
 import { normalizeRecordPeriod } from '../../lib/incentiveEngine';
 import { CompanyLetterhead } from '../common/BrandLogo';
+import { AnimatedCounter } from '../common/MotionPrimitives';
 import type {
   Branch,
   Employee,
+  EmployeeQuery,
   ImportBatch,
   MonthlySummary,
   PublishedIncentive,
 } from '../../types/incentive';
+import type { AdminNavTab } from './AdminGlobalSearch';
 
 interface Props {
   branches: Branch[];
@@ -23,7 +35,8 @@ interface Props {
   batches: ImportBatch[];
   incentives: PublishedIncentive[];
   monthlySummaries: MonthlySummary[];
-  onNavigate: (tab: 'branches' | 'employees' | 'import' | 'history') => void;
+  employeeQueries?: EmployeeQuery[];
+  onNavigate: (tab: AdminNavTab) => void;
 }
 
 export function AdminOverview({
@@ -32,9 +45,11 @@ export function AdminOverview({
   batches,
   incentives,
   monthlySummaries,
+  employeeQueries = [],
   onNavigate,
 }: Props) {
   const currentMonth = getCurrentMonthKeyIST();
+  const [selectedBranchId, setSelectedBranchId] = useState<string>('ALL');
 
   const publishedDailyMonthlyMonthKeys = useMemo(() => {
     const set = new Set<string>();
@@ -75,9 +90,16 @@ export function AdminOverview({
   }, [availableMonths, selectedMonth]);
 
   const metrics = useMemo(() => {
+    const branchFilteredAll =
+      selectedBranchId === 'ALL'
+        ? activeMonthlySummaries
+        : activeMonthlySummaries.filter((s) => s.branchId === selectedBranchId);
+
     const monthSummaries = selectedMonth
-      ? activeMonthlySummaries.filter((s) => s.monthKey === selectedMonth)
+      ? branchFilteredAll.filter((s) => s.monthKey === selectedMonth)
       : [];
+
+    const allTimeTotalPaise = branchFilteredAll.reduce((acc, s) => acc + s.grandTotalPaise, 0);
     const totalMonthPaise = monthSummaries.reduce((acc, s) => acc + s.grandTotalPaise, 0);
     const totalComp1Paise = monthSummaries.reduce((acc, s) => acc + s.component1TotalPaise, 0);
     const totalComp2Paise = monthSummaries.reduce((acc, s) => acc + s.component2TotalPaise, 0);
@@ -117,8 +139,13 @@ export function AdminOverview({
           0,
         ) * 100,
       ) / 100;
+
     const activeBranches = branches.filter((b) => b.active).length;
-    const activeEmployees = employees.filter((e) => e.status === 'ACTIVE').length;
+    const scopedEmployees =
+      selectedBranchId === 'ALL'
+        ? employees
+        : employees.filter((e) => e.branchId === selectedBranchId);
+    const activeEmployees = scopedEmployees.filter((e) => e.status === 'ACTIVE').length;
     const pendingBatches = batches.filter(
       (b) =>
         b.status === 'VALIDATED' ||
@@ -126,12 +153,18 @@ export function AdminOverview({
         b.status === 'FAILED' ||
         b.status === 'PROCESSING',
     ).length;
+    const openQueries = employeeQueries.filter((q) => q.status !== 'RESOLVED').length;
 
     const branchTotalsMap: Record<
       string,
       { name: string; totalPaise: number; totalSaleAmtPaise: number; totalSaleQty: number; count: number }
     > = {};
-    for (const b of branches) {
+    const targetBranches =
+      selectedBranchId === 'ALL'
+        ? branches
+        : branches.filter((b) => b.branchId === selectedBranchId);
+
+    for (const b of targetBranches) {
       branchTotalsMap[b.branchId] = {
         name: b.branchName,
         totalPaise: 0,
@@ -171,6 +204,7 @@ export function AdminOverview({
     const maxBranchPaise = Math.max(1, ...branchBreakdown.map((b) => b.totalPaise));
 
     return {
+      allTimeTotalPaise,
       totalMonthPaise,
       totalComp1Paise,
       totalComp2Paise,
@@ -186,10 +220,19 @@ export function AdminOverview({
       activeBranches,
       activeEmployees,
       pendingBatches,
+      openQueries,
       branchBreakdown,
       maxBranchPaise,
     };
-  }, [branches, employees, batches, activeMonthlySummaries, selectedMonth]);
+  }, [
+    branches,
+    employees,
+    batches,
+    employeeQueries,
+    activeMonthlySummaries,
+    selectedMonth,
+    selectedBranchId,
+  ]);
 
   const recentBatches = batches.slice(0, 6);
   const latestPublishedDate =
@@ -197,7 +240,7 @@ export function AdminOverview({
 
   return (
     <div className="space-y-6">
-      {/* Executive Company Identity & Period Header */}
+      {/* Executive Company Identity & Period + Branch Filter Header */}
       <CompanyLetterhead
         documentTitle={
           selectedMonth
@@ -209,6 +252,19 @@ export function AdminOverview({
         }
         rightSlot={
           <div className="inline-flex flex-wrap items-center gap-1.5 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80">
+            <select
+              aria-label="Filter dashboard by branch"
+              value={selectedBranchId}
+              onChange={(e) => setSelectedBranchId(e.target.value)}
+              className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-800 max-w-[175px]"
+            >
+              <option value="ALL">All 12 Branches</option>
+              {branches.map((b) => (
+                <option key={b.branchId} value={b.branchId}>
+                  {b.branchName}
+                </option>
+              ))}
+            </select>
             {availableMonths.length > 0 && (
               <select
                 aria-label="Select overview month"
@@ -226,27 +282,31 @@ export function AdminOverview({
             <button
               type="button"
               onClick={() => onNavigate('import')}
-              className="h-8 px-3 text-xs font-semibold text-white bg-[#9F1239] hover:bg-[#881337] rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+              className="h-8 px-3 text-xs font-semibold text-white bg-[#0F1F3D] hover:bg-[#162B50] active:scale-[0.98] rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-all"
             >
-              <FileSpreadsheet className="w-3.5 h-3.5" />
-              Import Excel
+              <FileSpreadsheet className="w-3.5 h-3.5 text-[#DFC27D]" />
+              Upload Excel
             </button>
           </div>
         }
       />
 
-      {/* Top 4-column KPI strip */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <p className="text-xs font-medium text-slate-500 mb-2">
-            {selectedMonth
-              ? `Published Incentives · ${formatMonthLabel(selectedMonth)}`
-              : 'Published Incentives'}
+      {/* Executive 6-KPI Strip (4 primary on top row / clean responsive grid) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+        <div className="bg-[#0F1F3D] text-white border border-[#1E3A5F] rounded-xl p-5 relative overflow-hidden">
+          <div className="absolute top-0 inset-x-0 h-0.5 bg-gradient-to-r from-[#B8923A] via-[#DFC27D] to-[#B8923A]" />
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <p className="text-xs font-medium text-[#DFC27D]">
+              {selectedMonth
+                ? `Published Incentives · ${formatMonthLabel(selectedMonth)}`
+                : 'Published Incentives'}
+            </p>
+            <IndianRupee className="w-4 h-4 text-[#DFC27D] shrink-0" />
+          </div>
+          <p className="text-2xl font-bold text-white">
+            <AnimatedCounter value={metrics.totalMonthPaise} mode="paise" />
           </p>
-          <p className="text-2xl font-semibold text-slate-900 font-mono tabular-nums">
-            {formatINRFromPaise(metrics.totalMonthPaise)}
-          </p>
-          <p className="text-xs text-slate-600 mt-1.5 font-mono tabular-nums">
+          <p className="text-xs text-slate-300 mt-1.5 font-mono tabular-nums">
             Sale: {formatINRFromPaise(metrics.totalSaleAmtPaise)} · Qty: {formatQty(metrics.totalSaleQty)}
           </p>
           <p className="text-[11px] text-slate-400 mt-0.5">
@@ -258,48 +318,108 @@ export function AdminOverview({
           </p>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <p className="text-xs font-medium text-slate-500 mb-2">Active Retail Branches</p>
-          <p className="text-2xl font-semibold text-slate-900 font-mono tabular-nums">
-            {metrics.activeBranches}
-            <span className="text-sm font-normal text-slate-400"> / {branches.length || 12}</span>
+        <div className="bg-white border border-slate-200/90 rounded-xl p-5 hover:border-slate-300 transition-colors">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <p className="text-xs font-medium text-slate-500">All-Time Published Incentive</p>
+            <Award className="w-4 h-4 text-[#B8923A] shrink-0" />
+          </div>
+          <p className="text-2xl font-semibold text-[#0F1F3D]">
+            <AnimatedCounter value={metrics.allTimeTotalPaise} mode="paise" />
           </p>
           <button
             type="button"
-            onClick={() => onNavigate('branches')}
-            className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-rose-900 hover:underline cursor-pointer"
+            onClick={() => onNavigate('analytics')}
+            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
           >
-            Manage Branch Master
+            Open Analytics &amp; Trends
             <ArrowUpRight className="w-3.5 h-3.5" />
           </button>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <p className="text-xs font-medium text-slate-500 mb-2">Active Employees</p>
-          <p className="text-2xl font-semibold text-slate-900 font-mono tabular-nums">
-            {metrics.activeEmployees}
+        <div className="bg-white border border-slate-200/90 rounded-xl p-5 hover:border-slate-300 transition-colors">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <p className="text-xs font-medium text-slate-500">Active Employees</p>
+            <Users className="w-4 h-4 text-[#1E3A5F] shrink-0" />
+          </div>
+          <p className="text-2xl font-semibold text-[#0F1F3D]">
+            <AnimatedCounter value={metrics.activeEmployees} mode="integer" />
+            <span className="text-sm font-normal text-slate-400 font-mono">
+              {' '}
+              / {employees.length}
+            </span>
           </p>
           <button
             type="button"
             onClick={() => onNavigate('employees')}
-            className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-rose-900 hover:underline cursor-pointer"
+            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
           >
             Manage Employee Accounts
             <ArrowUpRight className="w-3.5 h-3.5" />
           </button>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <p className="text-xs font-medium text-slate-500 mb-2">Pending Approval / Publish</p>
-          <p className="text-2xl font-semibold text-slate-900 font-mono tabular-nums">
-            {metrics.pendingBatches}
+        <div className="bg-white border border-slate-200/90 rounded-xl p-5 hover:border-slate-300 transition-colors">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <p className="text-xs font-medium text-slate-500">Active Retail Branches</p>
+            <Building2 className="w-4 h-4 text-[#B8923A] shrink-0" />
+          </div>
+          <p className="text-2xl font-semibold text-[#0F1F3D]">
+            <AnimatedCounter value={metrics.activeBranches} mode="integer" />
+            <span className="text-sm font-normal text-slate-400 font-mono">
+              {' '}
+              / {branches.length || 12}
+            </span>
+          </p>
+          <button
+            type="button"
+            onClick={() => onNavigate('branches')}
+            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
+          >
+            Manage Branch Master
+            <ArrowUpRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="bg-white border border-slate-200/90 rounded-xl p-5 hover:border-slate-300 transition-colors">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <p className="text-xs font-medium text-slate-500">Pending Approvals / Batches</p>
+            <Clock
+              className={`w-4 h-4 shrink-0 ${
+                metrics.pendingBatches > 0 ? 'text-amber-600' : 'text-emerald-600'
+              }`}
+            />
+          </div>
+          <p className="text-2xl font-semibold text-[#0F1F3D]">
+            <AnimatedCounter value={metrics.pendingBatches} mode="integer" />
           </p>
           <button
             type="button"
             onClick={() => onNavigate(metrics.pendingBatches > 0 ? 'history' : 'import')}
-            className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-rose-900 hover:underline cursor-pointer"
+            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
           >
             {metrics.pendingBatches > 0 ? 'Review Pending Batches' : 'Upload Daily Excel'}
+            <ArrowUpRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="bg-white border border-slate-200/90 rounded-xl p-5 hover:border-slate-300 transition-colors">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <p className="text-xs font-medium text-slate-500">Open Employee Queries</p>
+            <MessageSquare
+              className={`w-4 h-4 shrink-0 ${
+                metrics.openQueries > 0 ? 'text-amber-600' : 'text-emerald-600'
+              }`}
+            />
+          </div>
+          <p className="text-2xl font-semibold text-[#0F1F3D]">
+            <AnimatedCounter value={metrics.openQueries} mode="integer" />
+          </p>
+          <button
+            type="button"
+            onClick={() => onNavigate('payouts')}
+            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
+          >
+            {metrics.openQueries > 0 ? 'Resolve Staff Queries' : 'View Payouts & Queries'}
             <ArrowUpRight className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -308,10 +428,10 @@ export function AdminOverview({
       {/* Main two-column operational section */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
         {/* Branch-wise incentive distribution */}
-        <section className="xl:col-span-7 bg-white border border-slate-200 rounded-xl p-6">
+        <section className="xl:col-span-7 bg-white border border-slate-200/90 rounded-xl p-6">
           <div className="flex items-center justify-between gap-4 mb-5">
             <div>
-              <h2 className="text-base font-semibold text-slate-900">
+              <h2 className="text-base font-semibold text-[#0F1F3D]">
                 Branch-Wise Incentives
               </h2>
               {selectedMonth && (
@@ -320,10 +440,10 @@ export function AdminOverview({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5 p-3.5 rounded-lg bg-slate-50 border border-slate-200 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5 p-3.5 rounded-xl bg-[#F8FAFC] border border-slate-200/80 text-xs">
             <div>
               <p className="text-slate-500 font-medium">New Items Sale</p>
-              <p className="font-mono tabular-nums font-semibold text-slate-900 text-sm mt-0.5">
+              <p className="font-mono tabular-nums font-semibold text-[#0F1F3D] text-sm mt-0.5">
                 {formatINRFromPaise(metrics.totalComp1Paise)}
               </p>
               <p className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
@@ -333,7 +453,7 @@ export function AdminOverview({
             </div>
             <div>
               <p className="text-slate-500 font-medium">Old Items Sale</p>
-              <p className="font-mono tabular-nums font-semibold text-slate-900 text-sm mt-0.5">
+              <p className="font-mono tabular-nums font-semibold text-[#0F1F3D] text-sm mt-0.5">
                 {formatINRFromPaise(metrics.totalComp2Paise)}
               </p>
               <p className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
@@ -343,7 +463,7 @@ export function AdminOverview({
             </div>
             <div>
               <p className="text-slate-500 font-medium">Other Items Sale</p>
-              <p className="font-mono tabular-nums font-semibold text-slate-900 text-sm mt-0.5">
+              <p className="font-mono tabular-nums font-semibold text-[#0F1F3D] text-sm mt-0.5">
                 {formatINRFromPaise(metrics.totalComp3Paise)}
               </p>
               <p className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
@@ -354,14 +474,14 @@ export function AdminOverview({
           </div>
 
           {metrics.branchBreakdown.length === 0 ? (
-            <div className="py-10 text-center border border-dashed border-slate-200 rounded-lg">
+            <div className="py-10 text-center border border-dashed border-slate-200 rounded-xl">
               <p className="text-sm text-slate-600 mb-3">
                 No branches configured yet. Initialize the 12 House of Muktai branches to begin.
               </p>
               <button
                 type="button"
                 onClick={() => onNavigate('branches')}
-                className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 cursor-pointer"
+                className="px-4 py-2 text-xs font-medium text-white bg-[#0F1F3D] rounded-lg hover:bg-[#162B50] cursor-pointer"
               >
                 Open Branch Master
               </button>
@@ -377,7 +497,7 @@ export function AdminOverview({
                   <div key={item.branchId} className="space-y-1.5">
                     <div className="flex items-center justify-between text-sm gap-4">
                       <div className="min-w-0">
-                        <span className="text-slate-700 font-medium truncate block">
+                        <span className="text-[#0F1F3D] font-medium truncate block">
                           {item.name}
                         </span>
                         {(item.totalSaleAmtPaise > 0 || item.totalSaleQty > 0) && (
@@ -387,13 +507,13 @@ export function AdminOverview({
                           </span>
                         )}
                       </div>
-                      <span className="font-mono tabular-nums text-slate-900 font-medium shrink-0">
+                      <span className="font-mono tabular-nums text-[#0F1F3D] font-semibold shrink-0">
                         {formatINRFromPaise(item.totalPaise)}
                       </span>
                     </div>
-                    <div className="h-2 w-full bg-slate-100 rounded-sm overflow-hidden">
+                    <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
                       <div
-                        className="h-full bg-gradient-to-r from-[#9F1239] to-[#EA580C] rounded-sm transition-all duration-300"
+                        className="h-full bg-gradient-to-r from-[#0F1F3D] via-[#1E3A5F] to-[#B8923A] rounded-full transition-all duration-300"
                         style={{ width: `${widthPct}%` }}
                       />
                     </div>
@@ -405,20 +525,20 @@ export function AdminOverview({
         </section>
 
         {/* Recent Import Batches */}
-        <section className="xl:col-span-5 bg-white border border-slate-200 rounded-xl p-6">
+        <section className="xl:col-span-5 bg-white border border-slate-200/90 rounded-xl p-6">
           <div className="flex items-center justify-between gap-4 mb-5">
-            <h2 className="text-base font-semibold text-slate-900">Recent Import Batches</h2>
+            <h2 className="text-base font-semibold text-[#0F1F3D]">Recent Import Batches</h2>
             <button
               type="button"
               onClick={() => onNavigate('history')}
-              className="text-xs font-medium text-[#9F1239] hover:underline cursor-pointer whitespace-nowrap"
+              className="text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer whitespace-nowrap"
             >
               View All
             </button>
           </div>
 
           {recentBatches.length === 0 ? (
-            <div className="py-10 text-center border border-dashed border-slate-200 rounded-lg">
+            <div className="py-10 text-center border border-dashed border-slate-200 rounded-xl">
               <Users className="w-6 h-6 text-slate-400 mx-auto mb-2" />
               <p className="text-sm text-slate-600">No Excel imports uploaded yet</p>
             </div>
@@ -431,7 +551,7 @@ export function AdminOverview({
                     : batch.status === 'REJECTED' || batch.status === 'FAILED'
                       ? 'text-red-700'
                       : batch.status === 'PROCESSING'
-                        ? 'text-blue-700'
+                        ? 'text-[#1E3A5F]'
                         : 'text-amber-700';
                 const batchType = batch.importType || 'DAILY';
                 const periodLabel =
@@ -441,20 +561,20 @@ export function AdminOverview({
                 return (
                   <div key={batch.batchId} className="py-3.5 first:pt-0 last:pb-0">
                     <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm font-medium text-slate-900 truncate">{batch.fileName}</p>
+                      <p className="text-sm font-medium text-[#0F1F3D] truncate">{batch.fileName}</p>
                       <span className={`text-xs font-semibold shrink-0 ${statusColor}`}>
                         {batch.status}
                       </span>
                     </div>
                     <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
                       <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="font-mono font-semibold text-rose-900">{batchType}</span>
+                        <span className="font-mono font-semibold text-[#9A7625]">{batchType}</span>
                         <span aria-hidden="true">·</span>
                         <span className="font-mono tabular-nums">{periodLabel}</span>
                         <span aria-hidden="true">·</span>
                         <span>{batch.totalRows} rows</span>
                       </div>
-                      <span className="font-mono tabular-nums text-slate-700 shrink-0">
+                      <span className="font-mono tabular-nums text-[#0F1F3D] font-medium shrink-0">
                         {formatINRFromPaise(batch.totalIncentivePaise)}
                       </span>
                     </div>

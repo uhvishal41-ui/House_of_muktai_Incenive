@@ -190,7 +190,7 @@ export function BranchMaster({ branches, employees, onRefresh }: Props) {
               placeholder="Search branch code, name, or city..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full h-9 pl-9 pr-3 rounded-lg border border-slate-300 bg-white text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-rose-900/20 focus:border-rose-900"
+              className="w-full h-9 pl-9 pr-3 rounded-lg border border-slate-300 bg-white text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
             />
           </div>
           <span className="hidden md:inline text-xs font-medium text-slate-500 whitespace-nowrap">
@@ -224,7 +224,7 @@ export function BranchMaster({ branches, employees, onRefresh }: Props) {
           <button
             type="button"
             onClick={openCreate}
-            className="h-8 px-3.5 rounded-lg bg-[#9F1239] hover:bg-[#881337] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
+            className="h-8 px-3.5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
           >
             <Plus className="w-3.5 h-3.5" />
             Add Branch
@@ -346,7 +346,7 @@ export function BranchMaster({ branches, employees, onRefresh }: Props) {
                 type="checkbox"
                 checked={active}
                 onChange={(e) => setActive(e.target.checked)}
-                className="rounded border-slate-300 text-rose-900 focus:ring-rose-900"
+                className="rounded border-slate-300 text-[#0F1F3D] focus:ring-[#0F1F3D]"
               />
               Branch is active for ERP Excel imports
             </label>
@@ -420,7 +420,7 @@ export function BranchMaster({ branches, employees, onRefresh }: Props) {
                           <button
                             type="button"
                             onClick={() => openEdit(branch)}
-                            className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-rose-900 cursor-pointer"
+                            className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-[#0F1F3D] cursor-pointer"
                           >
                             <Edit3 className="w-3.5 h-3.5" />
                             Edit

@@ -290,10 +290,10 @@ export function EmployeeMaster({ branches, employees, onRefresh }: Props) {
       <div className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-3">
         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-xs text-slate-600 min-w-0">
-            <ShieldCheck className="w-4 h-4 text-[#9F1239] shrink-0" />
+            <ShieldCheck className="w-4 h-4 text-[#0F1F3D] shrink-0" />
             <span className="truncate">
               Default Password:{' '}
-              <code className="px-1.5 py-0.5 rounded bg-rose-50 text-[#9F1239] font-mono font-semibold">
+              <code className="px-1.5 py-0.5 rounded bg-[#0F1F3D]/[0.07] text-[#0F1F3D] font-mono font-semibold">
                 {DEFAULT_EMPLOYEE_PASSWORD}
               </code>
               <span className="hidden sm:inline text-slate-500"> · Mandatory change on first login</span>
@@ -318,7 +318,7 @@ export function EmployeeMaster({ branches, employees, onRefresh }: Props) {
                   type="button"
                   disabled={bulkProvisioning}
                   onClick={handleBulkProvisionLogins}
-                  className="h-8 px-3 rounded-lg bg-[#9F1239] hover:bg-[#881337] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50 cursor-pointer transition-colors"
+                  className="h-8 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50 cursor-pointer transition-colors"
                 >
                   <KeyRound className="w-3.5 h-3.5" />
                   {bulkProvisioning && bulkProgress
@@ -354,14 +354,14 @@ export function EmployeeMaster({ branches, employees, onRefresh }: Props) {
               }}
               className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50 transition-colors"
             >
-              <FileText className="w-3.5 h-3.5 text-[#9F1239]" />
+              <FileText className="w-3.5 h-3.5 text-[#0F1F3D]" />
               Credentials PDF
             </button>
             <button
               type="button"
               onClick={openCreate}
               disabled={branches.length === 0}
-              className="h-8 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50 transition-colors"
+              className="h-8 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50 transition-colors"
             >
               <Plus className="w-3.5 h-3.5" />
               Add Employee
@@ -377,7 +377,7 @@ export function EmployeeMaster({ branches, employees, onRefresh }: Props) {
               placeholder="Search ID, Login ID, or name..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full h-9 pl-9 pr-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-rose-900/20 focus:border-rose-900"
+              className="w-full h-9 pl-9 pr-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
             />
           </div>
           <select
@@ -429,7 +429,7 @@ export function EmployeeMaster({ branches, employees, onRefresh }: Props) {
           </div>
           <div className="h-1.5 w-full rounded-full bg-slate-700 overflow-hidden">
             <div
-              className="h-full bg-gradient-to-r from-[#DC2626] to-[#EA580C] transition-all"
+              className="h-full bg-gradient-to-r from-[#B8923A] to-[#DFC27D] transition-all"
               style={{
                 width: `${Math.min(100, Math.round((bulkProgress.processed / Math.max(1, bulkProgress.total)) * 100))}%`,
               }}
@@ -509,7 +509,7 @@ export function EmployeeMaster({ branches, employees, onRefresh }: Props) {
 
       {/* Inline Status Change Confirmation Drawer */}
       {confirmToggle && (
-        <div className="bg-white border border-rose-300 rounded-xl p-5 space-y-3">
+        <div className="bg-white border border-[#0F1F3D]/30 rounded-xl p-5 space-y-3">
           <div className="flex items-start justify-between gap-4">
             <div>
               <h3 className="text-sm font-semibold text-slate-900">
@@ -723,7 +723,7 @@ export function EmployeeMaster({ branches, employees, onRefresh }: Props) {
                 type="checkbox"
                 checked={mustChangePassword}
                 onChange={(e) => setMustChangePassword(e.target.checked)}
-                className="rounded border-slate-300 text-rose-900 focus:ring-rose-900"
+                className="rounded border-slate-300 text-[#0F1F3D] focus:ring-[#0F1F3D]"
               />
               Require password change on first employee sign-in
             </label>
@@ -804,7 +804,7 @@ export function EmployeeMaster({ branches, employees, onRefresh }: Props) {
                             type="button"
                             disabled={activatingEmployeeId === emp.employeeId}
                             onClick={() => handleActivateSingleEmployee(emp)}
-                            className="inline-flex items-center gap-1 text-xs font-medium text-[#9F1239] hover:underline disabled:opacity-50 cursor-pointer"
+                            className="inline-flex items-center gap-1 text-xs font-medium text-[#0F1F3D] hover:underline disabled:opacity-50 cursor-pointer"
                           >
                             <KeyRound className="w-3.5 h-3.5" />
                             {activatingEmployeeId === emp.employeeId ? 'Activating...' : 'Activate'}
@@ -828,7 +828,7 @@ export function EmployeeMaster({ branches, employees, onRefresh }: Props) {
                         <button
                           type="button"
                           onClick={() => openEdit(emp)}
-                          className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-rose-900 cursor-pointer"
+                          className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-[#0F1F3D] cursor-pointer"
                         >
                           <Edit3 className="w-3.5 h-3.5" />
                           Edit

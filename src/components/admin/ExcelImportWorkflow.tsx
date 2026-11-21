@@ -115,6 +115,7 @@ export function ExcelImportWorkflow({
   const [showRejectBox, setShowRejectBox] = useState(false);
 
   const [busy, setBusy] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [syncingMasters, setSyncingMasters] = useState(false);
   const [approvingTransferId, setApprovingTransferId] = useState<string | null>(null);
   const [sampleType, setSampleType] = useState<ImportType>('DAILY');
@@ -269,9 +270,15 @@ export function ExcelImportWorkflow({
     }
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const processUploadedFile = async (file: File) => {
+    if (!file.name.toLowerCase().endsWith('.xlsx')) {
+      setFeedback({
+        type: 'err',
+        text: 'Only .xlsx Excel workbooks are supported. Please upload a valid ERP .xlsx file.',
+      });
+      return;
+    }
+
     setBusy(true);
     setFeedback(null);
     setStagedBatch(null);
@@ -337,7 +344,43 @@ export function ExcelImportWorkflow({
       });
     } finally {
       setBusy(false);
-      e.target.value = '';
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await processUploadedFile(file);
+    e.target.value = '';
+  };
+
+  const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!busy) setIsDragging(true);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!busy && !isDragging) setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+    setIsDragging(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    if (busy) return;
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      await processUploadedFile(file);
     }
   };
 
@@ -688,8 +731,8 @@ export function ExcelImportWorkflow({
               Sample .xlsx
             </button>
 
-            <label className="h-8 px-3.5 rounded-lg bg-[#9F1239] hover:bg-[#881337] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors">
-              <Upload className="w-3.5 h-3.5" />
+            <label className="h-8 px-3.5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors">
+              <Upload className="w-3.5 h-3.5 text-[#DFC27D]" />
               <span>{busy ? 'Processing...' : 'Upload .xlsx'}</span>
               <input
                 type="file"
@@ -718,14 +761,48 @@ export function ExcelImportWorkflow({
       )}
 
       {!parsed && (
-        <div className="bg-white border border-dashed border-slate-300 rounded-xl p-10 text-center">
-          <FileSpreadsheet className="w-8 h-8 text-slate-400 mx-auto mb-2.5" />
-          <h3 className="text-sm font-semibold text-slate-900">
-            Upload ERP Incentive Sheet (.xlsx)
+        <div
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className={`rounded-2xl border-2 border-dashed p-10 sm:p-12 text-center transition-all ${
+            isDragging
+              ? 'bg-[#0F1F3D]/[0.04] border-[#B8923A] shadow-sm'
+              : 'bg-white border-slate-300 hover:border-[#0F1F3D]/40'
+          }`}
+        >
+          <div
+            className={`w-12 h-12 rounded-2xl mx-auto mb-3.5 flex items-center justify-center transition-colors ${
+              isDragging
+                ? 'bg-[#0F1F3D] text-[#DFC27D]'
+                : 'bg-[#0F1F3D]/[0.06] text-[#0F1F3D]'
+            }`}
+          >
+            <FileSpreadsheet className="w-6 h-6" />
+          </div>
+          <h3 className="text-sm sm:text-base font-semibold text-[#0F1F3D]">
+            {isDragging
+              ? 'Drop ERP Excel Workbook (.xlsx) Here'
+              : 'Drag & Drop ERP Incentive Sheet (.xlsx)'}
           </h3>
-          <p className="text-xs text-slate-500 mt-1">
-            Daily, Monthly, or Custom Date Range sheets matched by Salesman No.
+          <p className="text-xs text-slate-500 mt-1.5 max-w-md mx-auto leading-relaxed">
+            Supports Daily, Monthly, and Custom Date Range ERP exports matched by Salesman No.
+            Duplicate &amp; overlap protection runs automatically before staging.
           </p>
+          <div className="mt-5 flex flex-wrap items-center justify-center gap-2.5">
+            <label className="h-9 px-4 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-2 cursor-pointer transition-colors shadow-xs">
+              <Upload className="w-3.5 h-3.5 text-[#DFC27D]" />
+              <span>{busy ? 'Parsing Workbook...' : 'Browse .xlsx File'}</span>
+              <input
+                type="file"
+                accept=".xlsx"
+                disabled={busy}
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+            </label>
+          </div>
         </div>
       )}
 
@@ -967,7 +1044,7 @@ export function ExcelImportWorkflow({
                     <label
                       className={`p-3 rounded-lg border cursor-pointer transition-colors ${
                         overlapResolutionMode === 'RECONCILE_SUPERSEDE'
-                          ? 'bg-white border-rose-800 text-slate-900'
+                          ? 'bg-white border-[#0F1F3D] text-slate-900'
                           : 'bg-amber-50/50 border-amber-200 text-amber-950 hover:bg-white/70'
                       }`}
                     >
@@ -1027,7 +1104,7 @@ export function ExcelImportWorkflow({
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
               <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
                 <p className="text-[11px] text-slate-500">Detected Import Type</p>
-                <p className="text-sm font-semibold font-mono text-rose-900 mt-0.5">
+                <p className="text-sm font-semibold font-mono text-[#0F1F3D] mt-0.5">
                   {validation.metrics.detectedImportType || 'INVALID'}
                 </p>
               </div>
@@ -1055,7 +1132,7 @@ export function ExcelImportWorkflow({
               </div>
               <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
                 <p className="text-[11px] text-slate-500">Total Incentive Amount</p>
-                <p className="text-sm font-semibold font-mono tabular-nums text-rose-900 mt-0.5">
+                <p className="text-sm font-semibold font-mono tabular-nums text-[#0F1F3D] mt-0.5">
                   {formatINRFromPaise(validation.metrics.totalIncentivePaise)}
                 </p>
               </div>
@@ -1160,7 +1237,7 @@ export function ExcelImportWorkflow({
           {!stagedBatch &&
             (validation.missingBranches.length > 0 ||
               validation.newEmployeeCandidates.length > 0) && (
-              <section className="bg-white border border-rose-200 rounded-xl p-6 space-y-4">
+              <section className="bg-white border border-[#B8923A]/40 rounded-xl p-6 space-y-4">
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                   <div>
                     <h3 className="text-sm font-semibold text-slate-900">
@@ -1443,7 +1520,7 @@ export function ExcelImportWorkflow({
                   Publishable rows: <strong className="font-mono">{validation.metrics.publishableRows}</strong>{' '}
                   · Total Sale: <strong className="font-mono">{formatINRFromPaise(validation.metrics.totalSaleAmtPaise)}</strong>{' '}
                   (Qty <strong className="font-mono">{formatQty(validation.metrics.totalSaleQty)}</strong>){' '}
-                  · Total Incentive: <strong className="font-mono text-rose-900">{formatINRFromPaise(validation.metrics.totalIncentivePaise)}</strong>
+                  · Total Incentive: <strong className="font-mono text-[#0F1F3D]">{formatINRFromPaise(validation.metrics.totalIncentivePaise)}</strong>
                 </p>
               </div>
 
@@ -1513,7 +1590,7 @@ export function ExcelImportWorkflow({
                     <tr key={row.rowNumber} className="hover:bg-slate-50/70">
                       <td className="py-2.5 px-3 font-mono text-slate-500">{row.rowNumber}</td>
                       <td className="py-2.5 px-3 font-mono tabular-nums text-slate-800 whitespace-nowrap">
-                        <div className="text-[11px] font-semibold text-rose-900">{row.importType}</div>
+                        <div className="text-[11px] font-semibold text-[#0F1F3D]">{row.importType}</div>
                         <div className="text-[11px] text-slate-500">
                           {row.importType === 'DAILY'
                             ? row.periodStart || '—'
@@ -1558,7 +1635,7 @@ export function ExcelImportWorkflow({
                           Qty {formatQty(row.totalSaleQty)}
                         </div>
                       </td>
-                      <td className="py-2.5 px-3 text-right font-mono tabular-nums font-semibold text-rose-900 whitespace-nowrap">
+                      <td className="py-2.5 px-3 text-right font-mono tabular-nums font-semibold text-[#0F1F3D] whitespace-nowrap">
                         {formatINRFromPaise(row.totalPaise)}
                       </td>
                       <td className="py-2.5 px-3 min-w-[260px]">
@@ -1585,7 +1662,7 @@ export function ExcelImportWorkflow({
                             <span
                               className={`inline-flex items-start gap-1 font-medium ${
                                 row.resolution === 'SUPERSEDE_CONFLICTS'
-                                  ? 'text-rose-900'
+                                  ? 'text-[#0F1F3D]'
                                   : row.resolution === 'SKIP' && overlapResolutionMode === 'SKIP_OVERLAP'
                                     ? 'text-amber-800'
                                     : 'text-red-700'
@@ -1595,7 +1672,7 @@ export function ExcelImportWorkflow({
                               <span>{row.errorMessage}</span>
                             </span>
                             {row.resolution === 'SUPERSEDE_CONFLICTS' && (
-                              <div className="text-[11px] font-semibold text-rose-900">
+                              <div className="text-[11px] font-semibold text-[#0F1F3D]">
                                 Policy: Will soft-supersede {row.conflictingRecordIds.length} prior
                                 record(s) and publish this row.
                               </div>
@@ -1739,7 +1816,7 @@ export function ExcelImportWorkflow({
                         type="button"
                         disabled={busy}
                         onClick={handlePublish}
-                        className="h-10 px-5 rounded-lg bg-rose-900 hover:bg-rose-950 text-white text-sm font-medium disabled:opacity-60 cursor-pointer"
+                        className="h-10 px-5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-sm font-medium disabled:opacity-60 cursor-pointer"
                       >
                         {stagedBatch.batch.status === 'FAILED'
                           ? 'Retry Publish'

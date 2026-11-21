@@ -9,6 +9,7 @@ import {
   type Unsubscribe,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
 import type {
@@ -28,7 +29,7 @@ function requireActor() {
   if (!user) throw new Error('Authentication required.');
   return {
     uid: user.uid,
-    email: user.email || 'unknown@homfash.com',
+    email: user.email || 'unknown@houseofmuktai.co.in',
   };
 }
 
@@ -393,7 +394,7 @@ export function subscribeOwnRelevantSalesTargets(
   };
 }
 
-export async function upsertSalesTarget(params: {
+export interface UpsertSalesTargetInput {
   monthKey: string;
   scope: 'BRANCH' | 'EMPLOYEE';
   branchId: string;
@@ -403,13 +404,17 @@ export async function upsertSalesTarget(params: {
   employeeName?: string;
   targetSaleAmtPaise: number;
   targetSaleQty: number;
-}): Promise<SalesTarget> {
-  const actor = requireActor();
-  const now = new Date().toISOString();
+}
+
+function buildSalesTargetRecord(
+  params: UpsertSalesTargetInput,
+  actorEmail: string,
+  now: string,
+): SalesTarget {
   const keyPart = params.scope === 'BRANCH' ? params.branchId : params.employeeId || 'UNKNOWN';
   const targetId = `${params.scope}_${params.monthKey}_${keyPart}`.replace(/[^a-zA-Z0-9_-]/g, '_');
 
-  const record: SalesTarget = {
+  return {
     targetId,
     monthKey: params.monthKey,
     scope: params.scope,
@@ -422,21 +427,64 @@ export async function upsertSalesTarget(params: {
       : {}),
     targetSaleAmtPaise: Math.max(0, Math.round(params.targetSaleAmtPaise)),
     targetSaleQty: Math.max(0, Math.round(params.targetSaleQty * 100) / 100),
-    updatedByEmail: actor.email,
+    updatedByEmail: actorEmail,
     updatedAt: now,
   };
+}
+
+export async function upsertSalesTarget(params: UpsertSalesTargetInput): Promise<SalesTarget> {
+  const actor = requireActor();
+  const now = new Date().toISOString();
+  const record = buildSalesTargetRecord(params, actor.email, now);
 
   try {
-    await setDoc(doc(db, 'sales_targets', targetId), record);
+    await setDoc(doc(db, 'sales_targets', record.targetId), record);
     await writeOpsAuditLog({
       action: 'SALES_TARGET_UPDATED',
       targetType: 'sales_targets',
-      targetId,
+      targetId: record.targetId,
       summary: `Set ${params.scope} target for ${params.scope === 'BRANCH' ? params.branchName : `${params.employeeName} (${params.employeeId})`} in ${params.monthKey}: Sale Rs ${(record.targetSaleAmtPaise / 100).toFixed(0)}, Qty ${record.targetSaleQty}`,
     });
     return record;
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `sales_targets/${targetId}`);
+    handleFirestoreError(error, OperationType.WRITE, `sales_targets/${record.targetId}`);
+  }
+}
+
+export async function upsertSalesTargetsBatch(params: {
+  monthKey: string;
+  branchName: string;
+  items: UpsertSalesTargetInput[];
+  auditSummary?: string;
+}): Promise<SalesTarget[]> {
+  if (params.items.length === 0) return [];
+  const actor = requireActor();
+  const now = new Date().toISOString();
+  const records = params.items.map((item) => buildSalesTargetRecord(item, actor.email, now));
+
+  try {
+    const CHUNK_SIZE = 400;
+    for (let i = 0; i < records.length; i += CHUNK_SIZE) {
+      const slice = records.slice(i, i + CHUNK_SIZE);
+      const batch = writeBatch(db);
+      for (const rec of slice) {
+        batch.set(doc(db, 'sales_targets', rec.targetId), rec);
+      }
+      await batch.commit();
+    }
+
+    await writeOpsAuditLog({
+      action: 'SALES_TARGETS_BULK_UPDATED',
+      targetType: 'sales_targets',
+      targetId: `BULK_${params.monthKey}_${params.branchName}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80),
+      summary:
+        params.auditSummary ||
+        `Bulk saved ${records.length} sales target(s) for ${params.branchName} in ${params.monthKey}`,
+    });
+
+    return records;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'sales_targets');
   }
 }
 

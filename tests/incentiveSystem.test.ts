@@ -1945,6 +1945,98 @@ test('31. firestore.rules supports Super Admin audited batch edit/update/delete 
   assert.ok(empBlockMatch && /allow delete: if false;/.test(empBlockMatch[0]));
 });
 
+// =========================================================================
+// TEST 32: Complete 15-Collection Backup Manifest & Domain Hygiene Invariants
+// =========================================================================
+test('32. BACKUP_COLLECTION_NAMES covers all 15 Firestore collections and operationsService uses houseofmuktai.co.in fallback', () => {
+  const serviceText = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/services/incentiveService.ts'),
+    'utf-8',
+  );
+  const backupArrayMatch = serviceText.match(
+    /export const BACKUP_COLLECTION_NAMES\s*=\s*\[([\s\S]*?)\]\s*as const;/,
+  );
+  assert.ok(backupArrayMatch, 'BACKUP_COLLECTION_NAMES export must exist');
 
+  const expected15Collections = [
+    'admins',
+    'active_auth_uids',
+    'branches',
+    'employees',
+    'import_batches',
+    'import_batch_rows',
+    'published_incentives',
+    'incentive_versions',
+    'monthly_summaries',
+    'notifications',
+    'audit_logs',
+    'payout_records',
+    'incentive_adjustments',
+    'sales_targets',
+    'employee_queries',
+  ];
 
+  for (const col of expected15Collections) {
+    assert.ok(
+      backupArrayMatch[1].includes(`'${col}'`),
+      `BACKUP_COLLECTION_NAMES must include '${col}'`,
+    );
+  }
+  const quotedItems = backupArrayMatch[1].match(/'[^']+'/g) || [];
+  assert.equal(quotedItems.length, 15, 'BACKUP_COLLECTION_NAMES must contain all 15 collections');
+
+  const opsText = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/services/operationsService.ts'),
+    'utf-8',
+  );
+  assert.equal(opsText.includes('unknown@homfash.com'), false);
+  assert.ok(opsText.includes('unknown@houseofmuktai.co.in'));
+});
+
+// =========================================================================
+// TEST 33: Branch-Wise Growth Target (+10% over Last Month) & Progress Math
+// =========================================================================
+test('33. Growth target engine calculates ₹1,00,000 + 10% = ₹1,10,000 cleanly and computes Admin/Employee progress accurately', async () => {
+  const {
+    computeGrowthPctOverBaseline,
+    computeGrowthTargetPaise,
+    computeGrowthTargetQty,
+    computeTargetProgress,
+  } = await import('../src/lib/targetCalculations.ts');
+
+  // Exact user scenario: Last month sale ₹1,00,000 (10,000,000 paise) + 10% growth => ₹1,10,000
+  const targetPaise = computeGrowthTargetPaise(10_000_000, 10);
+  assert.equal(targetPaise, 11_000_000);
+
+  // Implied growth percentage check
+  assert.equal(computeGrowthPctOverBaseline(11_000_000, 10_000_000), 10);
+
+  // Fallback target when new staff had ₹0 sale last month
+  assert.equal(computeGrowthTargetPaise(0, 10, 50_000), 5_000_000);
+
+  // Quantity growth calculation
+  assert.equal(computeGrowthTargetQty(100, 10, true), 110);
+  assert.equal(computeGrowthTargetQty(100, 10, false), 0);
+
+  // Live progress calculation (mid-month ₹66,000 achieved out of ₹1,10,000 => 60%, ₹44,000 remaining)
+  const midMonth = computeTargetProgress({
+    achievedSalePaise: 6_600_000,
+    targetSaleAmtPaise: 11_000_000,
+    achievedQty: 55,
+    targetSaleQty: 110,
+  });
+  assert.equal(midMonth.salePct, 60);
+  assert.equal(midMonth.remainingSalePaise, 4_400_000);
+  assert.equal(midMonth.qtyPct, 50);
+  assert.equal(midMonth.status, 'IN_PROGRESS');
+
+  // Achieved target (>=100%)
+  const completed = computeTargetProgress({
+    achievedSalePaise: 12_100_000,
+    targetSaleAmtPaise: 11_000_000,
+  });
+  assert.equal(completed.salePct, 110);
+  assert.equal(completed.remainingSalePaise, 0);
+  assert.equal(completed.status, 'ACHIEVED');
+});
 

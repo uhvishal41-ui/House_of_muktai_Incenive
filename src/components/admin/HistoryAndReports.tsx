@@ -219,6 +219,78 @@ export function HistoryAndReports({
       .sort((a, b) => b.grandTotalPaise - a.grandTotalPaise);
   }, [activeMonthlySummaries, selectedMonth, selectedBranch]);
 
+  const yearlySummaries = useMemo(() => {
+    const byYear: Record<
+      string,
+      {
+        year: string;
+        months: Set<string>;
+        employees: Set<string>;
+        totalSaleAmtPaise: number;
+        totalSaleQty: number;
+        totalIncentivePaise: number;
+        bestMonthKey: string;
+        bestMonthPaise: number;
+        monthTotals: Record<string, number>;
+      }
+    > = {};
+
+    for (const s of activeMonthlySummaries) {
+      if (selectedBranch !== 'ALL' && s.branchId !== selectedBranch) continue;
+      const year = s.monthKey.slice(0, 4);
+      if (!/^\d{4}$/.test(year)) continue;
+      if (!byYear[year]) {
+        byYear[year] = {
+          year,
+          months: new Set(),
+          employees: new Set(),
+          totalSaleAmtPaise: 0,
+          totalSaleQty: 0,
+          totalIncentivePaise: 0,
+          bestMonthKey: '',
+          bestMonthPaise: -1,
+          monthTotals: {},
+        };
+      }
+      const bucket = byYear[year];
+      bucket.months.add(s.monthKey);
+      bucket.employees.add(s.employeeId);
+      const rowSaleAmt =
+        s.totalSaleAmtPaise ??
+        (s.saleAmt1TotalPaise || 0) + (s.saleAmt2TotalPaise || 0) + (s.saleAmt3TotalPaise || 0);
+      const rowSaleQty =
+        s.totalSaleQty ??
+        (s.saleQty1Total || 0) + (s.saleQty2Total || 0) + (s.saleQty3Total || 0);
+      bucket.totalSaleAmtPaise += rowSaleAmt;
+      bucket.totalSaleQty = Math.round((bucket.totalSaleQty + rowSaleQty) * 100) / 100;
+      bucket.totalIncentivePaise += s.grandTotalPaise;
+      bucket.monthTotals[s.monthKey] = (bucket.monthTotals[s.monthKey] || 0) + s.grandTotalPaise;
+    }
+
+    return Object.values(byYear)
+      .map((y) => {
+        let bestKey = '';
+        let bestVal = -1;
+        for (const [mk, val] of Object.entries(y.monthTotals)) {
+          if (val > bestVal) {
+            bestVal = val;
+            bestKey = mk;
+          }
+        }
+        return {
+          year: y.year,
+          monthsCount: y.months.size,
+          staffCount: y.employees.size,
+          totalSaleAmtPaise: y.totalSaleAmtPaise,
+          totalSaleQty: y.totalSaleQty,
+          totalIncentivePaise: y.totalIncentivePaise,
+          bestMonthKey: bestKey,
+          bestMonthPaise: bestVal > 0 ? bestVal : 0,
+        };
+      })
+      .sort((a, b) => b.year.localeCompare(a.year));
+  }, [activeMonthlySummaries, selectedBranch]);
+
   const reportTotals = useMemo(() => {
     return filteredSummaries.reduce(
       (acc, s) => ({
@@ -1001,7 +1073,7 @@ export function HistoryAndReports({
           {editingBatch && (
             <form
               onSubmit={handleSaveBatchUpdate}
-              className="bg-white border-2 border-rose-900/25 rounded-xl overflow-hidden"
+              className="bg-white border-2 border-[#0F1F3D]/25 rounded-xl overflow-hidden"
             >
               <div className="p-4 sm:p-5 border-b border-slate-200 bg-slate-50/80 flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -1272,7 +1344,7 @@ export function HistoryAndReports({
                                       )
                                     }
                                     title="New Items Sale Incentive (₹)"
-                                    className="h-8 px-1.5 rounded border border-rose-300 bg-rose-50/40 font-mono font-semibold text-[11px] text-right w-full disabled:bg-slate-100"
+                                    className="h-8 px-1.5 rounded border border-[#B8923A]/50 bg-[#B8923A]/[0.06] font-mono font-semibold text-[11px] text-right w-full disabled:bg-slate-100"
                                   />
                                 </div>
                               </td>
@@ -1329,7 +1401,7 @@ export function HistoryAndReports({
                                       )
                                     }
                                     title="Old Items Sale Incentive (₹)"
-                                    className="h-8 px-1.5 rounded border border-rose-300 bg-rose-50/40 font-mono font-semibold text-[11px] text-right w-full disabled:bg-slate-100"
+                                    className="h-8 px-1.5 rounded border border-[#B8923A]/50 bg-[#B8923A]/[0.06] font-mono font-semibold text-[11px] text-right w-full disabled:bg-slate-100"
                                   />
                                 </div>
                               </td>
@@ -1386,13 +1458,13 @@ export function HistoryAndReports({
                                       )
                                     }
                                     title="Other Items Sale Incentive (₹)"
-                                    className="h-8 px-1.5 rounded border border-rose-300 bg-rose-50/40 font-mono font-semibold text-[11px] text-right w-full disabled:bg-slate-100"
+                                    className="h-8 px-1.5 rounded border border-[#B8923A]/50 bg-[#B8923A]/[0.06] font-mono font-semibold text-[11px] text-right w-full disabled:bg-slate-100"
                                   />
                                 </div>
                               </td>
 
                               <td className="py-2.5 px-3 text-right font-mono tabular-nums align-top whitespace-nowrap">
-                                <div className="font-semibold text-rose-900">
+                                <div className="font-semibold text-[#0F1F3D]">
                                   {formatINRFromPaise(row.totalPaise || 0)}
                                 </div>
                                 <div className="text-[10px] text-slate-500">
@@ -1445,7 +1517,7 @@ export function HistoryAndReports({
                     </div>
                     <div>
                       <span className="text-slate-500">Total Incentive:</span>{' '}
-                      <strong className="text-rose-900">
+                      <strong className="text-[#0F1F3D]">
                         {formatINRFromPaise(editLiveTotals.totalIncentivePaise)}
                       </strong>
                     </div>
@@ -1467,7 +1539,7 @@ export function HistoryAndReports({
                     <button
                       type="submit"
                       disabled={savingBatchEdit || editLoadingRows}
-                      className="h-9 px-4 rounded-lg bg-rose-900 hover:bg-rose-950 text-white text-xs font-medium inline-flex items-center gap-1.5 disabled:opacity-60 cursor-pointer"
+                      className="h-9 px-4 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-medium inline-flex items-center gap-1.5 disabled:opacity-60 cursor-pointer"
                     >
                       <Save className="w-3.5 h-3.5" />
                       {savingBatchEdit ? 'Saving Updates...' : 'Save & Update Batch'}
@@ -1521,7 +1593,7 @@ export function HistoryAndReports({
                             )}
                           </td>
                           <td className="py-3 px-4 font-mono tabular-nums text-xs text-slate-700 whitespace-nowrap">
-                            <div className="font-semibold text-rose-900">{bType}</div>
+                            <div className="font-semibold text-[#0F1F3D]">{bType}</div>
                             <div>{bType === 'DAILY' ? bStart : `${bStart} → ${bEnd}`}</div>
                           </td>
                           <td className="py-3 px-4 text-right font-mono tabular-nums text-xs text-slate-700 whitespace-nowrap">
@@ -1569,7 +1641,7 @@ export function HistoryAndReports({
                                     type="button"
                                     disabled={busyBatchId === b.batchId}
                                     onClick={() => handleBatchApprove(b)}
-                                    className="text-xs font-medium text-slate-900 hover:text-rose-900 cursor-pointer"
+                                    className="text-xs font-medium text-[#0F1F3D] hover:text-[#9A7625] cursor-pointer"
                                   >
                                     Approve
                                   </button>
@@ -1590,7 +1662,7 @@ export function HistoryAndReports({
                                     type="button"
                                     disabled={busyBatchId === b.batchId}
                                     onClick={() => handleBatchPublish(b)}
-                                    className="px-2.5 py-1 rounded bg-rose-900 text-white text-xs font-medium hover:bg-rose-950 disabled:opacity-60 cursor-pointer"
+                                    className="px-2.5 py-1 rounded bg-[#0F1F3D] text-white text-xs font-medium hover:bg-[#162B50] disabled:opacity-60 cursor-pointer"
                                   >
                                     {busyBatchId === b.batchId
                                       ? 'Publishing...'
@@ -1738,7 +1810,7 @@ export function HistoryAndReports({
                 type="button"
                 onClick={handleExportManagementXlsx}
                 disabled={filteredSummaries.length === 0 || exportingXlsx}
-                className="h-8 px-3 rounded-lg bg-[#9F1239] hover:bg-[#881337] text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer transition-colors"
+                className="h-8 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer transition-colors"
               >
                 <FileSpreadsheet className="w-3.5 h-3.5" />
                 {exportingXlsx ? 'Building...' : 'Excel (.xlsx)'}
@@ -1948,14 +2020,14 @@ export function HistoryAndReports({
                               Qty: {formatQty(rowSaleQty)}
                             </div>
                           </td>
-                          <td className="py-3 px-3 text-right font-mono tabular-nums font-semibold text-rose-900 whitespace-nowrap">
+                          <td className="py-3 px-3 text-right font-mono tabular-nums font-semibold text-[#0F1F3D] whitespace-nowrap">
                             {formatINRFromPaise(s.grandTotalPaise)}
                           </td>
                           <td className="py-3 px-3 text-right whitespace-nowrap">
                             <button
                               type="button"
                               onClick={() => handleDownloadRowSlip(s)}
-                              className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-rose-900 cursor-pointer"
+                              className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-[#0F1F3D] cursor-pointer"
                               title="Download Employee PDF Incentive Slip"
                             >
                               <FileDown className="w-3.5 h-3.5" />
@@ -1995,7 +2067,7 @@ export function HistoryAndReports({
                           Qty: {formatQty(reportTotals.saleQty)}
                         </div>
                       </td>
-                      <td className="py-3 px-3 text-right font-mono tabular-nums text-rose-900 whitespace-nowrap">
+                      <td className="py-3 px-3 text-right font-mono tabular-nums text-[#0F1F3D] whitespace-nowrap">
                         {formatINRFromPaise(reportTotals.total)}
                       </td>
                       <td className="py-3 px-3" />
@@ -2005,6 +2077,81 @@ export function HistoryAndReports({
               </div>
             )}
           </div>
+
+          {/* Yearly Incentive Summary Table (All Published Years) */}
+          {yearlySummaries.length > 0 && (
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-semibold text-[#0F1F3D]">
+                    Yearly Incentive Summary
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Annual published totals across{' '}
+                    {selectedBranch === 'ALL'
+                      ? 'all branches'
+                      : branches.find((b) => b.branchId === selectedBranch)?.branchName ||
+                        selectedBranch}{' '}
+                    (double-counting-safe monthly summaries).
+                  </p>
+                </div>
+                <span className="text-[11px] font-mono font-semibold text-[#9A7625] bg-[#B8923A]/10 px-2.5 py-1 rounded-md">
+                  {yearlySummaries.length} Year{yearlySummaries.length > 1 ? 's' : ''}
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 font-semibold text-slate-600">
+                      <th className="py-3 px-4">Calendar Year</th>
+                      <th className="py-3 px-4 text-right">Published Months</th>
+                      <th className="py-3 px-4 text-right">Active Staff</th>
+                      <th className="py-3 px-4 text-right">Total Sale Amount</th>
+                      <th className="py-3 px-4 text-right">Total Sale Qty</th>
+                      <th className="py-3 px-4">Peak Month</th>
+                      <th className="py-3 px-4 text-right">Yearly Published Incentive</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {yearlySummaries.map((yr) => (
+                      <tr key={yr.year} className="hover:bg-slate-50/70">
+                        <td className="py-3 px-4 font-semibold text-[#0F1F3D] font-mono">
+                          {yr.year}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
+                          {yr.monthsCount}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
+                          {yr.staffCount}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-800 whitespace-nowrap">
+                          {formatINRFromPaise(yr.totalSaleAmtPaise)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700 whitespace-nowrap">
+                          {formatQty(yr.totalSaleQty)}
+                        </td>
+                        <td className="py-3 px-4 text-slate-700 whitespace-nowrap">
+                          {yr.bestMonthKey ? (
+                            <span>
+                              {formatMonthLabel(yr.bestMonthKey)}{' '}
+                              <span className="font-mono text-slate-500">
+                                ({formatINRFromPaise(yr.bestMonthPaise)})
+                              </span>
+                            </span>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums font-bold text-[#0F1F3D] whitespace-nowrap">
+                          {formatINRFromPaise(yr.totalIncentivePaise)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* Separate Custom Period Statements Table (Never Mixed Into Monthly Sums) */}
           {customPeriodRecords.length > 0 && (
