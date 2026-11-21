@@ -14,6 +14,7 @@ import {
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
 import type {
   AdjustmentType,
+  Employee,
   EmployeeQuery,
   IncentiveAdjustment,
   PaymentMode,
@@ -74,14 +75,34 @@ export async function listAllPayoutRecords(): Promise<PayoutRecord[]> {
   }
 }
 
-export async function fetchOwnPayoutRecords(): Promise<PayoutRecord[]> {
+export async function fetchOwnPayoutRecords(employeeId?: string): Promise<PayoutRecord[]> {
   const actor = requireActor();
   try {
-    const q = query(collection(db, 'payout_records'), where('authUid', '==', actor.uid));
-    const snap = await getDocs(q);
-    return snap.docs
-      .map((d) => d.data() as PayoutRecord)
-      .sort((a, b) => b.monthKey.localeCompare(a.monthKey));
+    const queries = [
+      getDocs(query(collection(db, 'payout_records'), where('authUid', '==', actor.uid))),
+    ];
+    if (employeeId?.trim()) {
+      queries.push(
+        getDocs(query(collection(db, 'payout_records'), where('employeeId', '==', employeeId.trim()))),
+      );
+    }
+    const settled = await Promise.allSettled(queries);
+    const map = new Map<string, PayoutRecord>();
+    let anySucceeded = false;
+    let firstError: unknown = null;
+    for (const res of settled) {
+      if (res.status === 'fulfilled') {
+        anySucceeded = true;
+        for (const d of res.value.docs) {
+          const rec = d.data() as PayoutRecord;
+          map.set(rec.payoutId, rec);
+        }
+      } else if (!firstError) {
+        firstError = res.reason;
+      }
+    }
+    if (!anySucceeded && firstError) throw firstError;
+    return Array.from(map.values()).sort((a, b) => b.monthKey.localeCompare(a.monthKey));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'payout_records');
   }
@@ -90,15 +111,29 @@ export async function fetchOwnPayoutRecords(): Promise<PayoutRecord[]> {
 export function subscribeOwnPayoutRecords(
   uid: string,
   onData: (records: PayoutRecord[]) => void,
+  employeeId?: string,
 ): Unsubscribe {
-  const q = query(collection(db, 'payout_records'), where('authUid', '==', uid));
-  return onSnapshot(
-    q,
+  let byUidMap = new Map<string, PayoutRecord>();
+  let byEmpMap = new Map<string, PayoutRecord>();
+
+  const emitMerged = () => {
+    const merged = new Map<string, PayoutRecord>(byEmpMap);
+    for (const [k, v] of byUidMap.entries()) {
+      merged.set(k, v);
+    }
+    onData(Array.from(merged.values()).sort((a, b) => b.monthKey.localeCompare(a.monthKey)));
+  };
+
+  const unsubUid = onSnapshot(
+    query(collection(db, 'payout_records'), where('authUid', '==', uid)),
     (snap) => {
-      const list = snap.docs
-        .map((d) => d.data() as PayoutRecord)
-        .sort((a, b) => b.monthKey.localeCompare(a.monthKey));
-      onData(list);
+      byUidMap = new Map(
+        snap.docs.map((d) => {
+          const rec = d.data() as PayoutRecord;
+          return [rec.payoutId, rec];
+        }),
+      );
+      emitMerged();
     },
     (error) => {
       try {
@@ -108,9 +143,33 @@ export function subscribeOwnPayoutRecords(
       }
     },
   );
+
+  const cleanEmpId = employeeId?.trim();
+  const unsubEmp = cleanEmpId
+    ? onSnapshot(
+        query(collection(db, 'payout_records'), where('employeeId', '==', cleanEmpId)),
+        (snap) => {
+          byEmpMap = new Map(
+            snap.docs.map((d) => {
+              const rec = d.data() as PayoutRecord;
+              return [rec.payoutId, rec];
+            }),
+          );
+          emitMerged();
+        },
+        () => {
+          // Fallback silently to authUid stream if legacy rules have not been redeployed yet
+        },
+      )
+    : () => {};
+
+  return () => {
+    unsubUid();
+    unsubEmp();
+  };
 }
 
-export async function upsertPayoutRecord(params: {
+export interface UpsertPayoutRecordInput {
   monthKey: string;
   employeeId: string;
   authUid: string;
@@ -124,13 +183,17 @@ export async function upsertPayoutRecord(params: {
   paymentReference?: string;
   paidAt?: string;
   remarks?: string;
-}): Promise<PayoutRecord> {
-  const actor = requireActor();
-  const now = new Date().toISOString();
+}
+
+function buildPayoutRecordPayload(
+  params: UpsertPayoutRecordInput,
+  actorEmail: string,
+  now: string,
+): PayoutRecord {
   const payoutId = `${params.monthKey}_${params.employeeId}`.replace(/[^a-zA-Z0-9_-]/g, '_');
   const netPayablePaise = Math.round(params.grossIncentivePaise + params.adjustmentsNetPaise);
 
-  const payload: PayoutRecord = {
+  return {
     payoutId,
     monthKey: params.monthKey,
     employeeId: params.employeeId,
@@ -146,25 +209,146 @@ export async function upsertPayoutRecord(params: {
     ...(params.paymentReference?.trim()
       ? { paymentReference: params.paymentReference.trim().slice(0, 120) }
       : {}),
-    ...(params.status === 'PAID'
-      ? { paidAt: params.paidAt || now }
-      : {}),
+    ...(params.status === 'PAID' ? { paidAt: params.paidAt || now } : {}),
     ...(params.remarks?.trim() ? { remarks: params.remarks.trim().slice(0, 240) } : {}),
-    updatedByEmail: actor.email,
+    updatedByEmail: actorEmail,
     updatedAt: now,
   };
+}
+
+export async function upsertPayoutRecord(params: UpsertPayoutRecordInput): Promise<PayoutRecord> {
+  const actor = requireActor();
+  const now = new Date().toISOString();
+  const payload = buildPayoutRecordPayload(params, actor.email, now);
 
   try {
-    await setDoc(doc(db, 'payout_records', payoutId), payload);
+    await setDoc(doc(db, 'payout_records', payload.payoutId), payload);
     await writeOpsAuditLog({
       action: `PAYOUT_${params.status}`,
       targetType: 'payout_records',
-      targetId: payoutId,
-      summary: `Marked ${params.employeeName} (${params.employeeId}) for ${params.monthKey} as ${params.status} (Net Rs ${(netPayablePaise / 100).toFixed(2)}, Mode: ${params.paymentMode || 'N/A'})`,
+      targetId: payload.payoutId,
+      summary: `Marked ${params.employeeName} (${params.employeeId}) for ${params.monthKey} as ${params.status} (Net Rs ${(payload.netPayablePaise / 100).toFixed(2)}, Mode: ${params.paymentMode || 'N/A'})`,
     });
     return payload;
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `payout_records/${payoutId}`);
+    handleFirestoreError(error, OperationType.WRITE, `payout_records/${payload.payoutId}`);
+  }
+}
+
+export async function upsertPayoutRecordsBatch(params: {
+  monthKey: string;
+  items: UpsertPayoutRecordInput[];
+  paymentMode?: PaymentMode;
+  paymentReference?: string;
+}): Promise<PayoutRecord[]> {
+  if (params.items.length === 0) return [];
+  const actor = requireActor();
+  const now = new Date().toISOString();
+  const records = params.items.map((item) => buildPayoutRecordPayload(item, actor.email, now));
+
+  try {
+    const CHUNK_SIZE = 400;
+    for (let i = 0; i < records.length; i += CHUNK_SIZE) {
+      const slice = records.slice(i, i + CHUNK_SIZE);
+      const wb = writeBatch(db);
+      for (const rec of slice) {
+        wb.set(doc(db, 'payout_records', rec.payoutId), rec);
+      }
+      await wb.commit();
+    }
+
+    const totalNetPaise = records.reduce((sum, r) => sum + r.netPayablePaise, 0);
+    await writeOpsAuditLog({
+      action: 'PAYOUT_BULK_PAID',
+      targetType: 'payout_records',
+      targetId: `BULK_${params.monthKey}_${Date.now()}`.slice(0, 80),
+      summary: `Bulk marked ${records.length} employee(s) as PAID for ${params.monthKey} (Total Net Rs ${(totalNetPaise / 100).toFixed(2)}, Mode: ${params.paymentMode || 'N/A'}${params.paymentReference ? `, Ref: ${params.paymentReference}` : ''})`,
+    });
+    return records;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'payout_records');
+  }
+}
+
+/**
+ * Super Admin helper: Backfills missing or stale authUid across payout_records,
+ * incentive_adjustments, and employee sales_targets so staff mobile apps stay 100% synced.
+ */
+export async function syncOperationalAuthUids(employees: Employee[]): Promise<{
+  payoutsSynced: number;
+  adjustmentsSynced: number;
+  targetsSynced: number;
+}> {
+  const empUidById = new Map<string, string>();
+  for (const emp of employees) {
+    if (emp.authUid) {
+      empUidById.set(emp.employeeId.trim().toUpperCase(), emp.authUid);
+    }
+  }
+  if (empUidById.size === 0) {
+    return { payoutsSynced: 0, adjustmentsSynced: 0, targetsSynced: 0 };
+  }
+
+  try {
+    const [payoutSnap, adjSnap, tgtSnap] = await Promise.all([
+      getDocs(collection(db, 'payout_records')),
+      getDocs(collection(db, 'incentive_adjustments')),
+      getDocs(collection(db, 'sales_targets')),
+    ]);
+
+    const updates: Array<{ ref: ReturnType<typeof doc>; authUid: string }> = [];
+    let payoutsSynced = 0;
+    let adjustmentsSynced = 0;
+    let targetsSynced = 0;
+
+    for (const d of payoutSnap.docs) {
+      const rec = d.data() as PayoutRecord;
+      const expectedUid = empUidById.get(rec.employeeId.trim().toUpperCase());
+      if (expectedUid && rec.authUid !== expectedUid) {
+        updates.push({ ref: d.ref, authUid: expectedUid });
+        payoutsSynced += 1;
+      }
+    }
+
+    for (const d of adjSnap.docs) {
+      const rec = d.data() as IncentiveAdjustment;
+      const expectedUid = empUidById.get(rec.employeeId.trim().toUpperCase());
+      if (expectedUid && rec.authUid !== expectedUid) {
+        updates.push({ ref: d.ref, authUid: expectedUid });
+        adjustmentsSynced += 1;
+      }
+    }
+
+    for (const d of tgtSnap.docs) {
+      const rec = d.data() as SalesTarget;
+      if (rec.scope !== 'EMPLOYEE' || !rec.employeeId) continue;
+      const expectedUid = empUidById.get(rec.employeeId.trim().toUpperCase());
+      if (expectedUid && rec.authUid !== expectedUid) {
+        updates.push({ ref: d.ref, authUid: expectedUid });
+        targetsSynced += 1;
+      }
+    }
+
+    for (let i = 0; i < updates.length; i += 400) {
+      const wb = writeBatch(db);
+      for (const item of updates.slice(i, i + 400)) {
+        wb.update(item.ref, { authUid: item.authUid });
+      }
+      await wb.commit();
+    }
+
+    if (updates.length > 0) {
+      await writeOpsAuditLog({
+        action: 'OPERATIONAL_AUTH_UID_SYNC',
+        targetType: 'payout_records',
+        targetId: `SYNC_${Date.now()}`,
+        summary: `Synced employee authUid to ${payoutsSynced} payout(s), ${adjustmentsSynced} adjustment(s), and ${targetsSynced} personal target(s) for mobile visibility.`,
+      });
+    }
+
+    return { payoutsSynced, adjustmentsSynced, targetsSynced };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, 'payout_records');
   }
 }
 
@@ -203,19 +387,33 @@ export async function fetchOwnActiveAdjustments(): Promise<IncentiveAdjustment[]
 export function subscribeOwnActiveAdjustments(
   uid: string,
   onData: (adjustments: IncentiveAdjustment[]) => void,
+  employeeId?: string,
 ): Unsubscribe {
-  const q = query(
-    collection(db, 'incentive_adjustments'),
-    where('authUid', '==', uid),
-    where('status', '==', 'ACTIVE'),
-  );
-  return onSnapshot(
-    q,
+  let byUidMap = new Map<string, IncentiveAdjustment>();
+  let byEmpMap = new Map<string, IncentiveAdjustment>();
+
+  const emitMerged = () => {
+    const merged = new Map<string, IncentiveAdjustment>(byEmpMap);
+    for (const [k, v] of byUidMap.entries()) {
+      merged.set(k, v);
+    }
+    onData(Array.from(merged.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+  };
+
+  const unsubUid = onSnapshot(
+    query(
+      collection(db, 'incentive_adjustments'),
+      where('authUid', '==', uid),
+      where('status', '==', 'ACTIVE'),
+    ),
     (snap) => {
-      const list = snap.docs
-        .map((d) => d.data() as IncentiveAdjustment)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      onData(list);
+      byUidMap = new Map(
+        snap.docs.map((d) => {
+          const rec = d.data() as IncentiveAdjustment;
+          return [rec.adjustmentId, rec];
+        }),
+      );
+      emitMerged();
     },
     (error) => {
       try {
@@ -225,6 +423,34 @@ export function subscribeOwnActiveAdjustments(
       }
     },
   );
+
+  const cleanEmpId = employeeId?.trim();
+  const unsubEmp = cleanEmpId
+    ? onSnapshot(
+        query(
+          collection(db, 'incentive_adjustments'),
+          where('employeeId', '==', cleanEmpId),
+          where('status', '==', 'ACTIVE'),
+        ),
+        (snap) => {
+          byEmpMap = new Map(
+            snap.docs.map((d) => {
+              const rec = d.data() as IncentiveAdjustment;
+              return [rec.adjustmentId, rec];
+            }),
+          );
+          emitMerged();
+        },
+        () => {
+          // Fallback silently to authUid stream if legacy rules have not been redeployed yet
+        },
+      )
+    : () => {};
+
+  return () => {
+    unsubUid();
+    unsubEmp();
+  };
 }
 
 export async function createIncentiveAdjustment(params: {
@@ -336,13 +562,18 @@ export async function fetchOwnRelevantSalesTargets(): Promise<SalesTarget[]> {
 export function subscribeOwnRelevantSalesTargets(
   uid: string,
   onData: (targets: SalesTarget[]) => void,
+  employeeId?: string,
 ): Unsubscribe {
   let branchMap = new Map<string, SalesTarget>();
-  let empMap = new Map<string, SalesTarget>();
+  let empUidMap = new Map<string, SalesTarget>();
+  let empIdMap = new Map<string, SalesTarget>();
 
   const emitMerged = () => {
     const merged = new Map<string, SalesTarget>(branchMap);
-    for (const [k, v] of empMap.entries()) {
+    for (const [k, v] of empIdMap.entries()) {
+      merged.set(k, v);
+    }
+    for (const [k, v] of empUidMap.entries()) {
       merged.set(k, v);
     }
     onData(Array.from(merged.values()));
@@ -368,10 +599,10 @@ export function subscribeOwnRelevantSalesTargets(
     },
   );
 
-  const unsubEmp = onSnapshot(
+  const unsubEmpUid = onSnapshot(
     query(collection(db, 'sales_targets'), where('authUid', '==', uid)),
     (snap) => {
-      empMap = new Map(
+      empUidMap = new Map(
         snap.docs.map((d) => {
           const t = d.data() as SalesTarget;
           return [t.targetId, t];
@@ -388,9 +619,29 @@ export function subscribeOwnRelevantSalesTargets(
     },
   );
 
+  const cleanEmpId = employeeId?.trim();
+  const unsubEmpId = cleanEmpId
+    ? onSnapshot(
+        query(collection(db, 'sales_targets'), where('employeeId', '==', cleanEmpId)),
+        (snap) => {
+          empIdMap = new Map(
+            snap.docs.map((d) => {
+              const t = d.data() as SalesTarget;
+              return [t.targetId, t];
+            }),
+          );
+          emitMerged();
+        },
+        () => {
+          // Fallback silently to authUid stream if legacy rules have not been redeployed yet
+        },
+      )
+    : () => {};
+
   return () => {
     unsubBranch();
-    unsubEmp();
+    unsubEmpUid();
+    unsubEmpId();
   };
 }
 

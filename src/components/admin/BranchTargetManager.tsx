@@ -40,6 +40,8 @@ import type {
   SalesTarget,
 } from '../../types/incentive';
 
+export type TargetManagerSection = 'all' | 'planner' | 'branch_progress' | 'employee_progress';
+
 interface Props {
   branches: Branch[];
   employees: Employee[];
@@ -47,6 +49,10 @@ interface Props {
   salesTargets: SalesTarget[];
   selectedAnalyticsMonth: string;
   selectedAnalyticsBranch: string;
+  activeSection?: TargetManagerSection;
+  controlledTargetMonth?: string;
+  onTargetMonthChange?: (monthKey: string) => void;
+  onRequestSection?: (section: 'planner' | 'branch_progress' | 'employee_progress') => void;
   onRefresh: () => Promise<void>;
   onFeedback: (fb: { type: 'ok' | 'err'; text: string } | null) => void;
 }
@@ -87,16 +93,31 @@ export function BranchTargetManager({
   salesTargets,
   selectedAnalyticsMonth,
   selectedAnalyticsBranch,
+  activeSection = 'all',
+  controlledTargetMonth,
+  onTargetMonthChange,
+  onRequestSection,
   onRefresh,
   onFeedback,
 }: Props) {
-  const [targetMonth, setTargetMonth] = useState<string>(
-    () => selectedAnalyticsMonth || getCurrentMonthKeyIST(),
+  const [internalTargetMonth, setInternalTargetMonth] = useState<string>(
+    () => controlledTargetMonth || selectedAnalyticsMonth || getCurrentMonthKeyIST(),
   );
+  const targetMonth = controlledTargetMonth || internalTargetMonth;
+  const setTargetMonth = (nextMonth: string) => {
+    setInternalTargetMonth(nextMonth);
+    onTargetMonthChange?.(nextMonth);
+  };
   const [baselineMonth, setBaselineMonth] = useState<string>(() =>
-    getPreviousMonthKey(selectedAnalyticsMonth || getCurrentMonthKeyIST()),
+    getPreviousMonthKey(controlledTargetMonth || selectedAnalyticsMonth || getCurrentMonthKeyIST()),
   );
   const [plannerMode, setPlannerMode] = useState<PlannerMode>('BULK_BRANCH');
+
+  useEffect(() => {
+    if (controlledTargetMonth) {
+      setBaselineMonth(getPreviousMonthKey(controlledTargetMonth));
+    }
+  }, [controlledTargetMonth]);
 
   // Bulk Branch-wise planner state
   const [bulkBranchId, setBulkBranchId] = useState<string>('');
@@ -710,12 +731,34 @@ export function BranchTargetManager({
     setSingleEmployeeId(t.employeeId || '');
     setSingleSaleRupees(t.targetSaleAmtPaise > 0 ? String(Math.round(t.targetSaleAmtPaise / 100)) : '');
     setSingleSaleQty(t.targetSaleQty > 0 ? String(t.targetSaleQty) : '');
-    document.getElementById('branch-target-planner-top')?.scrollIntoView({ behavior: 'smooth' });
+    if (onRequestSection && activeSection !== 'planner') {
+      onRequestSection('planner');
+    } else {
+      document.getElementById('branch-target-planner-top')?.scrollIntoView({ behavior: 'smooth' });
+    }
   };
 
   const allBulkSelected =
     bulkBranchEmployees.length > 0 &&
     bulkBranchEmployees.every((e) => draftRows[e.employeeId]?.selected);
+
+  const showPlanner = activeSection === 'all' || activeSection === 'planner';
+  const showBranchProgress = activeSection === 'all' || activeSection === 'branch_progress';
+  const showEmployeeProgress = activeSection === 'all' || activeSection === 'employee_progress';
+
+  const headerTitle =
+    activeSection === 'branch_progress'
+      ? `Branch-Wise Target Progress (${formatMonthLabel(targetMonth)})`
+      : activeSection === 'employee_progress'
+        ? `Employee-Wise Target Progress (${formatMonthLabel(targetMonth)})`
+        : `Branch-Wise & Employee Growth Targets (${formatMonthLabel(targetMonth)})`;
+
+  const headerSubtitle =
+    activeSection === 'branch_progress'
+      ? 'Track branch-level target achievement vs last month baseline. Click any branch card to inspect its staff progress.'
+      : activeSection === 'employee_progress'
+        ? 'Real-time progress synced identically to each employee’s mobile app (staff.houseofmuktai.co.in).'
+        : 'Set monthly targets branch-wise using last month’s sale + growth % (e.g. +10%). Progress syncs live to Admin & Staff Mobile App.';
 
   return (
     <section
@@ -726,16 +769,17 @@ export function BranchTargetManager({
       <div className="p-4 sm:p-5 border-b border-slate-200 bg-slate-50/70 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="flex items-start gap-2.5">
           <div className="w-9 h-9 rounded-xl bg-[#0F1F3D] text-[#DFC27D] flex items-center justify-center shrink-0">
-            <Target className="w-4 h-4" />
+            {activeSection === 'branch_progress' ? (
+              <Building2 className="w-4 h-4" />
+            ) : activeSection === 'employee_progress' ? (
+              <Users className="w-4 h-4" />
+            ) : (
+              <Target className="w-4 h-4" />
+            )}
           </div>
           <div>
-            <h2 className="text-sm sm:text-base font-semibold text-[#0F1F3D]">
-              Branch-Wise &amp; Employee Growth Targets ({formatMonthLabel(targetMonth)})
-            </h2>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Set monthly targets branch-wise using last month&apos;s sale + growth % (e.g. +10%).
-              Progress syncs live to both Admin Panel &amp; Employee Mobile App.
-            </p>
+            <h2 className="text-sm sm:text-base font-semibold text-[#0F1F3D]">{headerTitle}</h2>
+            <p className="text-xs text-slate-500 mt-0.5">{headerSubtitle}</p>
           </div>
         </div>
 
@@ -776,46 +820,48 @@ export function BranchTargetManager({
       </div>
 
       <div className="p-4 sm:p-5 space-y-6">
-        {/* Planner Mode Switcher */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="inline-flex p-1 bg-slate-100 rounded-xl border border-slate-200/80 text-xs">
-            <button
-              type="button"
-              onClick={() => setPlannerMode('BULK_BRANCH')}
-              className={`px-3 py-1.5 rounded-lg font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
-                plannerMode === 'BULK_BRANCH'
-                  ? 'bg-[#0F1F3D] text-white shadow-xs'
-                  : 'text-slate-600 hover:text-[#0F1F3D]'
-              }`}
-            >
-              <Calculator className="w-3.5 h-3.5" />
-              Branch-Wise Auto Target (Last Month + %)
-            </button>
-            <button
-              type="button"
-              onClick={() => setPlannerMode('SINGLE')}
-              className={`px-3 py-1.5 rounded-lg font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
-                plannerMode === 'SINGLE'
-                  ? 'bg-[#0F1F3D] text-white shadow-xs'
-                  : 'text-slate-600 hover:text-[#0F1F3D]'
-              }`}
-            >
-              <Target className="w-3.5 h-3.5" />
-              Single Branch / Employee Target
-            </button>
-          </div>
+        {showPlanner && (
+          <>
+            {/* Planner Mode Switcher */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="inline-flex p-1 bg-slate-100 rounded-xl border border-slate-200/80 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setPlannerMode('BULK_BRANCH')}
+                  className={`px-3 py-1.5 rounded-lg font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                    plannerMode === 'BULK_BRANCH'
+                      ? 'bg-[#0F1F3D] text-white shadow-xs'
+                      : 'text-slate-600 hover:text-[#0F1F3D]'
+                  }`}
+                >
+                  <Calculator className="w-3.5 h-3.5" />
+                  Branch-Wise Auto Target (Last Month + %)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPlannerMode('SINGLE')}
+                  className={`px-3 py-1.5 rounded-lg font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                    plannerMode === 'SINGLE'
+                      ? 'bg-[#0F1F3D] text-white shadow-xs'
+                      : 'text-slate-600 hover:text-[#0F1F3D]'
+                  }`}
+                >
+                  <Target className="w-3.5 h-3.5" />
+                  Single Branch / Employee Target
+                </button>
+              </div>
 
-          <span className="text-xs text-slate-500 font-mono">
-            {savedTargetsForMonth.filter((t) => t.scope === 'EMPLOYEE').length} staff targets ·{' '}
-            {savedTargetsForMonth.filter((t) => t.scope === 'BRANCH').length} branch targets in{' '}
-            {formatMonthLabel(targetMonth)}
-          </span>
-        </div>
+              <span className="text-xs text-slate-500 font-mono">
+                {savedTargetsForMonth.filter((t) => t.scope === 'EMPLOYEE').length} staff targets ·{' '}
+                {savedTargetsForMonth.filter((t) => t.scope === 'BRANCH').length} branch targets in{' '}
+                {formatMonthLabel(targetMonth)}
+              </span>
+            </div>
 
-        {/* =============================================================== */}
-        {/* MODE 1: BRANCH-WISE BULK AUTO-TARGET GENERATOR (LAST MONTH + %) */}
-        {/* =============================================================== */}
-        {plannerMode === 'BULK_BRANCH' && (
+            {/* =============================================================== */}
+            {/* MODE 1: BRANCH-WISE BULK AUTO-TARGET GENERATOR (LAST MONTH + %) */}
+            {/* =============================================================== */}
+            {plannerMode === 'BULK_BRANCH' && (
           <div className="rounded-xl border border-slate-200 bg-slate-50/60 overflow-hidden">
             {/* Controls Strip */}
             <div className="p-4 border-b border-slate-200 bg-white space-y-3.5">
@@ -1328,47 +1374,71 @@ export function BranchTargetManager({
             </div>
           </form>
         )}
+          </>
+        )}
 
         {/* =============================================================== */}
         {/* LIVE BRANCH-WISE TARGET PROGRESS SUMMARY CARDS                  */}
         {/* =============================================================== */}
-        {branchProgressCards.length > 0 && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Building2 className="w-4 h-4 text-[#0F1F3D]" />
-                <h3 className="text-xs sm:text-sm font-semibold text-[#0F1F3D]">
-                  Branch-Wise Target Progress ({formatMonthLabel(targetMonth)})
-                </h3>
-              </div>
-              {progressBranchFilter !== 'ALL' && (
+        {showBranchProgress && (
+          branchProgressCards.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-slate-200 p-10 text-center space-y-3">
+              <p className="text-sm font-medium text-slate-700">
+                No branch targets configured for {formatMonthLabel(targetMonth)} yet.
+              </p>
+              <p className="text-xs text-slate-500">
+                Use the Growth Targets planner to generate branch-wise targets using last month&apos;s
+                sale + growth %.
+              </p>
+              {onRequestSection && (
                 <button
                   type="button"
-                  onClick={() => setProgressBranchFilter('ALL')}
-                  className="text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
+                  onClick={() => onRequestSection('planner')}
+                  className="h-9 px-4 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
                 >
-                  Show All Branches
+                  <Calculator className="w-3.5 h-3.5 text-[#DFC27D]" />
+                  Open Growth Targets Planner
                 </button>
               )}
             </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5">
-              {branchProgressCards.map((card) => {
-                const isSelected = progressBranchFilter === card.branchId;
-                return (
-                  <div
-                    key={card.branchId}
-                    onClick={() =>
-                      setProgressBranchFilter((prev) =>
-                        prev === card.branchId ? 'ALL' : card.branchId,
-                      )
-                    }
-                    className={`rounded-xl border p-4 space-y-2.5 cursor-pointer transition-all ${
-                      isSelected
-                        ? 'border-[#0F1F3D] bg-[#0F1F3D]/[0.03] shadow-xs'
-                        : 'border-slate-200 bg-white hover:border-slate-300'
-                    }`}
+          ) : (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Building2 className="w-4 h-4 text-[#0F1F3D]" />
+                  <h3 className="text-xs sm:text-sm font-semibold text-[#0F1F3D]">
+                    Branch-Wise Target Progress ({formatMonthLabel(targetMonth)})
+                  </h3>
+                </div>
+                {progressBranchFilter !== 'ALL' && (
+                  <button
+                    type="button"
+                    onClick={() => setProgressBranchFilter('ALL')}
+                    className="text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
                   >
+                    Show All Branches
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5">
+                {branchProgressCards.map((card) => {
+                  const isSelected = progressBranchFilter === card.branchId;
+                  return (
+                    <div
+                      key={card.branchId}
+                      onClick={() => {
+                        setProgressBranchFilter(card.branchId);
+                        if (onRequestSection && activeSection === 'branch_progress') {
+                          onRequestSection('employee_progress');
+                        }
+                      }}
+                      className={`rounded-xl border p-4 space-y-2.5 cursor-pointer transition-all ${
+                        isSelected
+                          ? 'border-[#0F1F3D] bg-[#0F1F3D]/[0.03] shadow-xs'
+                          : 'border-slate-200 bg-white hover:border-[#0F1F3D]/40 hover:shadow-xs'
+                      }`}
+                    >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <p className="text-xs font-bold text-[#0F1F3D] truncate">
@@ -1434,16 +1504,18 @@ export function BranchTargetManager({
                       </span>
                     </div>
                   </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          )
         )}
 
         {/* =============================================================== */}
         {/* LIVE EMPLOYEE-WISE TARGET PROGRESS TABLE (ADMIN VIEW)           */}
         {/* =============================================================== */}
-        <div className="space-y-3">
+        {showEmployeeProgress && (
+          <div className="space-y-3">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <Users className="w-4 h-4 text-[#0F1F3D]" />
@@ -1645,7 +1717,8 @@ export function BranchTargetManager({
               </div>
             </div>
           )}
-        </div>
+          </div>
+        )}
       </div>
     </section>
   );

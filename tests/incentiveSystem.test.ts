@@ -2040,3 +2040,53 @@ test('33. Growth target engine calculates ₹1,00,000 + 10% = ₹1,10,000 cleanl
   assert.equal(completed.status, 'ACHIEVED');
 });
 
+// =========================================================================
+// TEST 34: Payout / Adjustment / Target Mobile Sync & activeEmployeeId Rules
+// =========================================================================
+test('34. firestore.rules & services ensure PAID payouts, adjustments, and personal targets always sync to active Employee mobile portal', () => {
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
+
+  // 1. Server-trusted activeEmployeeId() helper reads from active_auth_uids/{uid}
+  assert.match(
+    rulesNoComments,
+    /function activeEmployeeId\(\)\s*\{\s*return get\(\/databases\/\$\(database\)\/documents\/active_auth_uids\/\$\(request\.auth\.uid\)\)\.data\.employeeId;\s*\}/,
+  );
+
+  // 2. payout_records, incentive_adjustments, and sales_targets strictly gate by isActiveEmployee() + (authUid || activeEmployeeId())
+  const payoutBlock = rulesNoComments.match(/match \/payout_records\/\{payoutId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(payoutBlock, 'payout_records match block must exist');
+  assert.match(payoutBlock[0], /isActiveEmployee\(\) && \(existing\(\)\.authUid == request\.auth\.uid \|\| existing\(\)\.employeeId == activeEmployeeId\(\)\)/);
+  assert.match(payoutBlock[0], /isActiveEmployee\(\) && \(resource\.data\.authUid == request\.auth\.uid \|\| resource\.data\.employeeId == activeEmployeeId\(\)\)/);
+
+  const adjBlock = rulesNoComments.match(/match \/incentive_adjustments\/\{adjustmentId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(adjBlock, 'incentive_adjustments match block must exist');
+  assert.match(adjBlock[0], /isActiveEmployee\(\) && resource\.data\.status == 'ACTIVE' && \(resource\.data\.authUid == request\.auth\.uid \|\| resource\.data\.employeeId == activeEmployeeId\(\)\)/);
+
+  const targetBlock = rulesNoComments.match(/match \/sales_targets\/\{targetId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(targetBlock, 'sales_targets match block must exist');
+  assert.match(targetBlock[0], /isActiveEmployee\(\) && \(resource\.data\.scope == 'BRANCH' \|\| resource\.data\.authUid == request\.auth\.uid \|\| resource\.data\.employeeId == activeEmployeeId\(\)\)/);
+
+  // 3. incentiveService.ts backfills authUid across payout_records, incentive_adjustments, and sales_targets too
+  const svcText = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/services/incentiveService.ts'),
+    'utf-8',
+  );
+  assert.ok(svcText.includes("collection(db, 'payout_records'), where('employeeId', '==', cleanEmpId)"));
+  assert.ok(svcText.includes("collection(db, 'incentive_adjustments'), where('employeeId', '==', cleanEmpId)"));
+  assert.ok(svcText.includes("collection(db, 'sales_targets'), where('employeeId', '==', cleanEmpId)"));
+  assert.ok(svcText.includes('payoutsUpdated'));
+  assert.ok(svcText.includes('adjustmentsUpdated'));
+  assert.ok(svcText.includes('targetsUpdated'));
+
+  // 4. operationsService.ts supports dual authUid + employeeId subscription, batch payout upsert, and operational sync
+  const opsText = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/services/operationsService.ts'),
+    'utf-8',
+  );
+  assert.ok(opsText.includes('export async function upsertPayoutRecordsBatch'));
+  assert.ok(opsText.includes('export async function syncOperationalAuthUids'));
+  assert.ok(opsText.includes("query(collection(db, 'payout_records'), where('employeeId', '==', cleanEmpId))"));
+});
+
+

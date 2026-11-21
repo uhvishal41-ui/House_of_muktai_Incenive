@@ -2,10 +2,16 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Award,
+  BarChart3,
+  Building2,
+  Calculator,
   Download,
   FileSpreadsheet,
   FileText,
+  Target,
+  Users,
 } from 'lucide-react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import {
   Area,
   AreaChart,
@@ -50,6 +56,13 @@ interface Props {
 
 type LeaderboardSort = 'saleAmt' | 'saleQty' | 'incentive';
 type ChartMetric = 'saleAmt' | 'incentive';
+type AnalyticsSectionKey =
+  | 'overview'
+  | 'leaderboard'
+  | 'efficiency'
+  | 'target_planner'
+  | 'branch_progress'
+  | 'employee_progress';
 
 export function AdminAnalytics({
   branches,
@@ -61,7 +74,10 @@ export function AdminAnalytics({
   salesTargets,
   onRefresh,
 }: Props) {
+  const prefersReduced = useReducedMotion();
+  const [activeSection, setActiveSection] = useState<AnalyticsSectionKey>('overview');
   const [selectedMonth, setSelectedMonth] = useState('');
+  const [targetMonth, setTargetMonth] = useState<string>(() => getCurrentMonthKeyIST());
   const [selectedBranch, setSelectedBranch] = useState('ALL');
   const [chartMetric, setChartMetric] = useState<ChartMetric>('saleAmt');
   const [leaderSort, setLeaderSort] = useState<LeaderboardSort>('saleAmt');
@@ -506,8 +522,69 @@ export function AdminAnalytics({
     URL.revokeObjectURL(url);
   };
 
+  // Live counts for the 3 Target Hub buttons (synced with targetMonth)
+  const targetStats = useMemo(() => {
+    const forMonth = salesTargets.filter((t) => t.monthKey === targetMonth);
+    const branchIds = new Set<string>();
+    let staffCount = 0;
+    for (const t of forMonth) {
+      branchIds.add(t.branchId);
+      if (t.scope === 'EMPLOYEE') staffCount += 1;
+    }
+    return {
+      branchCount: branchIds.size,
+      staffCount,
+    };
+  }, [salesTargets, targetMonth]);
+
+  const shortTargetMonth = formatMonthLabel(targetMonth);
+
+  const sectionNavButtons: Array<{
+    key: AnalyticsSectionKey;
+    label: string;
+    sublabel: string;
+    icon: React.ComponentType<{ className?: string }>;
+  }> = [
+    {
+      key: 'overview',
+      label: 'Charts & Alerts',
+      sublabel: `${branches.length} branches · ${lowPerformerAlerts.length} alerts`,
+      icon: BarChart3,
+    },
+    {
+      key: 'leaderboard',
+      label: 'Top Performers',
+      sublabel: `Top ${leaderboard.length} leaderboard`,
+      icon: Award,
+    },
+    {
+      key: 'efficiency',
+      label: 'Branch Efficiency',
+      sublabel: `${kpis.incentivePct.toFixed(2)}% inc-to-sale`,
+      icon: Building2,
+    },
+    {
+      key: 'target_planner',
+      label: 'Growth Targets',
+      sublabel: `Set ${shortTargetMonth} (+%)`,
+      icon: Calculator,
+    },
+    {
+      key: 'branch_progress',
+      label: 'Branch Progress',
+      sublabel: `${targetStats.branchCount} branch${targetStats.branchCount === 1 ? '' : 'es'} tracked`,
+      icon: Target,
+    },
+    {
+      key: 'employee_progress',
+      label: 'Employee Progress',
+      sublabel: `${targetStats.staffCount} staff live`,
+      icon: Users,
+    },
+  ];
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Filter & Export Toolbar */}
       <div className="bg-white border border-slate-200 rounded-xl p-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2.5">
@@ -565,6 +642,71 @@ export function AdminAnalytics({
         </div>
       </div>
 
+      {/* Professional Animated Hub Switcher — Instant 1-Click Access Without Long Scrolling */}
+      <nav
+        aria-label="Analytics and Targets sections"
+        className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2.5"
+      >
+        {sectionNavButtons.map((btn) => {
+          const Icon = btn.icon;
+          const isActive = activeSection === btn.key;
+          return (
+            <motion.button
+              key={btn.key}
+              type="button"
+              onClick={() => setActiveSection(btn.key)}
+              whileHover={prefersReduced ? undefined : { y: -2 }}
+              whileTap={prefersReduced ? undefined : { scale: 0.985 }}
+              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              aria-pressed={isActive}
+              className={`relative text-left rounded-xl px-3.5 py-3 min-h-[68px] border transition-colors cursor-pointer overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0F1F3D]/40 ${
+                isActive
+                  ? 'border-[#0F1F3D] text-white shadow-sm'
+                  : 'border-slate-200/90 bg-white text-slate-800 hover:border-[#0F1F3D]/35 hover:bg-slate-50/70'
+              }`}
+            >
+              {isActive && (
+                <motion.div
+                  layoutId="analyticsHubActiveBg"
+                  transition={{ type: 'spring', stiffness: 360, damping: 32 }}
+                  className="absolute inset-0 bg-[#0F1F3D]"
+                >
+                  <div className="absolute bottom-0 inset-x-0 h-[3px] bg-gradient-to-r from-[#B8923A] via-[#DFC27D] to-[#B8923A]" />
+                </motion.div>
+              )}
+
+              <div className="relative z-10 flex items-start gap-2.5">
+                <div
+                  className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+                    isActive
+                      ? 'bg-white/12 text-[#DFC27D] border border-[#DFC27D]/30'
+                      : 'bg-slate-100 text-[#0F1F3D]'
+                  }`}
+                >
+                  <Icon className="w-4 h-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p
+                    className={`text-xs font-semibold leading-snug truncate ${
+                      isActive ? 'text-white' : 'text-[#0F1F3D]'
+                    }`}
+                  >
+                    {btn.label}
+                  </p>
+                  <p
+                    className={`text-[11px] font-mono tabular-nums mt-0.5 truncate ${
+                      isActive ? 'text-slate-300' : 'text-slate-500'
+                    }`}
+                  >
+                    {btn.sublabel}
+                  </p>
+                </div>
+              </div>
+            </motion.button>
+          );
+        })}
+      </nav>
+
       {feedback && (
         <div
           className={`p-3.5 rounded-lg border text-sm ${
@@ -576,6 +718,18 @@ export function AdminAnalytics({
           {feedback.text}
         </div>
       )}
+
+      {/* Animated Active Module Viewport */}
+      <AnimatePresence mode="wait">
+        {activeSection === 'overview' && (
+          <motion.div
+            key="analytics-overview"
+            initial={prefersReduced ? false : { opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={prefersReduced ? undefined : { opacity: 0, y: -6 }}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+            className="space-y-6"
+          >
 
       {/* Executive KPI Strip */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
@@ -770,166 +924,6 @@ export function AdminAnalytics({
         </section>
       </div>
 
-      {/* Top Performers Leaderboard */}
-      <section className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="p-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Award className="w-4 h-4 text-[#B8923A]" />
-            <div>
-              <h2 className="text-sm font-semibold text-slate-900">
-                Top Performers Leaderboard ({selectedBranch === 'ALL' ? 'Top 10 Overall' : 'Top 5 in Branch'})
-              </h2>
-              <p className="text-xs text-slate-500">
-                {formatMonthLabel(selectedMonth)} · Super Admin confidential ranking
-              </p>
-            </div>
-          </div>
-          <div className="inline-flex p-0.5 bg-slate-100 rounded-lg text-xs self-start sm:self-auto">
-            {(
-              [
-                ['saleAmt', 'By Sale Amt'],
-                ['saleQty', 'By Sale Qty'],
-                ['incentive', 'By Incentive'],
-              ] as Array<[LeaderboardSort, string]>
-            ).map(([k, lbl]) => (
-              <button
-                key={k}
-                type="button"
-                onClick={() => setLeaderSort(k)}
-                className={`px-2.5 py-1 rounded-md font-medium cursor-pointer ${
-                  leaderSort === k ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
-                }`}
-              >
-                {lbl}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {leaderboard.length === 0 ? (
-          <div className="p-10 text-center text-sm text-slate-500">
-            No published employee records for {formatMonthLabel(selectedMonth)}.
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs">
-              <thead>
-                <tr className="border-b border-slate-200 bg-slate-50 font-semibold text-slate-600">
-                  <th className="py-2.5 px-4 w-14">Rank</th>
-                  <th className="py-2.5 px-4">Sales Person / No</th>
-                  <th className="py-2.5 px-4">Branch</th>
-                  <th className="py-2.5 px-4 text-right">Total Sale Amt</th>
-                  <th className="py-2.5 px-4 text-right">Total Sale Qty</th>
-                  <th className="py-2.5 px-4 text-right">Total Incentive</th>
-                  <th className="py-2.5 px-4 text-right">Inc % of Sale</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {leaderboard.map((row, idx) => (
-                  <tr key={row.summaryId} className="hover:bg-slate-50/60">
-                    <td className="py-3 px-4 font-mono font-bold text-slate-900">#{idx + 1}</td>
-                    <td className="py-3 px-4">
-                      <div className="font-medium text-slate-900">{row.employeeName}</div>
-                      <div className="font-mono text-[11px] text-slate-500">
-                        Salesman No: {row.employeeId}
-                      </div>
-                    </td>
-                    <td className="py-3 px-4 text-slate-700">{row.branchName}</td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums font-medium text-slate-900">
-                      {formatINRFromPaise(row.saleAmtPaise)}
-                    </td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
-                      {formatQty(row.saleQty)}
-                    </td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-[#0F1F3D]">
-                      {formatINRFromPaise(row.grandTotalPaise)}
-                    </td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
-                      {row.incPct.toFixed(2)}%
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      {/* Branch Efficiency & Incentive-to-Sale % Ratio Table */}
-      <section className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="p-4 border-b border-slate-200">
-          <h2 className="text-sm font-semibold text-slate-900">
-            12-Branch Efficiency &amp; Incentive-to-Sale % Breakdown
-          </h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Includes slab totals, adjustments, net payable, and payout settlement counts
-          </p>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr className="border-b border-slate-200 bg-slate-50 font-semibold text-slate-600">
-                <th className="py-2.5 px-3">Branch</th>
-                <th className="py-2.5 px-3 text-right">Staff</th>
-                <th className="py-2.5 px-3 text-right">Sale Amt</th>
-                <th className="py-2.5 px-3 text-right">Sale Qty</th>
-                <th className="py-2.5 px-3 text-right">Gross Inc</th>
-                <th className="py-2.5 px-3 text-right">Inc %</th>
-                <th className="py-2.5 px-3 text-right">Adjustments</th>
-                <th className="py-2.5 px-3 text-right">Net Payable</th>
-                <th className="py-2.5 px-3 text-right">Paid</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {branchAnalytics.map((b) => (
-                <tr key={b.branchId} className="hover:bg-slate-50/60">
-                  <td className="py-2.5 px-3 font-medium text-slate-900 whitespace-nowrap">
-                    {b.branchName}
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">
-                    {b.staffCount}
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-900">
-                    {formatINRFromPaise(b.saleAmtPaise)}
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">
-                    {formatQty(b.saleQty)}
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums font-medium text-[#0F1F3D]">
-                    {formatINRFromPaise(b.grossIncentivePaise)}
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">
-                    {b.incentivePct.toFixed(2)}%
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">
-                    {b.adjustmentsNetPaise >= 0 ? '+' : ''}
-                    {formatINRFromPaise(b.adjustmentsNetPaise)}
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums font-semibold text-slate-900">
-                    {formatINRFromPaise(b.netPayablePaise)}
-                  </td>
-                  <td className="py-2.5 px-3 text-right font-mono tabular-nums text-emerald-700">
-                    {b.paidCount}/{b.staffCount}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {/* Branch-Wise & Employee Growth Targets Planner + Live Progress Tracker */}
-      <BranchTargetManager
-        branches={branches}
-        employees={employees}
-        activeMonthlySummaries={activeMonthlySummaries}
-        salesTargets={salesTargets}
-        selectedAnalyticsMonth={selectedMonth}
-        selectedAnalyticsBranch={selectedBranch}
-        onRefresh={onRefresh}
-        onFeedback={setFeedback}
-      />
-
       {/* Zero-Sale & Low-Performer Alerts */}
       <section className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div className="p-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1011,6 +1005,213 @@ export function AdminAnalytics({
           </div>
         )}
       </section>
+          </motion.div>
+        )}
+
+        {/* Top Performers Leaderboard */}
+        {activeSection === 'leaderboard' && (
+          <motion.section
+            key="analytics-leaderboard"
+            initial={prefersReduced ? false : { opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={prefersReduced ? undefined : { opacity: 0, y: -6 }}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+            className="bg-white border border-slate-200 rounded-xl overflow-hidden"
+          >
+        <div className="p-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Award className="w-4 h-4 text-[#B8923A]" />
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900">
+                Top Performers Leaderboard ({selectedBranch === 'ALL' ? 'Top 10 Overall' : 'Top 5 in Branch'})
+              </h2>
+              <p className="text-xs text-slate-500">
+                {formatMonthLabel(selectedMonth)} · Super Admin confidential ranking
+              </p>
+            </div>
+          </div>
+          <div className="inline-flex p-0.5 bg-slate-100 rounded-lg text-xs self-start sm:self-auto">
+            {(
+              [
+                ['saleAmt', 'By Sale Amt'],
+                ['saleQty', 'By Sale Qty'],
+                ['incentive', 'By Incentive'],
+              ] as Array<[LeaderboardSort, string]>
+            ).map(([k, lbl]) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setLeaderSort(k)}
+                className={`px-2.5 py-1 rounded-md font-medium cursor-pointer ${
+                  leaderSort === k ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                }`}
+              >
+                {lbl}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {leaderboard.length === 0 ? (
+          <div className="p-10 text-center text-sm text-slate-500">
+            No published employee records for {formatMonthLabel(selectedMonth)}.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-slate-200 bg-slate-50 font-semibold text-slate-600">
+                  <th className="py-2.5 px-4 w-14">Rank</th>
+                  <th className="py-2.5 px-4">Sales Person / No</th>
+                  <th className="py-2.5 px-4">Branch</th>
+                  <th className="py-2.5 px-4 text-right">Total Sale Amt</th>
+                  <th className="py-2.5 px-4 text-right">Total Sale Qty</th>
+                  <th className="py-2.5 px-4 text-right">Total Incentive</th>
+                  <th className="py-2.5 px-4 text-right">Inc % of Sale</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {leaderboard.map((row, idx) => (
+                  <tr key={row.summaryId} className="hover:bg-slate-50/60">
+                    <td className="py-3 px-4 font-mono font-bold text-slate-900">#{idx + 1}</td>
+                    <td className="py-3 px-4">
+                      <div className="font-medium text-slate-900">{row.employeeName}</div>
+                      <div className="font-mono text-[11px] text-slate-500">
+                        Salesman No: {row.employeeId}
+                      </div>
+                    </td>
+                    <td className="py-3 px-4 text-slate-700">{row.branchName}</td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums font-medium text-slate-900">
+                      {formatINRFromPaise(row.saleAmtPaise)}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
+                      {formatQty(row.saleQty)}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-[#0F1F3D]">
+                      {formatINRFromPaise(row.grandTotalPaise)}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
+                      {row.incPct.toFixed(2)}%
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+          </motion.section>
+        )}
+
+        {/* Branch Efficiency & Incentive-to-Sale % Ratio Table */}
+        {activeSection === 'efficiency' && (
+          <motion.section
+            key="analytics-efficiency"
+            initial={prefersReduced ? false : { opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={prefersReduced ? undefined : { opacity: 0, y: -6 }}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+            className="bg-white border border-slate-200 rounded-xl overflow-hidden"
+          >
+        <div className="p-4 border-b border-slate-200">
+          <h2 className="text-sm font-semibold text-slate-900">
+            12-Branch Efficiency &amp; Incentive-to-Sale % Breakdown
+          </h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Includes slab totals, adjustments, net payable, and payout settlement counts
+          </p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr className="border-b border-slate-200 bg-slate-50 font-semibold text-slate-600">
+                <th className="py-2.5 px-3">Branch</th>
+                <th className="py-2.5 px-3 text-right">Staff</th>
+                <th className="py-2.5 px-3 text-right">Sale Amt</th>
+                <th className="py-2.5 px-3 text-right">Sale Qty</th>
+                <th className="py-2.5 px-3 text-right">Gross Inc</th>
+                <th className="py-2.5 px-3 text-right">Inc %</th>
+                <th className="py-2.5 px-3 text-right">Adjustments</th>
+                <th className="py-2.5 px-3 text-right">Net Payable</th>
+                <th className="py-2.5 px-3 text-right">Paid</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {branchAnalytics.map((b) => (
+                <tr key={b.branchId} className="hover:bg-slate-50/60">
+                  <td className="py-2.5 px-3 font-medium text-slate-900 whitespace-nowrap">
+                    {b.branchName}
+                  </td>
+                  <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">
+                    {b.staffCount}
+                  </td>
+                  <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-900">
+                    {formatINRFromPaise(b.saleAmtPaise)}
+                  </td>
+                  <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">
+                    {formatQty(b.saleQty)}
+                  </td>
+                  <td className="py-2.5 px-3 text-right font-mono tabular-nums font-medium text-[#0F1F3D]">
+                    {formatINRFromPaise(b.grossIncentivePaise)}
+                  </td>
+                  <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">
+                    {b.incentivePct.toFixed(2)}%
+                  </td>
+                  <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">
+                    {b.adjustmentsNetPaise >= 0 ? '+' : ''}
+                    {formatINRFromPaise(b.adjustmentsNetPaise)}
+                  </td>
+                  <td className="py-2.5 px-3 text-right font-mono tabular-nums font-semibold text-slate-900">
+                    {formatINRFromPaise(b.netPayablePaise)}
+                  </td>
+                  <td className="py-2.5 px-3 text-right font-mono tabular-nums text-emerald-700">
+                    {b.paidCount}/{b.staffCount}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+          </motion.section>
+        )}
+
+        {/* Branch-Wise & Employee Growth Targets / Branch Progress / Employee Progress */}
+        {(activeSection === 'target_planner' ||
+          activeSection === 'branch_progress' ||
+          activeSection === 'employee_progress') && (
+          <motion.div
+            key={`analytics-${activeSection}`}
+            initial={prefersReduced ? false : { opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={prefersReduced ? undefined : { opacity: 0, y: -6 }}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <BranchTargetManager
+              branches={branches}
+              employees={employees}
+              activeMonthlySummaries={activeMonthlySummaries}
+              salesTargets={salesTargets}
+              selectedAnalyticsMonth={selectedMonth}
+              selectedAnalyticsBranch={selectedBranch}
+              activeSection={
+                activeSection === 'target_planner'
+                  ? 'planner'
+                  : activeSection === 'branch_progress'
+                    ? 'branch_progress'
+                    : 'employee_progress'
+              }
+              controlledTargetMonth={targetMonth}
+              onTargetMonthChange={setTargetMonth}
+              onRequestSection={(sec) => {
+                if (sec === 'planner') setActiveSection('target_planner');
+                else if (sec === 'branch_progress') setActiveSection('branch_progress');
+                else setActiveSection('employee_progress');
+              }}
+              onRefresh={onRefresh}
+              onFeedback={setFeedback}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

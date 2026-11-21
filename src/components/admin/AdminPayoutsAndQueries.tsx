@@ -5,6 +5,7 @@ import {
   FileDown,
   MessageSquare,
   PlusCircle,
+  RefreshCw,
   Search,
   Wallet,
 } from 'lucide-react';
@@ -18,7 +19,9 @@ import { downloadEmployeeIncentiveSlipPdf } from '../../lib/pdfGenerator';
 import {
   createIncentiveAdjustment,
   resolveEmployeeQuery,
+  syncOperationalAuthUids,
   upsertPayoutRecord,
+  upsertPayoutRecordsBatch,
   voidIncentiveAdjustment,
 } from '../../services/operationsService';
 import type {
@@ -83,6 +86,7 @@ export function AdminPayoutsAndQueries({
   const [bulkMode, setBulkMode] = useState<PaymentMode>('BANK');
   const [bulkRef, setBulkRef] = useState('');
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [syncingAuthUids, setSyncingAuthUids] = useState(false);
 
   // Adjustment form state
   const [adjBranchFilter, setAdjBranchFilter] = useState('ALL');
@@ -200,7 +204,7 @@ export function AdminPayoutsAndQueries({
       )
       .sort((a, b) => b.netPayablePaise - a.netPayablePaise);
   }, [
-    monthlySummaries,
+    activeMonthlySummaries,
     selectedMonth,
     selectedBranch,
     statusFilter,
@@ -209,6 +213,37 @@ export function AdminPayoutsAndQueries({
     adjByEmployee,
     payoutByEmployee,
   ]);
+
+  const outOfSyncPayoutCount = useMemo(() => {
+    let count = 0;
+    for (const p of payoutRecords) {
+      const emp = employeesById.get(p.employeeId.toUpperCase());
+      if (emp?.authUid && p.authUid !== emp.authUid) {
+        count += 1;
+      }
+    }
+    return count;
+  }, [payoutRecords, employeesById]);
+
+  const handleSyncPayoutAuthUids = async () => {
+    setSyncingAuthUids(true);
+    setFeedback(null);
+    try {
+      const res = await syncOperationalAuthUids(employees);
+      setFeedback({
+        type: 'ok',
+        text: `Synced staff login IDs to ${res.payoutsSynced} payout record(s), ${res.adjustmentsSynced} adjustment(s), and ${res.targetsSynced} personal target(s). Employees will now see updated Paid status immediately on mobile.`,
+      });
+      await onRefresh();
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Unable to sync payout records to staff app.',
+      });
+    } finally {
+      setSyncingAuthUids(false);
+    }
+  };
 
   const openQueryCount = useMemo(
     () => employeeQueries.filter((q) => q.status !== 'RESOLVED').length,
@@ -271,8 +306,11 @@ export function AdminPayoutsAndQueries({
     setFeedback(null);
     try {
       const targets = payoutRows.filter((r) => selectedIds.includes(r.summary.employeeId));
-      for (const row of targets) {
-        await upsertPayoutRecord({
+      await upsertPayoutRecordsBatch({
+        monthKey: selectedMonth,
+        paymentMode: bulkMode,
+        paymentReference: bulkRef.trim() || undefined,
+        items: targets.map((row) => ({
           monthKey: selectedMonth,
           employeeId: row.summary.employeeId,
           authUid: row.emp?.authUid || row.summary.authUid || '',
@@ -284,8 +322,8 @@ export function AdminPayoutsAndQueries({
           status: 'PAID',
           paymentMode: bulkMode,
           paymentReference: bulkRef.trim() || undefined,
-        });
-      }
+        })),
+      });
       setSelectedIds([]);
       setBulkRef('');
       setFeedback({
@@ -543,6 +581,29 @@ export function AdminPayoutsAndQueries({
       {/* ================================================================= */}
       {subTab === 'payouts' && (
         <div className="space-y-4">
+          {outOfSyncPayoutCount > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-900">
+              <div>
+                <p className="font-semibold">
+                  {outOfSyncPayoutCount} payout record(s) need Staff App Login Sync
+                </p>
+                <p className="text-amber-800/90 mt-0.5">
+                  These payouts were saved before the employee&apos;s login was activated. Click
+                  sync so every employee sees their Paid status cleanly.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={syncingAuthUids}
+                onClick={handleSyncPayoutAuthUids}
+                className="h-9 px-3.5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-60"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${syncingAuthUids ? 'animate-spin' : ''}`} />
+                <span>{syncingAuthUids ? 'Syncing...' : 'Sync Paid Status to Staff App'}</span>
+              </button>
+            </div>
+          )}
+
           <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-3 flex-1">
               <div className="relative flex-1 min-w-[200px] max-w-xs">

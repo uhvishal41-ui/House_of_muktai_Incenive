@@ -180,7 +180,7 @@ export function EmployeeMaster({ branches, employees, onRefresh }: Props) {
       const res = await backfillAuthUidAndActiveRegistry();
       setFeedback({
         type: 'ok',
-        text: `Auth Registry & Legacy Backfill complete: active_auth_uids (+${res.activeRegistryAdded} added / -${res.activeRegistryRemoved} revoked), normalized ${res.legacyRolesNormalized} legacy role(s), backfilled authUid on ${res.incentivesUpdated} incentive(s), ${res.summariesUpdated} summary(ies), ${res.notificationsUpdated} notification(s).${
+        text: `Auth Registry & Legacy Backfill complete: active_auth_uids (+${res.activeRegistryAdded} added / -${res.activeRegistryRemoved} revoked), normalized ${res.legacyRolesNormalized} legacy role(s), backfilled authUid on ${res.incentivesUpdated} incentive(s), ${res.summariesUpdated} summary(ies), ${res.notificationsUpdated} notification(s), ${res.payoutsUpdated} payout(s), ${res.adjustmentsUpdated} adjustment(s), ${res.targetsUpdated} target(s).${
           res.unlinkedEmployeesCount > 0
             ? ` (${res.unlinkedEmployeesCount} employee(s) do not have login credentials provisioned yet.)`
             : ''

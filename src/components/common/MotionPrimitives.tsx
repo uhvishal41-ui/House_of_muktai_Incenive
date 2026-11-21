@@ -10,7 +10,7 @@ import { BrandLogo } from './BrandLogo';
  */
 interface AnimatedCounterProps {
   value: number;
-  mode?: 'paise' | 'integer';
+  mode?: 'paise' | 'integer' | 'decimal' | 'percent';
   durationMs?: number;
   className?: string;
 }
@@ -18,7 +18,7 @@ interface AnimatedCounterProps {
 export function AnimatedCounter({
   value,
   mode = 'integer',
-  durationMs = 420,
+  durationMs = 520,
   className = '',
 }: AnimatedCounterProps) {
   const prefersReduced = useReducedMotion();
@@ -44,13 +44,18 @@ export function AnimatedCounter({
 
     const step = (now: number) => {
       const progress = Math.min(1, (now - startTime) / durationMs);
-      // Cubic ease-out
-      const eased = 1 - Math.pow(1 - progress, 3);
-      const next = Math.round(startVal + delta * eased);
+      // Smooth executive quartic ease-out
+      const eased = 1 - Math.pow(1 - progress, 4);
+      const rawNext = startVal + delta * eased;
+      const next =
+        mode === 'decimal' || mode === 'percent'
+          ? Math.round(rawNext * 100) / 100
+          : Math.round(rawNext);
       setDisplayValue(next);
       if (progress < 1) {
         rafId = window.requestAnimationFrame(step);
       } else {
+        setDisplayValue(value);
         previousRef.current = value;
       }
     };
@@ -60,12 +65,19 @@ export function AnimatedCounter({
       window.cancelAnimationFrame(rafId);
       previousRef.current = value;
     };
-  }, [value, durationMs, prefersReduced]);
+  }, [value, mode, durationMs, prefersReduced]);
 
   const formatted =
     mode === 'paise'
       ? formatINRFromPaise(displayValue)
-      : displayValue.toLocaleString('en-IN');
+      : mode === 'percent'
+        ? `${displayValue.toFixed(2)}%`
+        : mode === 'decimal'
+          ? displayValue.toLocaleString('en-IN', {
+              minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
+              maximumFractionDigits: 2,
+            })
+          : displayValue.toLocaleString('en-IN');
 
   return <span className={`font-mono tabular-nums ${className}`}>{formatted}</span>;
 }

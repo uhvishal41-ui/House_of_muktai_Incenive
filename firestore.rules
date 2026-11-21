@@ -44,6 +44,11 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/active_auth_uids/$(request.auth.uid)).data.active == true;
     }
 
+    // Server-trusted employeeId bound to this active employee's verified auth UID
+    function activeEmployeeId() {
+      return get(/databases/$(database)/documents/active_auth_uids/$(request.auth.uid)).data.employeeId;
+    }
+
     function isNonEmptyString(val, maxLen) {
       return val is string && val.size() >= 1 && val.size() <= maxLen;
     }
@@ -855,12 +860,14 @@ service cloud.firestore {
       allow delete: if isValidId(notificationId) && isSuperAdmin();
     }
 
-    // 11. Monthly Payout Settlement Records (Super Admin writes; Active Employee reads own authUid only)
+    // 11. Monthly Payout Settlement Records (Super Admin writes; Active Employee reads own authUid or verified employeeId only)
     match /payout_records/{payoutId} {
       allow get: if isValidId(payoutId) && (
-        isSuperAdmin() || (isActiveEmployee() && existing().authUid == request.auth.uid)
+        isSuperAdmin()
+        || (isActiveEmployee() && (existing().authUid == request.auth.uid || existing().employeeId == activeEmployeeId()))
       );
-      allow list: if isSuperAdmin() || (isActiveEmployee() && resource.data.authUid == request.auth.uid);
+      allow list: if isSuperAdmin()
+        || (isActiveEmployee() && (resource.data.authUid == request.auth.uid || resource.data.employeeId == activeEmployeeId()));
       allow create: if isValidId(payoutId) && isSuperAdmin() && isValidPayoutRecord(incoming()) && incoming().payoutId == payoutId;
       allow update: if isValidId(payoutId) && isSuperAdmin() && isValidPayoutRecord(incoming())
         && incoming().payoutId == existing().payoutId
@@ -878,9 +885,11 @@ service cloud.firestore {
     // 12. Audited Bonus / Deduction / Advance Adjustments (Super Admin writes; Active Employee reads own ACTIVE adjustments)
     match /incentive_adjustments/{adjustmentId} {
       allow get: if isValidId(adjustmentId) && (
-        isSuperAdmin() || (isActiveEmployee() && existing().authUid == request.auth.uid && existing().status == 'ACTIVE')
+        isSuperAdmin()
+        || (isActiveEmployee() && existing().status == 'ACTIVE' && (existing().authUid == request.auth.uid || existing().employeeId == activeEmployeeId()))
       );
-      allow list: if isSuperAdmin() || (isActiveEmployee() && resource.data.authUid == request.auth.uid && resource.data.status == 'ACTIVE');
+      allow list: if isSuperAdmin()
+        || (isActiveEmployee() && resource.data.status == 'ACTIVE' && (resource.data.authUid == request.auth.uid || resource.data.employeeId == activeEmployeeId()));
       allow create: if isValidId(adjustmentId) && isSuperAdmin() && isValidIncentiveAdjustment(incoming())
         && incoming().adjustmentId == adjustmentId
         && incoming().status == 'ACTIVE';
@@ -897,10 +906,10 @@ service cloud.firestore {
     match /sales_targets/{targetId} {
       allow get: if isValidId(targetId) && (
         isSuperAdmin()
-        || (isActiveEmployee() && (existing().scope == 'BRANCH' || existing().authUid == request.auth.uid))
+        || (isActiveEmployee() && (existing().scope == 'BRANCH' || existing().authUid == request.auth.uid || existing().employeeId == activeEmployeeId()))
       );
       allow list: if isSuperAdmin()
-        || (isActiveEmployee() && (resource.data.scope == 'BRANCH' || resource.data.authUid == request.auth.uid));
+        || (isActiveEmployee() && (resource.data.scope == 'BRANCH' || resource.data.authUid == request.auth.uid || resource.data.employeeId == activeEmployeeId()));
       allow create: if isValidId(targetId) && isSuperAdmin() && isValidSalesTarget(incoming()) && incoming().targetId == targetId;
       allow update: if isValidId(targetId) && isSuperAdmin() && isValidSalesTarget(incoming())
         && incoming().targetId == existing().targetId

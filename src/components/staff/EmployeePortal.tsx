@@ -267,6 +267,7 @@ export function EmployeePortal() {
     const fallbackTimer = window.setTimeout(() => setLoading(false), 3500);
 
     const uid = user.uid;
+    const empId = employeeProfile?.employeeId;
     const unsubs = [
       subscribeOwnPublishedIncentives(uid, (records) => {
         setIncentives(records);
@@ -281,15 +282,27 @@ export function EmployeePortal() {
       subscribeOwnNotifications(uid, (list) => {
         setNotifications(list);
       }),
-      subscribeOwnPayoutRecords(uid, (list) => {
-        setPayoutRecords(list);
-      }),
-      subscribeOwnActiveAdjustments(uid, (list) => {
-        setAdjustments(list);
-      }),
-      subscribeOwnRelevantSalesTargets(uid, (list) => {
-        setSalesTargets(list);
-      }),
+      subscribeOwnPayoutRecords(
+        uid,
+        (list) => {
+          setPayoutRecords(list);
+        },
+        empId,
+      ),
+      subscribeOwnActiveAdjustments(
+        uid,
+        (list) => {
+          setAdjustments(list);
+        },
+        empId,
+      ),
+      subscribeOwnRelevantSalesTargets(
+        uid,
+        (list) => {
+          setSalesTargets(list);
+        },
+        empId,
+      ),
       subscribeOwnEmployeeQueries(uid, (list) => {
         setQueries(list);
       }),
@@ -301,7 +314,12 @@ export function EmployeePortal() {
         unsub();
       }
     };
-  }, [employeeLoginGate.allowed, requiresFirstLoginPasswordChange, user?.uid]);
+  }, [
+    employeeLoginGate.allowed,
+    requiresFirstLoginPasswordChange,
+    user?.uid,
+    employeeProfile?.employeeId,
+  ]);
 
   useEffect(() => {
     setPhone(employeeProfile?.phone || '');
@@ -1378,6 +1396,12 @@ export function EmployeePortal() {
                               </p>
                             )}
                           </div>
+                        ) : selectedMonthPayout?.status === 'APPROVED' ? (
+                          <p className="text-[11px] text-[#1E3A5F] pt-2 border-t border-slate-100">
+                            {isMr
+                              ? 'अकाउंट्सकडून पेआउट मंजूर झाले आहे; लवकरच रक्कम जमा होईल.'
+                              : 'Approved by accounts; payout disbursement is in progress.'}
+                          </p>
                         ) : (
                           <p className="text-[11px] text-slate-500 pt-2 border-t border-slate-100">
                             {t.payoutNotSettled}

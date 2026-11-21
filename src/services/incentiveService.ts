@@ -824,7 +824,8 @@ export async function provisionAllPendingEmployeeLogins(
 
 /**
  * Helper: Synchronizes a newly linked/provisioned authUid onto all legacy records for that employee
- * (published_incentives, monthly_summaries, notifications) so historical statements appear immediately.
+ * (published_incentives, monthly_summaries, notifications, payout_records, incentive_adjustments,
+ * and employee sales_targets) so historical statements, paid status, and targets appear immediately.
  */
 async function syncEmployeeAuthUidToExistingRecords(
   employeeId: string,
@@ -832,10 +833,13 @@ async function syncEmployeeAuthUidToExistingRecords(
 ): Promise<number> {
   if (!authUid) return 0;
   const cleanEmpId = sanitizeId(employeeId);
-  const [incSnap, sumSnap, ntfSnap] = await Promise.all([
+  const [incSnap, sumSnap, ntfSnap, payoutSnap, adjSnap, tgtSnap] = await Promise.all([
     getDocs(query(collection(db, 'published_incentives'), where('employeeId', '==', cleanEmpId))),
     getDocs(query(collection(db, 'monthly_summaries'), where('employeeId', '==', cleanEmpId))),
     getDocs(query(collection(db, 'notifications'), where('employeeId', '==', cleanEmpId))),
+    getDocs(query(collection(db, 'payout_records'), where('employeeId', '==', cleanEmpId))),
+    getDocs(query(collection(db, 'incentive_adjustments'), where('employeeId', '==', cleanEmpId))),
+    getDocs(query(collection(db, 'sales_targets'), where('employeeId', '==', cleanEmpId))),
   ]);
 
   const refsToUpdate: Array<ReturnType<typeof doc>> = [];
@@ -847,6 +851,16 @@ async function syncEmployeeAuthUidToExistingRecords(
   }
   for (const d of ntfSnap.docs) {
     if ((d.data() as EmployeeNotification).authUid !== authUid) refsToUpdate.push(d.ref);
+  }
+  for (const d of payoutSnap.docs) {
+    if ((d.data() as { authUid?: string }).authUid !== authUid) refsToUpdate.push(d.ref);
+  }
+  for (const d of adjSnap.docs) {
+    if ((d.data() as { authUid?: string }).authUid !== authUid) refsToUpdate.push(d.ref);
+  }
+  for (const d of tgtSnap.docs) {
+    const rec = d.data() as { scope?: string; authUid?: string };
+    if (rec.scope === 'EMPLOYEE' && rec.authUid !== authUid) refsToUpdate.push(d.ref);
   }
 
   for (let i = 0; i < refsToUpdate.length; i += 400) {
@@ -1059,6 +1073,9 @@ export interface LegacyAuthBackfillResult {
   incentivesUpdated: number;
   summariesUpdated: number;
   notificationsUpdated: number;
+  payoutsUpdated: number;
+  adjustmentsUpdated: number;
+  targetsUpdated: number;
   legacyRolesNormalized: number;
   unlinkedEmployeesCount: number;
 }
@@ -1067,7 +1084,8 @@ export interface LegacyAuthBackfillResult {
  * Super Admin ONLY, Idempotent One-Click Backfill (Issues 1, 3, & 6):
  * 1. Syncs `/active_auth_uids/{authUid}` for all ACTIVE/INACTIVE employees with provisioned authUid.
  * 2. Normalizes any legacy BRANCH_MANAGER employee records to EMPLOYEE for Phase 2 compliance.
- * 3. Backfills missing/mismatched `authUid` on legacy `published_incentives`, `monthly_summaries`, and `notifications`.
+ * 3. Backfills missing/mismatched `authUid` on `published_incentives`, `monthly_summaries`,
+ *    `notifications`, `payout_records`, `incentive_adjustments`, and employee `sales_targets`.
  * Zero duplicate records, zero incentive amount modifications, zero notifications sent.
  */
 export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBackfillResult> {
@@ -1077,13 +1095,17 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
   const now = new Date().toISOString();
 
   try {
-    const [empSnap, activeSnap, incSnap, sumSnap, ntfSnap] = await Promise.all([
-      getDocs(collection(db, 'employees')),
-      getDocs(collection(db, 'active_auth_uids')),
-      getDocs(collection(db, 'published_incentives')),
-      getDocs(collection(db, 'monthly_summaries')),
-      getDocs(collection(db, 'notifications')),
-    ]);
+    const [empSnap, activeSnap, incSnap, sumSnap, ntfSnap, payoutSnap, adjSnap, tgtSnap] =
+      await Promise.all([
+        getDocs(collection(db, 'employees')),
+        getDocs(collection(db, 'active_auth_uids')),
+        getDocs(collection(db, 'published_incentives')),
+        getDocs(collection(db, 'monthly_summaries')),
+        getDocs(collection(db, 'notifications')),
+        getDocs(collection(db, 'payout_records')),
+        getDocs(collection(db, 'incentive_adjustments')),
+        getDocs(collection(db, 'sales_targets')),
+      ]);
 
     const employees = empSnap.docs.map((d) => d.data() as Employee);
     const activeRegistryIds = new Set(activeSnap.docs.map((d) => d.id));
@@ -1114,6 +1136,9 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
     let incentivesUpdated = 0;
     let summariesUpdated = 0;
     let notificationsUpdated = 0;
+    let payoutsUpdated = 0;
+    let adjustmentsUpdated = 0;
+    let targetsUpdated = 0;
 
     // 1. Add missing active_auth_uids entries for ACTIVE employees
     for (const [authUid, employeeId] of expectedActiveUids.entries()) {
@@ -1181,6 +1206,39 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
       }
     }
 
+    // 7. Backfill missing/mismatched authUid on payout_records
+    for (const d of payoutSnap.docs) {
+      const rec = d.data() as { employeeId?: string; authUid?: string };
+      if (!rec.employeeId) continue;
+      const emp = empById.get(sanitizeId(rec.employeeId));
+      if (emp?.authUid && rec.authUid !== emp.authUid) {
+        ops.push({ kind: 'update', ref: d.ref, data: { authUid: emp.authUid } });
+        payoutsUpdated += 1;
+      }
+    }
+
+    // 8. Backfill missing/mismatched authUid on incentive_adjustments
+    for (const d of adjSnap.docs) {
+      const rec = d.data() as { employeeId?: string; authUid?: string };
+      if (!rec.employeeId) continue;
+      const emp = empById.get(sanitizeId(rec.employeeId));
+      if (emp?.authUid && rec.authUid !== emp.authUid) {
+        ops.push({ kind: 'update', ref: d.ref, data: { authUid: emp.authUid } });
+        adjustmentsUpdated += 1;
+      }
+    }
+
+    // 9. Backfill missing/mismatched authUid on personal sales_targets
+    for (const d of tgtSnap.docs) {
+      const rec = d.data() as { scope?: string; employeeId?: string; authUid?: string };
+      if (rec.scope !== 'EMPLOYEE' || !rec.employeeId) continue;
+      const emp = empById.get(sanitizeId(rec.employeeId));
+      if (emp?.authUid && rec.authUid !== emp.authUid) {
+        ops.push({ kind: 'update', ref: d.ref, data: { authUid: emp.authUid } });
+        targetsUpdated += 1;
+      }
+    }
+
     for (let i = 0; i < ops.length; i += 400) {
       const wb = writeBatch(db);
       for (const op of ops.slice(i, i + 400)) {
@@ -1195,7 +1253,7 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
       action: 'LEGACY_AUTH_UID_BACKFILL',
       targetType: 'system',
       targetId: `BACKFILL_${Date.now()}`,
-      summary: `Synced active_auth_uids (+${activeRegistryAdded}/-${activeRegistryRemoved}), normalized ${legacyRolesNormalized} legacy role(s), backfilled authUid on ${incentivesUpdated} incentives, ${summariesUpdated} summaries, ${notificationsUpdated} notifications.`,
+      summary: `Synced active_auth_uids (+${activeRegistryAdded}/-${activeRegistryRemoved}), normalized ${legacyRolesNormalized} legacy role(s), backfilled authUid on ${incentivesUpdated} incentives, ${summariesUpdated} summaries, ${notificationsUpdated} notifications, ${payoutsUpdated} payouts, ${adjustmentsUpdated} adjustments, ${targetsUpdated} targets.`,
     });
 
     return {
@@ -1204,6 +1262,9 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
       incentivesUpdated,
       summariesUpdated,
       notificationsUpdated,
+      payoutsUpdated,
+      adjustmentsUpdated,
+      targetsUpdated,
       legacyRolesNormalized,
       unlinkedEmployeesCount,
     };

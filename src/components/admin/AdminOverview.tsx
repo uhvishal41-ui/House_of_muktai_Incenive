@@ -7,8 +7,12 @@ import {
   FileSpreadsheet,
   IndianRupee,
   MessageSquare,
+  Package,
+  Percent,
+  TrendingUp,
   Users,
 } from 'lucide-react';
+import { motion, useReducedMotion } from 'motion/react';
 import {
   formatINRFromPaise,
   formatMonthLabel,
@@ -19,6 +23,12 @@ import {
 import { normalizeRecordPeriod } from '../../lib/incentiveEngine';
 import { CompanyLetterhead } from '../common/BrandLogo';
 import { AnimatedCounter } from '../common/MotionPrimitives';
+import {
+  IncentiveRatioGaugeGraphic,
+  PublishedIncentiveGraphic,
+  SaleAmountWaveGraphic,
+  SaleQtyPillarsGraphic,
+} from './DashboardMetricGraphics';
 import type {
   Branch,
   Employee,
@@ -48,6 +58,7 @@ export function AdminOverview({
   employeeQueries = [],
   onNavigate,
 }: Props) {
+  const prefersReduced = useReducedMotion();
   const currentMonth = getCurrentMonthKeyIST();
   const [selectedBranchId, setSelectedBranchId] = useState<string>('ALL');
 
@@ -202,6 +213,11 @@ export function AdminOverview({
       .sort((a, b) => b.totalPaise - a.totalPaise);
 
     const maxBranchPaise = Math.max(1, ...branchBreakdown.map((b) => b.totalPaise));
+    const incentiveRatioPct =
+      totalSaleAmtPaise > 0
+        ? Math.round((totalMonthPaise / totalSaleAmtPaise) * 10000) / 100
+        : 0;
+    const publishedStaffCount = monthSummaries.length;
 
     return {
       allTimeTotalPaise,
@@ -217,6 +233,8 @@ export function AdminOverview({
       totalSaleQty3,
       totalSaleAmtPaise,
       totalSaleQty,
+      incentiveRatioPct,
+      publishedStaffCount,
       activeBranches,
       activeEmployees,
       pendingBatches,
@@ -291,138 +309,254 @@ export function AdminOverview({
         }
       />
 
-      {/* Executive 6-KPI Strip (4 primary on top row / clean responsive grid) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-        <div className="bg-[#0F1F3D] text-white border border-[#1E3A5F] rounded-xl p-5 relative overflow-hidden">
-          <div className="absolute top-0 inset-x-0 h-0.5 bg-gradient-to-r from-[#B8923A] via-[#DFC27D] to-[#B8923A]" />
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <p className="text-xs font-medium text-[#DFC27D]">
-              {selectedMonth
-                ? `Published Incentives · ${formatMonthLabel(selectedMonth)}`
-                : 'Published Incentives'}
+      {/* 4 Separated Primary Performance Cards with Slow Animated Executive Graphics */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        {/* Card 1: Published Incentives */}
+        <motion.div
+          initial={prefersReduced ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+          whileHover={prefersReduced ? undefined : { y: -2 }}
+          className="bg-[#0F1F3D] text-white border border-[#1E3A5F] rounded-2xl p-5 relative overflow-hidden shadow-xs flex flex-col justify-between gap-4"
+        >
+          <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-[#B8923A] via-[#DFC27D] to-[#B8923A]" />
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#DFC27D]">
+                <IndianRupee className="w-3.5 h-3.5 shrink-0" />
+                <span>Published Incentive</span>
+              </div>
+              <p className="text-[11px] text-slate-300 mt-0.5 truncate">
+                {selectedMonth ? formatMonthLabel(selectedMonth) : 'Current Period'}
+              </p>
+            </div>
+            <PublishedIncentiveGraphic />
+          </div>
+
+          <div>
+            <p className="text-2xl sm:text-[26px] font-bold tracking-tight text-white leading-tight">
+              <AnimatedCounter value={metrics.totalMonthPaise} mode="paise" durationMs={900} />
             </p>
-            <IndianRupee className="w-4 h-4 text-[#DFC27D] shrink-0" />
+            <p className="text-[11px] text-slate-300 mt-1.5 font-mono tabular-nums">
+              {metrics.publishedStaffCount > 0
+                ? `${metrics.publishedStaffCount} staff published`
+                : latestPublishedDate
+                  ? `Latest: ${formatShortDate(latestPublishedDate)}`
+                  : 'No published batches yet'}
+            </p>
           </div>
-          <p className="text-2xl font-bold text-white">
-            <AnimatedCounter value={metrics.totalMonthPaise} mode="paise" />
-          </p>
-          <p className="text-xs text-slate-300 mt-1.5 font-mono tabular-nums">
-            Sale: {formatINRFromPaise(metrics.totalSaleAmtPaise)} · Qty: {formatQty(metrics.totalSaleQty)}
-          </p>
-          <p className="text-[11px] text-slate-400 mt-0.5">
-            {metrics.totalSaleAmtPaise > 0
-              ? `Incentive Ratio: ${((metrics.totalMonthPaise / metrics.totalSaleAmtPaise) * 100).toFixed(2)}% of Sale`
-              : latestPublishedDate
-                ? `Latest date: ${formatShortDate(latestPublishedDate)}`
-                : 'No published batches yet'}
-          </p>
-        </div>
+        </motion.div>
 
-        <div className="bg-white border border-slate-200/90 rounded-xl p-5 hover:border-slate-300 transition-colors">
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <p className="text-xs font-medium text-slate-500">All-Time Published Incentive</p>
-            <Award className="w-4 h-4 text-[#B8923A] shrink-0" />
+        {/* Card 2: Total Sale Amount */}
+        <motion.div
+          initial={prefersReduced ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.45, delay: 0.06, ease: [0.16, 1, 0.3, 1] }}
+          whileHover={prefersReduced ? undefined : { y: -2 }}
+          className="bg-white border border-slate-200/90 hover:border-[#0F1F3D]/30 rounded-2xl p-5 relative overflow-hidden shadow-2xs transition-colors flex flex-col justify-between gap-4"
+        >
+          <div className="absolute top-0 inset-x-0 h-0.5 bg-gradient-to-r from-[#0F1F3D] via-[#1E3A5F] to-[#B8923A]/60" />
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#0F1F3D]">
+                <TrendingUp className="w-3.5 h-3.5 text-[#B8923A] shrink-0" />
+                <span>Total Sale Amount</span>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                {selectedBranchId === 'ALL' ? 'All 12 Retail Branches' : 'Selected Branch Revenue'}
+              </p>
+            </div>
+            <SaleAmountWaveGraphic />
           </div>
-          <p className="text-2xl font-semibold text-[#0F1F3D]">
-            <AnimatedCounter value={metrics.allTimeTotalPaise} mode="paise" />
-          </p>
-          <button
-            type="button"
-            onClick={() => onNavigate('analytics')}
-            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
-          >
-            Open Analytics &amp; Trends
-            <ArrowUpRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
 
-        <div className="bg-white border border-slate-200/90 rounded-xl p-5 hover:border-slate-300 transition-colors">
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <p className="text-xs font-medium text-slate-500">Active Employees</p>
-            <Users className="w-4 h-4 text-[#1E3A5F] shrink-0" />
+          <div>
+            <p className="text-2xl sm:text-[26px] font-bold tracking-tight text-[#0F1F3D] leading-tight">
+              <AnimatedCounter value={metrics.totalSaleAmtPaise} mode="paise" durationMs={950} />
+            </p>
+            <p className="text-[11px] text-slate-500 mt-1.5 font-mono tabular-nums truncate">
+              {metrics.publishedStaffCount > 0
+                ? `Avg ${formatINRFromPaise(Math.round(metrics.totalSaleAmtPaise / metrics.publishedStaffCount))} / staff`
+                : 'Awaiting monthly sales upload'}
+            </p>
           </div>
-          <p className="text-2xl font-semibold text-[#0F1F3D]">
-            <AnimatedCounter value={metrics.activeEmployees} mode="integer" />
-            <span className="text-sm font-normal text-slate-400 font-mono">
+        </motion.div>
+
+        {/* Card 3: Total Sale Qty */}
+        <motion.div
+          initial={prefersReduced ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.45, delay: 0.12, ease: [0.16, 1, 0.3, 1] }}
+          whileHover={prefersReduced ? undefined : { y: -2 }}
+          className="bg-white border border-slate-200/90 hover:border-[#0F1F3D]/30 rounded-2xl p-5 relative overflow-hidden shadow-2xs transition-colors flex flex-col justify-between gap-4"
+        >
+          <div className="absolute top-0 inset-x-0 h-0.5 bg-gradient-to-r from-[#1E3A5F] via-[#3B5B84] to-[#B8923A]/50" />
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#0F1F3D]">
+                <Package className="w-3.5 h-3.5 text-[#1E3A5F] shrink-0" />
+                <span>Total Sale Qty</span>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                Units Sold Across 3 Slabs
+              </p>
+            </div>
+            <SaleQtyPillarsGraphic />
+          </div>
+
+          <div>
+            <p className="text-2xl sm:text-[26px] font-bold tracking-tight text-[#0F1F3D] leading-tight">
+              <AnimatedCounter value={metrics.totalSaleQty} mode="decimal" durationMs={950} />
+            </p>
+            <p className="text-[11px] text-slate-500 mt-1.5 font-mono tabular-nums truncate">
+              {metrics.publishedStaffCount > 0
+                ? `Avg ${formatQty(Math.round((metrics.totalSaleQty / metrics.publishedStaffCount) * 100) / 100)} qty / staff`
+                : 'New · Old · Other slabs'}
+            </p>
+          </div>
+        </motion.div>
+
+        {/* Card 4: Incentive Ratio (% of Sale) */}
+        <motion.div
+          initial={prefersReduced ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.45, delay: 0.18, ease: [0.16, 1, 0.3, 1] }}
+          whileHover={prefersReduced ? undefined : { y: -2 }}
+          className="bg-white border border-slate-200/90 hover:border-[#B8923A]/60 rounded-2xl p-5 relative overflow-hidden shadow-2xs transition-colors flex flex-col justify-between gap-4"
+        >
+          <div className="absolute top-0 inset-x-0 h-0.5 bg-gradient-to-r from-[#B8923A] via-[#DFC27D] to-[#0F1F3D]" />
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#0F1F3D]">
+                <Percent className="w-3.5 h-3.5 text-[#B8923A] shrink-0" />
+                <span>Incentive Ratio</span>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                Payout Efficiency vs Sale
+              </p>
+            </div>
+            <IncentiveRatioGaugeGraphic ratioPct={metrics.incentiveRatioPct} />
+          </div>
+
+          <div>
+            <p className="text-2xl sm:text-[26px] font-bold tracking-tight text-[#0F1F3D] leading-tight">
+              <AnimatedCounter value={metrics.incentiveRatioPct} mode="percent" durationMs={1000} />
+            </p>
+            <p className="text-[11px] text-slate-500 mt-1.5 font-mono tabular-nums truncate">
+              {metrics.totalSaleAmtPaise > 0
+                ? `₹${metrics.incentiveRatioPct.toFixed(2)} paid per ₹100 sale`
+                : 'Computed from published sales'}
+            </p>
+          </div>
+        </motion.div>
+      </div>
+
+      {/* Compact Secondary Operational Summary Strip (5 Quick Access Cards) */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        <button
+          type="button"
+          onClick={() => onNavigate('analytics')}
+          className="text-left bg-white border border-slate-200/90 rounded-xl p-4 hover:border-[#0F1F3D]/35 hover:bg-slate-50/40 transition-all cursor-pointer group"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[11px] font-medium text-slate-500 truncate">All-Time Incentive</p>
+            <Award className="w-3.5 h-3.5 text-[#B8923A] shrink-0" />
+          </div>
+          <p className="text-base sm:text-lg font-bold text-[#0F1F3D] mt-1.5 truncate">
+            <AnimatedCounter value={metrics.allTimeTotalPaise} mode="paise" durationMs={700} />
+          </p>
+          <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-[#1E3A5F] group-hover:underline">
+            Analytics &amp; Targets
+            <ArrowUpRight className="w-3 h-3" />
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNavigate('employees')}
+          className="text-left bg-white border border-slate-200/90 rounded-xl p-4 hover:border-[#0F1F3D]/35 hover:bg-slate-50/40 transition-all cursor-pointer group"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[11px] font-medium text-slate-500 truncate">Active Employees</p>
+            <Users className="w-3.5 h-3.5 text-[#1E3A5F] shrink-0" />
+          </div>
+          <p className="text-base sm:text-lg font-bold text-[#0F1F3D] mt-1.5">
+            <AnimatedCounter value={metrics.activeEmployees} mode="integer" durationMs={650} />
+            <span className="text-xs font-normal text-slate-400 font-mono">
               {' '}
               / {employees.length}
             </span>
           </p>
-          <button
-            type="button"
-            onClick={() => onNavigate('employees')}
-            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
-          >
-            Manage Employee Accounts
-            <ArrowUpRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
+          <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-[#1E3A5F] group-hover:underline">
+            Employee Master
+            <ArrowUpRight className="w-3 h-3" />
+          </span>
+        </button>
 
-        <div className="bg-white border border-slate-200/90 rounded-xl p-5 hover:border-slate-300 transition-colors">
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <p className="text-xs font-medium text-slate-500">Active Retail Branches</p>
-            <Building2 className="w-4 h-4 text-[#B8923A] shrink-0" />
+        <button
+          type="button"
+          onClick={() => onNavigate('branches')}
+          className="text-left bg-white border border-slate-200/90 rounded-xl p-4 hover:border-[#0F1F3D]/35 hover:bg-slate-50/40 transition-all cursor-pointer group"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[11px] font-medium text-slate-500 truncate">Retail Branches</p>
+            <Building2 className="w-3.5 h-3.5 text-[#B8923A] shrink-0" />
           </div>
-          <p className="text-2xl font-semibold text-[#0F1F3D]">
-            <AnimatedCounter value={metrics.activeBranches} mode="integer" />
-            <span className="text-sm font-normal text-slate-400 font-mono">
+          <p className="text-base sm:text-lg font-bold text-[#0F1F3D] mt-1.5">
+            <AnimatedCounter value={metrics.activeBranches} mode="integer" durationMs={650} />
+            <span className="text-xs font-normal text-slate-400 font-mono">
               {' '}
               / {branches.length || 12}
             </span>
           </p>
-          <button
-            type="button"
-            onClick={() => onNavigate('branches')}
-            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
-          >
-            Manage Branch Master
-            <ArrowUpRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
+          <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-[#1E3A5F] group-hover:underline">
+            Branch Master
+            <ArrowUpRight className="w-3 h-3" />
+          </span>
+        </button>
 
-        <div className="bg-white border border-slate-200/90 rounded-xl p-5 hover:border-slate-300 transition-colors">
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <p className="text-xs font-medium text-slate-500">Pending Approvals / Batches</p>
+        <button
+          type="button"
+          onClick={() => onNavigate(metrics.pendingBatches > 0 ? 'history' : 'import')}
+          className="text-left bg-white border border-slate-200/90 rounded-xl p-4 hover:border-[#0F1F3D]/35 hover:bg-slate-50/40 transition-all cursor-pointer group"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[11px] font-medium text-slate-500 truncate">Pending Batches</p>
             <Clock
-              className={`w-4 h-4 shrink-0 ${
+              className={`w-3.5 h-3.5 shrink-0 ${
                 metrics.pendingBatches > 0 ? 'text-amber-600' : 'text-emerald-600'
               }`}
             />
           </div>
-          <p className="text-2xl font-semibold text-[#0F1F3D]">
-            <AnimatedCounter value={metrics.pendingBatches} mode="integer" />
+          <p className="text-base sm:text-lg font-bold text-[#0F1F3D] mt-1.5">
+            <AnimatedCounter value={metrics.pendingBatches} mode="integer" durationMs={650} />
           </p>
-          <button
-            type="button"
-            onClick={() => onNavigate(metrics.pendingBatches > 0 ? 'history' : 'import')}
-            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
-          >
-            {metrics.pendingBatches > 0 ? 'Review Pending Batches' : 'Upload Daily Excel'}
-            <ArrowUpRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
+          <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-[#1E3A5F] group-hover:underline">
+            {metrics.pendingBatches > 0 ? 'Review Batches' : 'Upload Excel'}
+            <ArrowUpRight className="w-3 h-3" />
+          </span>
+        </button>
 
-        <div className="bg-white border border-slate-200/90 rounded-xl p-5 hover:border-slate-300 transition-colors">
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <p className="text-xs font-medium text-slate-500">Open Employee Queries</p>
+        <button
+          type="button"
+          onClick={() => onNavigate('payouts')}
+          className="text-left bg-white border border-slate-200/90 rounded-xl p-4 hover:border-[#0F1F3D]/35 hover:bg-slate-50/40 transition-all cursor-pointer group col-span-2 sm:col-span-1"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[11px] font-medium text-slate-500 truncate">Open Queries</p>
             <MessageSquare
-              className={`w-4 h-4 shrink-0 ${
+              className={`w-3.5 h-3.5 shrink-0 ${
                 metrics.openQueries > 0 ? 'text-amber-600' : 'text-emerald-600'
               }`}
             />
           </div>
-          <p className="text-2xl font-semibold text-[#0F1F3D]">
-            <AnimatedCounter value={metrics.openQueries} mode="integer" />
+          <p className="text-base sm:text-lg font-bold text-[#0F1F3D] mt-1.5">
+            <AnimatedCounter value={metrics.openQueries} mode="integer" durationMs={650} />
           </p>
-          <button
-            type="button"
-            onClick={() => onNavigate('payouts')}
-            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
-          >
-            {metrics.openQueries > 0 ? 'Resolve Staff Queries' : 'View Payouts & Queries'}
-            <ArrowUpRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
+          <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-[#1E3A5F] group-hover:underline">
+            {metrics.openQueries > 0 ? 'Resolve Queries' : 'Payouts Desk'}
+            <ArrowUpRight className="w-3 h-3" />
+          </span>
+        </button>
       </div>
 
       {/* Main two-column operational section */}
