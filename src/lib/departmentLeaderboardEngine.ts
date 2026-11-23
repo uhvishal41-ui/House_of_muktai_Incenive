@@ -58,7 +58,15 @@ export function resolveCanonicalDepartment(raw?: string | null): OfficialDepartm
   if (compact.includes('kid') || compact.includes('child') || compact.includes('baby')) {
     return OFFICIAL_DEPARTMENTS[2];
   }
-  if (compact.includes('mens') || compact.includes('man') || compact.includes('gents')) {
+  if (
+    compact.includes('mens') ||
+    compact.includes('gents') ||
+    compact === 'man' ||
+    compact === 'manwear' ||
+    compact === 'manswear' ||
+    compact === 'manware' ||
+    compact === 'mansware'
+  ) {
     return OFFICIAL_DEPARTMENTS[3];
   }
   if (
@@ -72,6 +80,92 @@ export function resolveCanonicalDepartment(raw?: string | null): OfficialDepartm
     return OFFICIAL_DEPARTMENTS[4];
   }
   return null;
+}
+
+/**
+ * Common Non-Sales / Support / Head Office departments across House of Muktai branches.
+ * These staff receive full Salary Slips, Employee Master profiles, and 12-Branch Birthday Wishes,
+ * while staying cleanly separated from the 5 Textile Sales Counter Top-3 Leaderboards.
+ */
+export const COMMON_NON_SALES_DEPARTMENTS: readonly string[] = [
+  'Head Office',
+  'Accounts',
+  'HR & Admin',
+  'Billing & Cash',
+  'Store Operations',
+  'Management',
+  'Purchase',
+  'Inventory & Stock',
+  'Warehouse & Dispatch',
+  'IT & Systems',
+  'Marketing',
+  'Tailoring & Alteration',
+  'Security',
+  'Housekeeping',
+  'Audit & Compliance',
+  'Maintenance',
+] as const;
+
+const NON_SALES_ALIASES: Record<string, string> = {
+  hr: 'HR & Admin',
+  humanresource: 'HR & Admin',
+  humanresources: 'HR & Admin',
+  hradmin: 'HR & Admin',
+  admin: 'Admin',
+  administration: 'Admin',
+  ho: 'Head Office',
+  headoffice: 'Head Office',
+  account: 'Accounts',
+  accounts: 'Accounts',
+  finance: 'Accounts',
+  accounting: 'Accounts',
+  billing: 'Billing & Cash',
+  cash: 'Billing & Cash',
+  cashier: 'Billing & Cash',
+  billingcash: 'Billing & Cash',
+  cashcounter: 'Billing & Cash',
+  it: 'IT & Systems',
+  itsystems: 'IT & Systems',
+  edp: 'IT & Systems',
+  ops: 'Store Operations',
+  operations: 'Store Operations',
+  storeops: 'Store Operations',
+  storeoperations: 'Store Operations',
+  mgmt: 'Management',
+  management: 'Management',
+  purchase: 'Purchase',
+  procurement: 'Purchase',
+  inventory: 'Inventory & Stock',
+  stock: 'Inventory & Stock',
+  godown: 'Warehouse & Dispatch',
+  warehouse: 'Warehouse & Dispatch',
+  dispatch: 'Warehouse & Dispatch',
+  logistics: 'Warehouse & Dispatch',
+  security: 'Security',
+  housekeeping: 'Housekeeping',
+  tailoring: 'Tailoring & Alteration',
+  alteration: 'Tailoring & Alteration',
+  marketing: 'Marketing',
+  audit: 'Audit & Compliance',
+  maintenance: 'Maintenance',
+};
+
+/**
+ * Validates and normalizes a Non-Sales department name (e.g., "Accounts", "HR", "Billing", "Head Office").
+ * Returns null if the input is blank or clearly invalid (e.g., purely numeric/symbol junk like "12345").
+ */
+export function normalizeNonSalesDepartmentName(raw?: string | null): string | null {
+  const trimmed = String(raw || '').trim().replace(/\s+/g, ' ');
+  if (!trimmed) return null;
+  // Must contain at least 2 alphabetic characters so purely numeric/punctuation junk is rejected
+  const letterCount = (trimmed.match(/[a-zA-Z]/g) || []).length;
+  if (letterCount < 2 || trimmed.length > 80) return null;
+
+  const compact = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (NON_SALES_ALIASES[compact]) {
+    return NON_SALES_ALIASES[compact];
+  }
+  return trimmed.slice(0, 80);
 }
 
 /**

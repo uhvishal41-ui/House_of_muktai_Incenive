@@ -3,16 +3,27 @@ import {
   ArrowUpRight,
   Award,
   Building2,
+  Cake,
+  Check,
   Clock,
   FileSpreadsheet,
+  Gift,
   IndianRupee,
   MessageSquare,
   Package,
   Percent,
+  Send,
   TrendingUp,
   Users,
 } from 'lucide-react';
 import { motion, useReducedMotion } from 'motion/react';
+import {
+  BIRTHDAY_WISH_PRESETS,
+  buildBirthdayProfileFromEmployee,
+  formatBirthMonthDayLabel,
+  getTodayIstParts,
+  partitionBirthdays,
+} from '../../lib/birthdayEngine';
 import {
   formatINRFromPaise,
   formatMonthLabel,
@@ -21,6 +32,8 @@ import {
   getCurrentMonthKeyIST,
 } from '../../lib/format';
 import { normalizeRecordPeriod } from '../../lib/incentiveEngine';
+import { sendManagementBirthdayWish } from '../../services/birthdayService';
+import { BirthdayWishingCardModal } from '../common/BirthdayWishingCardModal';
 import { CompanyLetterhead } from '../common/BrandLogo';
 import { AnimatedCounter } from '../common/MotionPrimitives';
 import {
@@ -30,6 +43,7 @@ import {
   SaleQtyPillarsGraphic,
 } from './DashboardMetricGraphics';
 import type {
+  BirthdayProfile,
   Branch,
   Employee,
   EmployeeQuery,
@@ -61,6 +75,46 @@ export function AdminOverview({
   const prefersReduced = useReducedMotion();
   const currentMonth = getCurrentMonthKeyIST();
   const [selectedBranchId, setSelectedBranchId] = useState<string>('ALL');
+  const [previewBirthdayCard, setPreviewBirthdayCard] = useState<BirthdayProfile | null>(null);
+  const [wishingEmpId, setWishingEmpId] = useState<string | null>(null);
+  const [wishedEmpIds, setWishedEmpIds] = useState<Record<string, boolean>>({});
+  const [birthdayNotice, setBirthdayNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(
+    null,
+  );
+
+  const todayIst = useMemo(() => getTodayIstParts(), []);
+  const birthdayOverview = useMemo(() => {
+    const profiles: BirthdayProfile[] = [];
+    for (const emp of employees) {
+      const p = buildBirthdayProfileFromEmployee(emp);
+      if (p) profiles.push(p);
+    }
+    const { today, upcoming } = partitionBirthdays(profiles, new Date(), 7);
+    return { totalWithDob: profiles.length, today, upcoming };
+  }, [employees]);
+
+  const handleSendOfficialWish = async (profile: BirthdayProfile) => {
+    setWishingEmpId(profile.employeeId);
+    setBirthdayNotice(null);
+    try {
+      await sendManagementBirthdayWish({
+        recipient: profile,
+        message: `${BIRTHDAY_WISH_PRESETS[0].text} — Warm wishes from House of Muktai Management.`,
+      });
+      setWishedEmpIds((prev) => ({ ...prev, [profile.employeeId]: true }));
+      setBirthdayNotice({
+        type: 'ok',
+        text: `Official House of Muktai Management wish delivered to ${profile.fullName} (${profile.branchName}).`,
+      });
+    } catch (err) {
+      setBirthdayNotice({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Unable to send management birthday wish.',
+      });
+    } finally {
+      setWishingEmpId(null);
+    }
+  };
 
   const publishedDailyMonthlyMonthKeys = useMemo(() => {
     const set = new Set<string>();
@@ -719,6 +773,200 @@ export function AdminOverview({
           )}
         </section>
       </div>
+
+      {/* 12-Branch Birthdays & Official Wishing Cards Operational Section */}
+      <section className="bg-white border border-slate-200/90 rounded-xl overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-[#0F1F3D] text-[#DFC27D] flex items-center justify-center shrink-0">
+              <Cake className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-base font-semibold text-[#0F1F3D]">
+                12-Branch Birthdays &amp; Official Wishing Cards
+              </h2>
+              <p className="text-xs text-slate-500">
+                Today: <strong className="text-[#0F1F3D]">{birthdayOverview.today.length}</strong> ·
+                Next 7 Days:{' '}
+                <strong className="text-[#0F1F3D]">{birthdayOverview.upcoming.length}</strong> · DOB
+                Registered:{' '}
+                <span className="font-mono">
+                  {birthdayOverview.totalWithDob}/{metrics.activeEmployees}
+                </span>
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate('employees')}
+            className="h-9 px-3.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+          >
+            <span>Manage DOBs &amp; Bulk Upload</span>
+            <ArrowUpRight className="w-3.5 h-3.5 text-[#B8923A]" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {birthdayNotice && (
+            <div
+              className={`p-3 rounded-lg border text-xs font-medium ${
+                birthdayNotice.type === 'ok'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-red-50 border-red-200 text-red-800'
+              }`}
+            >
+              {birthdayNotice.text}
+            </div>
+          )}
+
+          {birthdayOverview.totalWithDob === 0 ? (
+            <div className="py-8 px-4 text-center border border-dashed border-slate-200 rounded-xl space-y-2">
+              <p className="text-sm font-medium text-[#0F1F3D]">
+                No employee Dates of Birth registered yet
+              </p>
+              <p className="text-xs text-slate-500 max-w-lg mx-auto">
+                Upload employee DOBs in <strong>Employee Master → Bulk Birthdays (DOB)</strong> to
+                automatically send Official House of Muktai Wishing Cards and display 12-branch
+                celebrations inside every staff app.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              {/* Today's Celebrants */}
+              <div className="space-y-2.5">
+                <p className="text-xs font-semibold uppercase tracking-wide text-[#9A7625]">
+                  Celebrating Today ({birthdayOverview.today.length})
+                </p>
+                {birthdayOverview.today.length === 0 ? (
+                  <p className="text-xs text-slate-500 p-4 rounded-xl bg-slate-50 border border-slate-200/70">
+                    No active employee birthdays today across the 12 branches.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-slate-100 border border-slate-200/80 rounded-xl overflow-hidden">
+                    {birthdayOverview.today.map((person) => {
+                      const alreadyWished = Boolean(wishedEmpIds[person.employeeId]);
+                      return (
+                        <div
+                          key={person.employeeId}
+                          className="p-3.5 flex flex-wrap items-center justify-between gap-3 bg-[#FFFDF7]"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-[#0F1F3D] truncate">
+                              {person.fullName}
+                            </p>
+                            <p className="text-xs text-slate-500 truncate">
+                              {person.branchName}
+                              {person.departmentName ? ` · ${person.departmentName}` : ''} · #
+                              {person.employeeId}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => setPreviewBirthdayCard(person)}
+                              className="h-8 px-2.5 rounded-lg border border-[#B8923A]/40 bg-white hover:bg-[#FFFDF7] text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <Gift className="w-3.5 h-3.5 text-[#B8923A]" />
+                              <span>Card</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={wishingEmpId === person.employeeId || alreadyWished}
+                              onClick={() => handleSendOfficialWish(person)}
+                              className={`h-8 px-3 rounded-lg text-xs font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-65 ${
+                                alreadyWished
+                                  ? 'bg-emerald-50 border border-emerald-200 text-emerald-700'
+                                  : 'bg-[#0F1F3D] hover:bg-[#162B50] text-white'
+                              }`}
+                            >
+                              {alreadyWished ? (
+                                <>
+                                  <Check className="w-3.5 h-3.5" />
+                                  <span>Wished</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Send className="w-3.5 h-3.5 text-[#DFC27D]" />
+                                  <span>
+                                    {wishingEmpId === person.employeeId
+                                      ? 'Sending...'
+                                      : 'Send Mgmt Wish'}
+                                  </span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Upcoming 7 Days */}
+              <div className="space-y-2.5">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Upcoming — Next 7 Days ({birthdayOverview.upcoming.length})
+                </p>
+                {birthdayOverview.upcoming.length === 0 ? (
+                  <p className="text-xs text-slate-500 p-4 rounded-xl bg-slate-50 border border-slate-200/70">
+                    No upcoming birthdays in the next 7 days.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-slate-100 border border-slate-200/80 rounded-xl overflow-hidden">
+                    {birthdayOverview.upcoming.slice(0, 6).map((person) => (
+                      <div
+                        key={person.employeeId}
+                        className="p-3.5 flex items-center justify-between gap-3 bg-white"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-[#0F1F3D] truncate">
+                            {person.fullName}
+                          </p>
+                          <p className="text-xs text-slate-500 truncate">
+                            {person.branchName} ·{' '}
+                            <span className="font-medium text-[#9A7625]">
+                              {formatBirthMonthDayLabel(person.birthMonthDay, 'en')}
+                            </span>{' '}
+                            ({person.daysUntil === 1 ? 'Tomorrow' : `in ${person.daysUntil} days`})
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setPreviewBirthdayCard(person)}
+                          className="h-8 px-2.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-medium text-[#0F1F3D] inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                        >
+                          <Gift className="w-3.5 h-3.5 text-[#B8923A]" />
+                          <span>Preview Card</span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <BirthdayWishingCardModal
+        open={Boolean(previewBirthdayCard)}
+        onClose={() => setPreviewBirthdayCard(null)}
+        card={
+          previewBirthdayCard
+            ? {
+                fullName: previewBirthdayCard.fullName,
+                employeeId: previewBirthdayCard.employeeId,
+                branchName: previewBirthdayCard.branchName,
+                departmentName: previewBirthdayCard.departmentName,
+                designation: previewBirthdayCard.designation,
+                photoDataUrl: previewBirthdayCard.photoDataUrl,
+                birthMonthDay: previewBirthdayCard.birthMonthDay,
+                celebrationYear: todayIst.year,
+              }
+            : null
+        }
+      />
     </div>
   );
 }

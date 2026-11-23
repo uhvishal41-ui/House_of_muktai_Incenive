@@ -1,7 +1,10 @@
 import { jsPDF } from 'jspdf';
 import { COMPANY_BRAND, DEFAULT_EMPLOYEE_PASSWORD } from './companyBrand';
 import { formatMonthLabel, formatQty, formatShortDate } from './format';
-import { paiseToIndianWords } from './salarySlipEngine';
+import {
+  getSalarySlipEarningBreakdown,
+  paiseToIndianWords,
+} from './salarySlipEngine';
 import type {
   Employee,
   IncentiveAdjustment,
@@ -622,7 +625,7 @@ export async function downloadCredentialSheetPdf(params: {
     doc.setTextColor(255, 255, 255);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
-    doc.text('Salesman No', margin + 2.5, tableY + 5.5);
+    doc.text('Employee ID', margin + 2.5, tableY + 5.5);
     doc.text('Employee Name', margin + 27, tableY + 5.5);
     doc.text('Branch', margin + 84, tableY + 5.5);
     doc.text('Login ID', margin + 124, tableY + 5.5);
@@ -714,10 +717,10 @@ export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<v
 
   const leftRows: Array<[string, string]> = [
     ['Employee Name', slip.employeeName],
-    ['Salesman No / ID', slip.employeeId],
+    ['Employee ID', slip.employeeId],
     ['Branch', slip.branchName],
     ['Department', slip.departmentName || '—'],
-    ['Designation', slip.designation || 'Sales Executive'],
+    ['Designation', slip.designation || '—'],
     ['Date of Joining', slip.dateOfJoining || '—'],
   ];
   const rightRows: Array<[string, string]> = [
@@ -806,16 +809,7 @@ export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<v
   doc.line(margin + halfW, y, margin + halfW, y + headerH);
   y += headerH;
 
-  const allEarningsRows: Array<[string, number]> = [
-    ['Basic Salary', slip.basicPaise],
-    ['House Rent Allowance (HRA)', slip.hraPaise],
-    ['Conveyance Allowance', slip.conveyancePaise],
-    ['Special Allowance', slip.specialAllowancePaise],
-    ['Overtime Pay', slip.overtimePaise],
-    ['Incentive / Bonus', slip.incentivePaise],
-    ['Other Earnings', slip.otherEarningsPaise],
-  ];
-  const earningsRows = allEarningsRows.filter(([, amt], idx) => idx === 0 || amt > 0);
+  const earningsRows = getSalarySlipEarningBreakdown(slip, 'en');
 
   const allDeductionRows: Array<[string, number]> = [
     ['Provident Fund (PF)', slip.pfPaise],
@@ -832,7 +826,9 @@ export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<v
   }
 
   const maxLines = Math.max(earningsRows.length, deductionRows.length, 5);
-  const rowH = 7.4;
+  const rowH = maxLines > 10 ? 5.6 : maxLines > 7 ? 6.4 : 7.4;
+  const textBaseline = rowH * 0.68;
+  const rowFontSize = maxLines > 10 ? 7.6 : 8.2;
 
   for (let i = 0; i < maxLines; i += 1) {
     if (i % 2 === 1) {
@@ -847,21 +843,21 @@ export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<v
     const earn = earningsRows[i];
     if (earn) {
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8.2);
+      doc.setFontSize(rowFontSize);
       doc.setTextColor(30, 41, 59);
-      doc.text(earn[0], margin + 4, y + 5);
+      doc.text(earn[0], margin + 4, y + textBaseline);
       doc.setFont('helvetica', 'bold');
-      doc.text(formatRsPdf(earn[1]), margin + halfW - 4, y + 5, { align: 'right' });
+      doc.text(formatRsPdf(earn[1]), margin + halfW - 4, y + textBaseline, { align: 'right' });
     }
 
     const ded = deductionRows[i];
     if (ded) {
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8.2);
+      doc.setFontSize(rowFontSize);
       doc.setTextColor(30, 41, 59);
-      doc.text(ded[0], margin + halfW + 4, y + 5);
+      doc.text(ded[0], margin + halfW + 4, y + textBaseline);
       doc.setFont('helvetica', 'bold');
-      doc.text(formatRsPdf(ded[1]), pageWidth - margin - 4, y + 5, { align: 'right' });
+      doc.text(formatRsPdf(ded[1]), pageWidth - margin - 4, y + textBaseline, { align: 'right' });
     }
 
     y += rowH;

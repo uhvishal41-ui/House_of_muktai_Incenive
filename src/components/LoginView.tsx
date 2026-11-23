@@ -197,7 +197,7 @@ export function LoginView() {
               <p className="text-xs text-slate-500 mt-1">
                 {portalMode === 'admin'
                   ? 'Authorized management access with verified Google identity.'
-                  : 'Sign in with your Salesman No / Login ID and personal password.'}
+                  : 'Sign in with your Employee ID / Login ID and personal password.'}
               </p>
             </div>
 
@@ -235,7 +235,7 @@ export function LoginView() {
               <form onSubmit={handleEmployeeLogin} className="space-y-3.5">
                 <div>
                   <label htmlFor="loginId" className="block text-xs font-semibold text-slate-700 mb-1">
-                    Login ID / Salesman No
+                    Login ID / Employee ID
                   </label>
                   <input
                     id="loginId"

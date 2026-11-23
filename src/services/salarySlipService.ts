@@ -2,6 +2,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   getDocs,
   onSnapshot,
   query,
@@ -12,10 +13,14 @@ import {
   type Unsubscribe,
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
-import { isMonthVisibleToEmployees } from '../lib/departmentLeaderboardEngine';
+import {
+  isMonthVisibleToEmployees,
+  resolveCanonicalDepartment,
+} from '../lib/departmentLeaderboardEngine';
 import {
   buildSalarySlipId,
   getEffectiveDepartmentId,
+  normalizeSalaryPaymentMode,
   type ParsedSalaryRow,
 } from '../lib/salarySlipEngine';
 import { recomputeAndSaveDepartmentRankings } from './departmentVisibilityService';
@@ -28,6 +33,64 @@ import type {
   PublishedIncentive,
   SalarySlip,
 } from '../types/incentive';
+
+const VALID_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
+const VALID_MONTH_KEY_RE = /^\d{4}-\d{2}$/;
+const VALID_DEPT_IDS = new Set<string>([
+  'SAREE',
+  'LADIES_WEAR',
+  'KIDS_WEAR',
+  'MENS_WEAR',
+  'NON_APPARELS',
+]);
+
+function toSafeNonNegInt(value: unknown): number {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  return Math.round(num);
+}
+
+function toSafeAttendanceNumber(value: unknown, maxVal: number): number {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 0) return 0;
+  return Math.min(maxVal, Number(num.toFixed(2)));
+}
+
+function sanitizeDepartmentId(raw: unknown): DepartmentId | '' {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  if (VALID_DEPT_IDS.has(s)) return s as DepartmentId;
+  const resolved = resolveCanonicalDepartment(s);
+  return resolved ? resolved.id : '';
+}
+
+function validateSalarySlipDocForRules(slip: SalarySlip): string | null {
+  if (!VALID_ID_RE.test(slip.slipId)) {
+    return `Invalid Slip ID "${slip.slipId}" (only letters, numbers, _ and - allowed).`;
+  }
+  if (!VALID_MONTH_KEY_RE.test(slip.monthKey)) {
+    return `Invalid Pay Month "${slip.monthKey}" for ${slip.employeeName}. Use YYYY-MM.`;
+  }
+  if (!VALID_ID_RE.test(slip.employeeId)) {
+    return `Employee "${slip.employeeName}" has invalid Employee ID "${slip.employeeId}" in Employee Master (contains spaces or special characters).`;
+  }
+  if (!VALID_ID_RE.test(slip.branchId)) {
+    return `Employee "${slip.employeeName}" (${slip.employeeId}) has invalid Branch ID "${slip.branchId}" in Employee Master. Re-save or Sync 12 Branches first.`;
+  }
+  if (!slip.employeeName.trim()) {
+    return `Employee ID "${slip.employeeId}" has a blank Full Name in Employee Master.`;
+  }
+  if (!slip.branchName.trim()) {
+    return `Employee "${slip.employeeName}" (${slip.employeeId}) has a blank Branch Name in Employee Master.`;
+  }
+  if (slip.departmentId && !VALID_DEPT_IDS.has(slip.departmentId)) {
+    return `Employee "${slip.employeeName}" (${slip.employeeId}) has invalid Department ID "${slip.departmentId}".`;
+  }
+  if (slip.netPayablePaise < 0) {
+    return `Employee "${slip.employeeName}" (${slip.employeeId}) has negative Net Payable.`;
+  }
+  return null;
+}
 
 function requireActor(): { uid: string; email: string } {
   const user = auth.currentUser;
@@ -169,16 +232,19 @@ export interface PublishSalarySlipsResult {
   departmentsSynced: number;
   masterProfilesSynced: number;
   leaderboardsRefreshedMonths: number;
+  syncWarnings: string[];
 }
 
 /**
  * Super Admin ONLY:
- * 1. Publishes or updates monthly `salary_slips/{monthKey}__{employeeId}` documents
- *    stamped with the Admin's current `employeeVisible` rule.
- * 2. When `syncMasterData` is true, automatically syncs Department (5 official depts),
+ * 1. Fetches live existing slips for affected months so re-uploads preserve immutable `uploadedAt`.
+ * 2. Publishes or updates monthly `salary_slips/{monthKey}__{employeeId}` documents
+ *    with strict rule-synced integer arithmetic & sanitization.
+ * 3. When `syncMasterData` is true, safely syncs Department (5 official depts),
  *    Designation, DOJ, PAN, UAN, PF, ESIC, Bank details onto `employees/{employeeId}`
- *    and atomically updates `active_auth_uids/{authUid}.departmentId`.
- * 3. Automatically refreshes the 12-branch Department Top-3 Leaderboards if departments changed.
+ *    with atomic Pillar 7 `active_auth_uids` sync (isolated per-step so legacy employee issues
+ *    never fail or mask salary slip publishing).
+ * 4. Automatically refreshes the 12-branch Department Top-3 Leaderboards if departments changed.
  */
 export async function publishSalarySlipsBatch(params: {
   validRows: ParsedSalaryRow[];
@@ -200,9 +266,31 @@ export async function publishSalarySlipsBatch(params: {
     empById.set(e.employeeId.trim().toUpperCase(), e);
   }
 
+  // Merge in-memory existingSlips with fresh Firestore docs for all affected months
+  // so re-uploading a month NEVER fails Firestore's `incoming().uploadedAt == existing().uploadedAt` rule.
   const existingSlipById = new Map<string, SalarySlip>();
   for (const s of params.existingSlips) {
     existingSlipById.set(s.slipId, s);
+  }
+
+  const affectedMonths = new Set<string>();
+  for (const row of params.validRows) {
+    if (VALID_MONTH_KEY_RE.test(row.monthKey)) {
+      affectedMonths.add(row.monthKey);
+    }
+  }
+
+  try {
+    const liveAllSnap = await getDocs(collection(db, 'salary_slips'));
+    for (const d of liveAllSnap.docs) {
+      const rec = d.data() as SalarySlip;
+      existingSlipById.set(d.id, rec);
+      if (rec.slipId) {
+        existingSlipById.set(rec.slipId, rec);
+      }
+    }
+  } catch {
+    // Fall back to in-memory existingSlips if collection read fails
   }
 
   const slipOps: Array<{ ref: ReturnType<typeof doc>; data: SalarySlip }> = [];
@@ -214,69 +302,141 @@ export async function publishSalarySlipsBatch(params: {
 
   let departmentsSynced = 0;
   let masterProfilesSynced = 0;
-  const affectedMonths = new Set<string>();
+  const syncWarnings: string[] = [];
 
   for (const row of params.validRows) {
     const emp = empById.get(row.employeeId.trim().toUpperCase());
     if (!emp) continue;
 
-    affectedMonths.add(row.monthKey);
-    const slipId = buildSalarySlipId(row.monthKey, emp.employeeId);
+    const cleanEmployeeId = emp.employeeId.trim();
+    const cleanBranchId = emp.branchId.trim();
+    const slipId = buildSalarySlipId(row.monthKey, cleanEmployeeId);
     const existingSlip = existingSlipById.get(slipId);
-    const effectiveDeptId = getEffectiveDepartmentId(row.resolvedDepartment, emp);
-    const effectiveDeptName = row.resolvedDepartment?.name || emp.departmentName || '';
+    const effectiveDeptId = row.resolvedDepartment
+      ? sanitizeDepartmentId(row.resolvedDepartment.id)
+      : row.customDepartmentName
+        ? ''
+        : sanitizeDepartmentId(getEffectiveDepartmentId(row.resolvedDepartment, emp));
+    const effectiveDeptName = (
+      row.resolvedDepartment?.name ||
+      row.customDepartmentName ||
+      emp.departmentName ||
+      ''
+    ).trim();
     const employeeVisible = isMonthVisibleToEmployees(row.monthKey, params.visibilitySettings);
+
+    // Guarantee exact integer paise & exact sums required by Firestore Security Rules
+    const basicPaise = toSafeNonNegInt(row.basicPaise);
+    const dearnessAllowancePaise = toSafeNonNegInt(row.dearnessAllowancePaise);
+    const hraPaise = toSafeNonNegInt(row.hraPaise);
+    const attendanceAllowancePaise = toSafeNonNegInt(row.attendanceAllowancePaise);
+    const washingAllowancePaise = toSafeNonNegInt(row.washingAllowancePaise);
+    const conveyancePaise = toSafeNonNegInt(row.conveyancePaise);
+    const medicalAllowancePaise = toSafeNonNegInt(row.medicalAllowancePaise);
+    const leaveTravelAllowancePaise = toSafeNonNegInt(row.leaveTravelAllowancePaise);
+    const communicationExpensesPaise = toSafeNonNegInt(row.communicationExpensesPaise);
+    const adhocAllowancePaise = toSafeNonNegInt(row.adhocAllowancePaise);
+    const travelingAllowancePaise = toSafeNonNegInt(row.travelingAllowancePaise);
+    const salesCommissionPaise = toSafeNonNegInt(row.salesCommissionPaise);
+    const specialAllowancePaise = toSafeNonNegInt(row.specialAllowancePaise);
+    const overtimePaise = toSafeNonNegInt(row.overtimePaise);
+    const incentivePaise = toSafeNonNegInt(row.incentivePaise);
+    const otherEarningsPaise = toSafeNonNegInt(row.otherEarningsPaise);
+
+    const grossEarningsPaise =
+      basicPaise +
+      dearnessAllowancePaise +
+      hraPaise +
+      attendanceAllowancePaise +
+      washingAllowancePaise +
+      conveyancePaise +
+      medicalAllowancePaise +
+      leaveTravelAllowancePaise +
+      communicationExpensesPaise +
+      adhocAllowancePaise +
+      travelingAllowancePaise +
+      salesCommissionPaise +
+      specialAllowancePaise +
+      overtimePaise +
+      incentivePaise +
+      otherEarningsPaise;
+
+    const pfPaise = toSafeNonNegInt(row.pfPaise);
+    const esicPaise = toSafeNonNegInt(row.esicPaise);
+    const ptPaise = toSafeNonNegInt(row.ptPaise);
+    const advanceRecoveryPaise = toSafeNonNegInt(row.advanceRecoveryPaise);
+    const tdsPaise = toSafeNonNegInt(row.tdsPaise);
+    const otherDeductionPaise = toSafeNonNegInt(row.otherDeductionPaise);
+
+    const totalDeductionsPaise =
+      pfPaise + esicPaise + ptPaise + advanceRecoveryPaise + tdsPaise + otherDeductionPaise;
+
+    const netPayablePaise = grossEarningsPaise - totalDeductionsPaise;
 
     const slipDoc: SalarySlip = {
       slipId,
-      monthKey: row.monthKey,
-      employeeId: emp.employeeId,
-      authUid: emp.authUid || '',
-      employeeName: emp.fullName.slice(0, 120),
-      branchId: emp.branchId,
-      branchName: emp.branchName.slice(0, 120),
+      monthKey: row.monthKey.trim(),
+      employeeId: cleanEmployeeId,
+      authUid: String(emp.authUid || '').trim().slice(0, 128),
+      employeeName: (emp.fullName || row.employeeName || cleanEmployeeId).trim().slice(0, 120),
+      branchId: cleanBranchId,
+      branchName: (emp.branchName || row.branchName || cleanBranchId).trim().slice(0, 120),
       departmentId: effectiveDeptId,
       departmentName: effectiveDeptName.slice(0, 80),
-      designation: (row.designation || emp.designation || 'Sales Executive').slice(0, 80),
-      dateOfJoining: (row.dateOfJoining || emp.dateOfJoining || '').slice(0, 20),
-      panNumber: (row.panNumber || emp.panNumber || '').slice(0, 20),
-      uanNumber: (row.uanNumber || emp.uanNumber || '').slice(0, 24),
-      pfNumber: (row.pfNumber || emp.pfNumber || '').slice(0, 32),
-      esicNumber: (row.esicNumber || emp.esicNumber || '').slice(0, 32),
-      bankName: (row.bankName || emp.bankName || '').slice(0, 80),
-      bankAccountMasked: (row.bankAccountMasked || emp.bankAccountMasked || '').slice(0, 32),
-      bankIfsc: (row.bankIfsc || emp.bankIfsc || '').slice(0, 20),
-      totalDays: row.totalDays,
-      paidDays: row.paidDays,
-      lopDays: row.lopDays,
-      weeklyOffDays: row.weeklyOffDays,
-      paidLeaveDays: row.paidLeaveDays,
-      overtimeHours: row.overtimeHours,
-      basicPaise: row.basicPaise,
-      hraPaise: row.hraPaise,
-      conveyancePaise: row.conveyancePaise,
-      specialAllowancePaise: row.specialAllowancePaise,
-      overtimePaise: row.overtimePaise,
-      incentivePaise: row.incentivePaise,
-      otherEarningsPaise: row.otherEarningsPaise,
-      grossEarningsPaise: row.grossEarningsPaise,
-      pfPaise: row.pfPaise,
-      esicPaise: row.esicPaise,
-      ptPaise: row.ptPaise,
-      advanceRecoveryPaise: row.advanceRecoveryPaise,
-      tdsPaise: row.tdsPaise,
-      otherDeductionPaise: row.otherDeductionPaise,
-      totalDeductionsPaise: row.totalDeductionsPaise,
-      netPayablePaise: row.netPayablePaise,
-      paymentMode: row.paymentMode,
-      paymentReference: row.paymentReference.slice(0, 120),
-      paymentDate: row.paymentDate.slice(0, 30),
-      remarks: row.remarks.slice(0, 240),
+      designation: (row.designation || emp.designation || 'Employee').trim().slice(0, 80),
+      dateOfJoining: (row.dateOfJoining || emp.dateOfJoining || '').trim().slice(0, 20),
+      panNumber: (row.panNumber || emp.panNumber || '').trim().slice(0, 20),
+      uanNumber: (row.uanNumber || emp.uanNumber || '').trim().slice(0, 24),
+      pfNumber: (row.pfNumber || emp.pfNumber || '').trim().slice(0, 32),
+      esicNumber: (row.esicNumber || emp.esicNumber || '').trim().slice(0, 32),
+      bankName: (row.bankName || emp.bankName || '').trim().slice(0, 80),
+      bankAccountMasked: (row.bankAccountMasked || emp.bankAccountMasked || '').trim().slice(0, 32),
+      bankIfsc: (row.bankIfsc || emp.bankIfsc || '').trim().slice(0, 20),
+      totalDays: toSafeAttendanceNumber(row.totalDays, 31),
+      paidDays: toSafeAttendanceNumber(row.paidDays, 31),
+      lopDays: toSafeAttendanceNumber(row.lopDays, 31),
+      weeklyOffDays: toSafeAttendanceNumber(row.weeklyOffDays, 31),
+      paidLeaveDays: toSafeAttendanceNumber(row.paidLeaveDays, 31),
+      overtimeHours: toSafeAttendanceNumber(row.overtimeHours, 500),
+      basicPaise,
+      dearnessAllowancePaise,
+      hraPaise,
+      attendanceAllowancePaise,
+      washingAllowancePaise,
+      conveyancePaise,
+      medicalAllowancePaise,
+      leaveTravelAllowancePaise,
+      communicationExpensesPaise,
+      adhocAllowancePaise,
+      travelingAllowancePaise,
+      salesCommissionPaise,
+      specialAllowancePaise,
+      overtimePaise,
+      incentivePaise,
+      otherEarningsPaise,
+      grossEarningsPaise,
+      pfPaise,
+      esicPaise,
+      ptPaise,
+      advanceRecoveryPaise,
+      tdsPaise,
+      otherDeductionPaise,
+      totalDeductionsPaise,
+      netPayablePaise,
+      paymentMode: normalizeSalaryPaymentMode(row.paymentMode),
+      paymentReference: String(row.paymentReference || '').trim().slice(0, 120),
+      paymentDate: String(row.paymentDate || '').trim().slice(0, 30),
+      remarks: String(row.remarks || '').trim().slice(0, 240),
       employeeVisible,
       uploadedByEmail: actor.email,
-      uploadedAt: existingSlip?.uploadedAt || now,
+      uploadedAt: (existingSlip?.uploadedAt || now).slice(0, 40),
       updatedAt: now,
     };
+
+    const preflightErr = validateSalarySlipDocForRules(slipDoc);
+    if (preflightErr) {
+      throw new Error(`Salary slip pre-check failed (Row ${row.rowNumber}): ${preflightErr}`);
+    }
 
     slipOps.push({ ref: doc(db, 'salary_slips', slipId), data: slipDoc });
 
@@ -285,14 +445,28 @@ export async function publishSalarySlipsBatch(params: {
       const empPatch: Record<string, unknown> = { updatedAt: now };
       let nextDeptId: DepartmentId | '' | undefined;
 
+      // Normalize any legacy role so `isValidEmployee` never rejects the update
+      if ((emp.role as string) !== 'EMPLOYEE') {
+        empPatch.role = 'EMPLOYEE';
+      }
+
       if (row.resolvedDepartment && emp.departmentId !== row.resolvedDepartment.id) {
         empPatch.departmentId = row.resolvedDepartment.id;
         empPatch.departmentName = row.resolvedDepartment.name;
         nextDeptId = row.resolvedDepartment.id;
-        departmentsSynced += 1;
+      } else if (
+        !row.resolvedDepartment &&
+        row.customDepartmentName &&
+        (Boolean(emp.departmentId) ||
+          (emp.departmentName || '').trim().toLowerCase() !==
+            row.customDepartmentName.toLowerCase())
+      ) {
+        empPatch.departmentId = '';
+        empPatch.departmentName = row.customDepartmentName.slice(0, 80);
+        nextDeptId = '';
       }
-      if (row.designation && row.designation !== emp.designation) {
-        empPatch.designation = row.designation.slice(0, 80);
+      if (row.designation && row.designation.trim() && row.designation.trim() !== emp.designation) {
+        empPatch.designation = row.designation.trim().slice(0, 80);
       }
       if (row.dateOfJoining && row.dateOfJoining !== (emp.dateOfJoining || '')) {
         empPatch.dateOfJoining = row.dateOfJoining.slice(0, 20);
@@ -321,50 +495,130 @@ export async function publishSalarySlipsBatch(params: {
 
       if (Object.keys(empPatch).length > 1) {
         empSyncOps.push({ emp, empPatch, nextDeptId });
-        masterProfilesSynced += 1;
       }
     }
   }
 
-  try {
-    // 1. Commit Salary Slips in safe chunks
-    for (let i = 0; i < slipOps.length; i += 350) {
+  // 1. Commit Salary Slips in safe 100-doc chunks with automatic per-slip self-healing fallback
+  for (let i = 0; i < slipOps.length; i += 100) {
+    const chunk = slipOps.slice(i, i + 100);
+    try {
       const wb = writeBatch(db);
-      for (const op of slipOps.slice(i, i + 350)) {
+      for (const op of chunk) {
         wb.set(op.ref, op.data);
       }
       await wb.commit();
+    } catch {
+      // Self-heal per slip: re-read exact live uploadedAt if the doc already exists in Firestore,
+      // and isolate any single offending slip with crystal-clear diagnostics.
+      for (const op of chunk) {
+        let payload = op.data;
+        try {
+          const liveSnap = await getDoc(op.ref);
+          if (liveSnap.exists()) {
+            const liveData = liveSnap.data() as Partial<SalarySlip>;
+            if (typeof liveData.uploadedAt === 'string' && liveData.uploadedAt.trim()) {
+              payload = { ...payload, uploadedAt: liveData.uploadedAt.trim().slice(0, 40) };
+            }
+          }
+          await setDoc(op.ref, payload);
+        } catch (slipErr) {
+          const detail = `Salary slip write failed for ${payload.employeeName} (Emp ID: ${payload.employeeId}, Branch ID: ${payload.branchId}, Month: ${payload.monthKey}, Slip ID: ${payload.slipId}, Gross: ${payload.grossEarningsPaise}, Ded: ${payload.totalDeductionsPaise}, Net: ${payload.netPayablePaise}, Mode: "${payload.paymentMode || ''}").`;
+          console.error(detail, slipErr);
+          handleFirestoreError(
+            new Error(`${slipErr instanceof Error ? slipErr.message : String(slipErr)} — ${detail}`),
+            OperationType.WRITE,
+            `salary_slips/${payload.slipId}`,
+          );
+        }
+      }
     }
+  }
 
-    // 2. Commit Employee Master + atomic active_auth_uids sync
-    const updatedEmpMap = new Map<string, Employee>();
-    for (let i = 0; i < empSyncOps.length; i += 180) {
+  // 2. Commit Employee Master + atomic Pillar 7 active_auth_uids sync
+  // Isolated per-step with per-employee fallback so one legacy employee doc never blocks or mislabels salary slip uploads.
+  const updatedEmpMap = new Map<string, Employee>();
+  const applySingleEmployeeSync = async (item: (typeof empSyncOps)[number]) => {
+    const wb = writeBatch(db);
+    wb.update(doc(db, 'employees', item.emp.employeeId), item.empPatch);
+    const cleanUid = String(item.emp.authUid || '').trim();
+    if (cleanUid && VALID_ID_RE.test(cleanUid)) {
+      if (item.emp.status === 'ACTIVE') {
+        const safeDept = sanitizeDepartmentId(item.nextDeptId ?? item.emp.departmentId ?? '');
+        const activeDoc: ActiveAuthUidRecord = {
+          authUid: cleanUid,
+          employeeId: item.emp.employeeId,
+          ...(safeDept ? { departmentId: safeDept } : { departmentId: '' }),
+          active: true,
+          updatedAt: now,
+        };
+        wb.set(doc(db, 'active_auth_uids', cleanUid), activeDoc);
+      } else {
+        wb.delete(doc(db, 'active_auth_uids', cleanUid));
+      }
+    }
+    await wb.commit();
+
+    const mergedEmp: Employee = {
+      ...item.emp,
+      ...(item.empPatch as Partial<Employee>),
+    };
+    updatedEmpMap.set(item.emp.employeeId.toUpperCase(), mergedEmp);
+    masterProfilesSynced += 1;
+    if (item.nextDeptId) departmentsSynced += 1;
+  };
+
+  for (let i = 0; i < empSyncOps.length; i += 180) {
+    const chunk = empSyncOps.slice(i, i + 180);
+    try {
       const wb = writeBatch(db);
-      for (const item of empSyncOps.slice(i, i + 180)) {
+      for (const item of chunk) {
+        wb.update(doc(db, 'employees', item.emp.employeeId), item.empPatch);
+        const cleanUid = String(item.emp.authUid || '').trim();
+        if (cleanUid && VALID_ID_RE.test(cleanUid)) {
+          if (item.emp.status === 'ACTIVE') {
+            const safeDept = sanitizeDepartmentId(item.nextDeptId ?? item.emp.departmentId ?? '');
+            const activeDoc: ActiveAuthUidRecord = {
+              authUid: cleanUid,
+              employeeId: item.emp.employeeId,
+              ...(safeDept ? { departmentId: safeDept } : { departmentId: '' }),
+              active: true,
+              updatedAt: now,
+            };
+            wb.set(doc(db, 'active_auth_uids', cleanUid), activeDoc);
+          } else {
+            wb.delete(doc(db, 'active_auth_uids', cleanUid));
+          }
+        }
+      }
+      await wb.commit();
+      for (const item of chunk) {
         const mergedEmp: Employee = {
           ...item.emp,
           ...(item.empPatch as Partial<Employee>),
         };
         updatedEmpMap.set(item.emp.employeeId.toUpperCase(), mergedEmp);
-        wb.update(doc(db, 'employees', item.emp.employeeId), item.empPatch);
-
-        if (item.emp.status === 'ACTIVE' && item.emp.authUid) {
-          const activeDoc: ActiveAuthUidRecord = {
-            authUid: item.emp.authUid,
-            employeeId: item.emp.employeeId,
-            departmentId: (item.nextDeptId ?? item.emp.departmentId ?? '') as DepartmentId | '',
-            active: true,
-            updatedAt: now,
-          };
-          wb.set(doc(db, 'active_auth_uids', item.emp.authUid), activeDoc);
+        masterProfilesSynced += 1;
+        if (item.nextDeptId) departmentsSynced += 1;
+      }
+    } catch {
+      // Fallback: sync each employee individually so 1 legacy profile never breaks the whole chunk
+      for (const item of chunk) {
+        try {
+          await applySingleEmployeeSync(item);
+        } catch {
+          syncWarnings.push(
+            `Skipped Employee Master auto-sync for ${item.emp.fullName} (${item.emp.employeeId}) — run "Sync Auth" in Employee Master if needed.`,
+          );
         }
       }
-      await wb.commit();
     }
+  }
 
-    // 3. Auto-refresh 5-Department Top-3 Leaderboards if departments were updated
-    let leaderboardsRefreshedMonths = 0;
-    if (departmentsSynced > 0 && params.incentives.length > 0) {
+  // 3. Auto-refresh 5-Department Top-3 Leaderboards if departments were updated (non-blocking)
+  let leaderboardsRefreshedMonths = 0;
+  if (departmentsSynced > 0 && params.incentives.length > 0) {
+    try {
       const refreshedEmployees = params.allEmployees.map(
         (e) => updatedEmpMap.get(e.employeeId.toUpperCase()) || e,
       );
@@ -374,24 +628,32 @@ export async function publishSalarySlipsBatch(params: {
         visibilitySettings: params.visibilitySettings,
       });
       leaderboardsRefreshedMonths = rankRes.monthsProcessed;
+    } catch {
+      syncWarnings.push(
+        'Department Top-3 Leaderboards could not auto-refresh; click Refresh in Department Leaderboards tab.',
+      );
     }
+  }
 
+  // 4. Write Audit Log (isolated error path: `audit_logs`)
+  try {
     await writeSalaryAuditLog({
       action: 'PUBLISH_SALARY_SLIPS',
       targetType: 'salary_slips',
       targetId: Array.from(affectedMonths).sort().join('_') || `SLIPS_${Date.now()}`,
       summary: `Published ${slipOps.length} salary slip(s) for [${Array.from(affectedMonths).join(', ')}]; auto-synced ${departmentsSynced} department(s) & ${masterProfilesSynced} HR profile(s).`,
     });
-
-    return {
-      slipsPublished: slipOps.length,
-      departmentsSynced,
-      masterProfilesSynced,
-      leaderboardsRefreshedMonths,
-    };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, 'salary_slips');
+    handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
   }
+
+  return {
+    slipsPublished: slipOps.length,
+    departmentsSynced,
+    masterProfilesSynced,
+    leaderboardsRefreshedMonths,
+    syncWarnings,
+  };
 }
 
 export async function deleteSalarySlip(slip: SalarySlip): Promise<void> {

@@ -41,6 +41,7 @@ import {
   resolveCanonicalBranchName,
 } from '../lib/incentiveEngine';
 import { getDepartmentById, isMonthVisibleToEmployees } from '../lib/departmentLeaderboardEngine';
+import { buildBirthdayProfileFromEmployee, parseDobToIso } from '../lib/birthdayEngine';
 import { maskBankAccountNumber } from '../lib/salarySlipEngine';
 import {
   fetchPortalVisibilitySettings,
@@ -570,16 +571,19 @@ function buildCleanProvisionedEmployeeDoc(
     loginId: safeLoginId,
     authEmail: loginIdToAuthEmail(safeLoginId),
     authUid: uid,
-    fullName: (emp.fullName || `Salesman ${emp.employeeId}`).trim().slice(0, 120),
+    fullName: (emp.fullName || `Employee ${emp.employeeId}`).trim().slice(0, 120),
     branchId: emp.branchId,
     branchName: (emp.branchName || emp.branchId).trim().slice(0, 120),
     ...(resolvedDept
       ? { departmentId: resolvedDept.id, departmentName: resolvedDept.name }
-      : {}),
+      : emp.departmentName?.trim()
+        ? { departmentId: '' as const, departmentName: emp.departmentName.trim().slice(0, 80) }
+        : {}),
     ...(emp.photoDataUrl?.trim()
       ? { photoDataUrl: emp.photoDataUrl.trim().slice(0, 45000) }
       : {}),
-    designation: (emp.designation || 'Sales Executive').trim().slice(0, 80),
+    designation: (emp.designation || 'Employee').trim().slice(0, 80),
+    ...(emp.dateOfBirth?.trim() ? { dateOfBirth: emp.dateOfBirth.trim().slice(0, 20) } : {}),
     ...(emp.dateOfJoining?.trim() ? { dateOfJoining: emp.dateOfJoining.trim().slice(0, 20) } : {}),
     ...(emp.panNumber?.trim() ? { panNumber: emp.panNumber.trim().toUpperCase().slice(0, 20) } : {}),
     ...(emp.uanNumber?.trim() ? { uanNumber: emp.uanNumber.trim().slice(0, 24) } : {}),
@@ -915,8 +919,10 @@ export async function saveEmployee(input: {
   branchId: string;
   branchName: string;
   departmentId?: DepartmentId | '';
+  departmentName?: string;
   photoDataUrl?: string;
   designation: string;
+  dateOfBirth?: string;
   dateOfJoining?: string;
   panNumber?: string;
   uanNumber?: string;
@@ -962,11 +968,25 @@ export async function saveEmployee(input: {
   const resolvedDeptId =
     input.departmentId !== undefined ? input.departmentId : (input.existing?.departmentId || '');
   const resolvedDept = getDepartmentById(resolvedDeptId);
+  const resolvedCustomDeptName = !resolvedDept
+    ? (
+        input.departmentName !== undefined
+          ? input.departmentName
+          : input.departmentId === ''
+            ? ''
+            : input.existing?.departmentName || ''
+      )
+        .trim()
+        .slice(0, 80)
+    : '';
   const resolvedPhoto =
     input.photoDataUrl !== undefined
       ? input.photoDataUrl.trim().slice(0, 45000)
       : (input.existing?.photoDataUrl || '');
 
+  const rawDob =
+    input.dateOfBirth !== undefined ? input.dateOfBirth : input.existing?.dateOfBirth || '';
+  const resolvedDob = rawDob.trim() ? parseDobToIso(rawDob) || rawDob.trim().slice(0, 20) : '';
   const resolvedDoj = (
     input.dateOfJoining !== undefined ? input.dateOfJoining : input.existing?.dateOfJoining || ''
   )
@@ -1020,9 +1040,12 @@ export async function saveEmployee(input: {
     branchName: input.branchName.trim().slice(0, 120),
     ...(resolvedDept
       ? { departmentId: resolvedDept.id, departmentName: resolvedDept.name }
-      : {}),
+      : resolvedCustomDeptName
+        ? { departmentId: '' as const, departmentName: resolvedCustomDeptName }
+        : {}),
     ...(resolvedPhoto ? { photoDataUrl: resolvedPhoto } : {}),
     designation: input.designation.trim().slice(0, 80),
+    ...(resolvedDob ? { dateOfBirth: resolvedDob } : {}),
     ...(resolvedDoj ? { dateOfJoining: resolvedDoj } : {}),
     ...(resolvedPan ? { panNumber: resolvedPan } : {}),
     ...(resolvedUan ? { uanNumber: resolvedUan } : {}),
@@ -1070,6 +1093,14 @@ export async function saveEmployee(input: {
       } else {
         wb.delete(doc(db, 'active_auth_uids', authUid));
       }
+    }
+
+    // Atomically sync privacy-isolated 12-branch birthday_profiles directory
+    const birthdayProfile = buildBirthdayProfileFromEmployee(record, now);
+    if (birthdayProfile) {
+      wb.set(doc(db, 'birthday_profiles', employeeId), birthdayProfile);
+    } else if (input.existing?.dateOfBirth || input.existing?.status === 'ACTIVE') {
+      wb.delete(doc(db, 'birthday_profiles', employeeId));
     }
 
     await wb.commit();
@@ -1159,6 +1190,19 @@ export async function updateEmployeeStatus(params: {
       } else {
         wb.delete(doc(db, 'active_auth_uids', params.employee.authUid));
       }
+    }
+
+    // Keep privacy-isolated birthday_profiles synced with Active/Inactive status
+    const updatedForBirthday: Employee = {
+      ...params.employee,
+      status: params.targetStatus,
+      updatedAt: now,
+    };
+    const nextBirthdayProfile = buildBirthdayProfileFromEmployee(updatedForBirthday, now);
+    if (nextBirthdayProfile) {
+      wb.set(doc(db, 'birthday_profiles', params.employee.employeeId), nextBirthdayProfile);
+    } else {
+      wb.delete(doc(db, 'birthday_profiles', params.employee.employeeId));
     }
 
     await wb.commit();
@@ -3258,7 +3302,7 @@ export async function markNotificationRead(notificationId: string): Promise<void
   }
 }
 
-// --- STRICTLY READ-ONLY FULL FIRESTORE BACKUP EXPORT (ALL 19 COLLECTIONS) ---
+// --- STRICTLY READ-ONLY FULL FIRESTORE BACKUP EXPORT (ALL 21 COLLECTIONS) ---
 export const BACKUP_COLLECTION_NAMES = [
   'admins',
   'active_auth_uids',
@@ -3279,6 +3323,8 @@ export const BACKUP_COLLECTION_NAMES = [
   'department_leaderboards',
   'employee_department_ranks',
   'salary_slips',
+  'birthday_profiles',
+  'birthday_wishes',
 ] as const;
 
 export type BackupCollectionName = (typeof BACKUP_COLLECTION_NAMES)[number];

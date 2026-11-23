@@ -1,10 +1,12 @@
 import {
+  normalizeNonSalesDepartmentName,
   resolveCanonicalDepartment,
   type OfficialDepartment,
 } from './departmentLeaderboardEngine';
 import type {
   DepartmentId,
   Employee,
+  SalarySlip,
   SalarySlipPaymentMode,
 } from '../types/incentive';
 
@@ -179,6 +181,7 @@ export interface ParsedSalaryRow {
   branchId: string;
   branchName: string;
   resolvedDepartment: OfficialDepartment | null;
+  customDepartmentName: string;
   rawDepartment: string;
   designation: string;
   dateOfJoining: string;
@@ -196,8 +199,17 @@ export interface ParsedSalaryRow {
   paidLeaveDays: number;
   overtimeHours: number;
   basicPaise: number;
+  dearnessAllowancePaise: number;
   hraPaise: number;
+  attendanceAllowancePaise: number;
+  washingAllowancePaise: number;
   conveyancePaise: number;
+  medicalAllowancePaise: number;
+  leaveTravelAllowancePaise: number;
+  communicationExpensesPaise: number;
+  adhocAllowancePaise: number;
+  travelingAllowancePaise: number;
+  salesCommissionPaise: number;
   specialAllowancePaise: number;
   overtimePaise: number;
   incentivePaise: number;
@@ -314,7 +326,21 @@ const SALARY_HEADER_SIGNALS = [
   'basicsalary',
   'basicpay',
   'basic',
+  'dearnessallowance',
   'hra',
+  'attendanceallowance',
+  'washingallowance',
+  'convenienceallowance',
+  'conveyanceallowance',
+  'medicalallowance',
+  'leavetravelallowance',
+  'communicationexpanses',
+  'communicationexpenses',
+  'adhocallowance',
+  'travelingallowance',
+  'travellingallowance',
+  'salescommotion',
+  'salescommission',
   'department',
   'paiddays',
   'totaldays',
@@ -580,9 +606,16 @@ export function parseSalarySheetRows(
       paidLeaveDays > 31 ||
       overtimeHours > 500;
 
-    // Earnings (rupees -> paise)
+    // Earnings (rupees -> paise) — all 14 official House of Muktai payroll heads + legacy Special/Other
     const basicVal = parseNumericField(
       pickCellValue(normMap, ['basicsalary', 'basicpay', 'basic'], ['basicsalary', 'basicpay']),
+    );
+    const dearnessVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['dearnessallowance', 'dearness', 'da'],
+        ['dearnessallowance', 'dearness'],
+      ),
     );
     const hraVal = parseNumericField(
       pickCellValue(
@@ -591,24 +624,87 @@ export function parseSalarySheetRows(
         ['houserentallowance', 'houserent'],
       ),
     );
+    const attendanceVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['attendanceallowance', 'attendancebonus', 'attendancepay'],
+        ['attendanceallowance', 'attendancebonus'],
+      ),
+    );
+    const washingVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['washingallowance', 'washing'],
+        ['washingallowance', 'washing'],
+      ),
+    );
     const conveyanceVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['conveyanceallowance', 'conveyance', 'travelallowance', 'ta'],
-        ['conveyance', 'travelallowance'],
+        ['convenienceallowance', 'conveyanceallowance', 'convenience', 'conveyance'],
+        ['convenienceallowance', 'conveyanceallowance', 'convenience', 'conveyance'],
+      ),
+    );
+    const medicalVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['medicalallowance', 'medical'],
+        ['medicalallowance', 'medical'],
+      ),
+    );
+    const ltaVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['leavetravelallowance', 'leavetravel', 'lta'],
+        ['leavetravelallowance', 'leavetravel'],
+      ),
+    );
+    const communicationVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        [
+          'communicationexpanses',
+          'communicationexpenses',
+          'communicationallowance',
+          'communicationexpense',
+          'communication',
+        ],
+        ['communicationexpan', 'communicationexpen', 'communicationallow', 'communication'],
+      ),
+    );
+    const adhocVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['adhocallowance', 'adhocpay', 'adhoc'],
+        ['adhocallowance', 'adhoc'],
+      ),
+    );
+    const travelingVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['travelingallowance', 'travellingallowance', 'travelallowance', 'traveling', 'travelling', 'ta'],
+        ['travelingallowance', 'travellingallowance', 'travelallowance'],
+        ['leave'],
+      ),
+    );
+    const salesCommVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['salescommotion', 'salescommission', 'salescomm', 'commission'],
+        ['salescommotion', 'salescommission', 'commission'],
       ),
     );
     const specialVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['specialallowance', 'special', 'da', 'dearnessallowance'],
-        ['specialallowance', 'dearnessallowance'],
+        ['specialallowance', 'special'],
+        ['specialallowance'],
       ),
     );
     const overtimeVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['overtimeamount', 'otamount', 'overtimepay', 'overtime'],
+        ['overtime', 'overtimeamount', 'otamount', 'overtimepay'],
         ['overtimeamount', 'otamount', 'overtimepay'],
         ['hours', 'hrs'],
       ),
@@ -616,16 +712,31 @@ export function parseSalarySheetRows(
     const incentiveVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['incentivebonus', 'incentive', 'bonus', 'commission'],
-        ['incentive', 'bonus', 'commission'],
+        ['incentive', 'incentivebonus', 'bonus'],
+        ['incentive', 'bonus'],
+        ['attendance'],
       ),
     );
     const otherEarnVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['otherearnings', 'otherallowance', 'allowances', 'miscallowance'],
         ['otherearnings', 'otherallowance', 'miscallowance'],
-        ['conveyance', 'special', 'houserent', 'dearness'],
+        ['otherearnings', 'otherallowance', 'miscallowance'],
+        [
+          'conveyance',
+          'convenience',
+          'special',
+          'houserent',
+          'dearness',
+          'attendance',
+          'washing',
+          'medical',
+          'travel',
+          'communication',
+          'adhoc',
+          'commission',
+          'commotion',
+        ],
       ),
     );
 
@@ -710,8 +821,17 @@ export function parseSalarySheetRows(
 
     const moneyValues = [
       basicVal,
+      dearnessVal,
       hraVal,
+      attendanceVal,
+      washingVal,
       conveyanceVal,
+      medicalVal,
+      ltaVal,
+      communicationVal,
+      adhocVal,
+      travelingVal,
+      salesCommVal,
       specialVal,
       overtimeVal,
       incentiveVal,
@@ -728,9 +848,29 @@ export function parseSalarySheetRows(
     const hasNegMoney = moneyValues.some((v) => Number.isFinite(v) && v < 0);
 
     const basicPaise = Number.isFinite(basicVal) && basicVal > 0 ? rupeesToPaise(basicVal) : 0;
+    const dearnessAllowancePaise =
+      Number.isFinite(dearnessVal) && dearnessVal > 0 ? rupeesToPaise(dearnessVal) : 0;
     const hraPaise = Number.isFinite(hraVal) && hraVal > 0 ? rupeesToPaise(hraVal) : 0;
+    const attendanceAllowancePaise =
+      Number.isFinite(attendanceVal) && attendanceVal > 0 ? rupeesToPaise(attendanceVal) : 0;
+    const washingAllowancePaise =
+      Number.isFinite(washingVal) && washingVal > 0 ? rupeesToPaise(washingVal) : 0;
     const conveyancePaise =
       Number.isFinite(conveyanceVal) && conveyanceVal > 0 ? rupeesToPaise(conveyanceVal) : 0;
+    const medicalAllowancePaise =
+      Number.isFinite(medicalVal) && medicalVal > 0 ? rupeesToPaise(medicalVal) : 0;
+    const leaveTravelAllowancePaise =
+      Number.isFinite(ltaVal) && ltaVal > 0 ? rupeesToPaise(ltaVal) : 0;
+    const communicationExpensesPaise =
+      Number.isFinite(communicationVal) && communicationVal > 0
+        ? rupeesToPaise(communicationVal)
+        : 0;
+    const adhocAllowancePaise =
+      Number.isFinite(adhocVal) && adhocVal > 0 ? rupeesToPaise(adhocVal) : 0;
+    const travelingAllowancePaise =
+      Number.isFinite(travelingVal) && travelingVal > 0 ? rupeesToPaise(travelingVal) : 0;
+    const salesCommissionPaise =
+      Number.isFinite(salesCommVal) && salesCommVal > 0 ? rupeesToPaise(salesCommVal) : 0;
     const specialAllowancePaise =
       Number.isFinite(specialVal) && specialVal > 0 ? rupeesToPaise(specialVal) : 0;
     const overtimePaise =
@@ -742,8 +882,17 @@ export function parseSalarySheetRows(
 
     const grossEarningsPaise =
       basicPaise +
+      dearnessAllowancePaise +
       hraPaise +
+      attendanceAllowancePaise +
+      washingAllowancePaise +
       conveyancePaise +
+      medicalAllowancePaise +
+      leaveTravelAllowancePaise +
+      communicationExpensesPaise +
+      adhocAllowancePaise +
+      travelingAllowancePaise +
+      salesCommissionPaise +
       specialAllowancePaise +
       overtimePaise +
       incentivePaise +
@@ -771,13 +920,18 @@ export function parseSalarySheetRows(
     let status: ParsedSalaryRow['status'] = 'VALID';
     let errorMessage = '';
 
+    const customDepartmentName =
+      !resolvedDepartment && rawDepartment
+        ? normalizeNonSalesDepartmentName(rawDepartment) || ''
+        : '';
+
     const dedupeKey = `${monthKey}__${(matched?.employeeId || rawEmpId).toUpperCase()}`;
     if (!/^\d{4}-\d{2}$/.test(monthKey)) {
       status = 'ERROR';
       errorMessage = 'Invalid Pay Month. Select a valid YYYY-MM month.';
     } else if (!matched) {
       status = 'ERROR';
-      errorMessage = `Salesman No / Employee ID "${rawEmpId || 'blank'}" not found in Employee Master.`;
+      errorMessage = `Employee ID "${rawEmpId || 'blank'}" not found in Employee Master.`;
     } else if (seenEmployeeKeys.has(dedupeKey)) {
       status = 'DUPLICATE_IN_FILE';
       errorMessage = `Duplicate row in file for ${matched.employeeId} (${monthKey}).`;
@@ -796,9 +950,9 @@ export function parseSalarySheetRows(
     } else if (netPayablePaise < 0) {
       status = 'ERROR';
       errorMessage = `Total Deductions (₹${(totalDeductionsPaise / 100).toFixed(2)}) exceed Gross Earnings (₹${(grossEarningsPaise / 100).toFixed(2)}). Net Payable cannot be negative.`;
-    } else if (rawDepartment && !resolvedDepartment) {
+    } else if (rawDepartment && !resolvedDepartment && !customDepartmentName) {
       status = 'ERROR';
-      errorMessage = `Unrecognized department "${rawDepartment}". Use Saree, Ladies Wear, Kids Wear, Mens Wear, or Non Apparels.`;
+      errorMessage = `Invalid department "${rawDepartment}". Enter a valid Sales Dept (Saree, Ladies Wear, Kids Wear, Mens Wear, Non Apparels) or Non-Sales Dept (Accounts, HR, Billing, Head Office, etc.).`;
     }
 
     if (matched && status === 'VALID') {
@@ -806,7 +960,13 @@ export function parseSalarySheetRows(
     }
 
     const willSyncDepartment = Boolean(
-      matched && resolvedDepartment && matched.departmentId !== resolvedDepartment.id,
+      matched &&
+        ((resolvedDepartment && matched.departmentId !== resolvedDepartment.id) ||
+          (!resolvedDepartment &&
+            customDepartmentName &&
+            (Boolean(matched.departmentId) ||
+              (matched.departmentName || '').trim().toLowerCase() !==
+                customDepartmentName.toLowerCase()))),
     );
     const willSyncMasterFields = Boolean(
       matched &&
@@ -833,8 +993,9 @@ export function parseSalarySheetRows(
       branchId: matched?.branchId || '',
       branchName: matched?.branchName || '—',
       resolvedDepartment,
+      customDepartmentName,
       rawDepartment,
-      designation: designation || matched?.designation || 'Sales Executive',
+      designation: designation || matched?.designation || 'Employee',
       dateOfJoining: dateOfJoining || matched?.dateOfJoining || '',
       panNumber: panNumber || matched?.panNumber || '',
       uanNumber: uanNumber || matched?.uanNumber || '',
@@ -850,8 +1011,17 @@ export function parseSalarySheetRows(
       paidLeaveDays,
       overtimeHours,
       basicPaise,
+      dearnessAllowancePaise,
       hraPaise,
+      attendanceAllowancePaise,
+      washingAllowancePaise,
       conveyancePaise,
+      medicalAllowancePaise,
+      leaveTravelAllowancePaise,
+      communicationExpensesPaise,
+      adhocAllowancePaise,
+      travelingAllowancePaise,
+      salesCommissionPaise,
       specialAllowancePaise,
       overtimePaise,
       incentivePaise,
@@ -959,12 +1129,12 @@ export function parseSalaryCsvText(
 
 /**
  * Generates a ready-to-fill CSV template pre-populated with all ACTIVE employees
- * across all 12 branches so HR/Accounts only needs to enter Salary figures & Departments.
+ * across all 12 branches with all 14 official House of Muktai Salary earning columns.
  */
 export function buildSalarySlipCsvTemplate(employees: Employee[], monthKey: string): string {
   const days = getDaysInMonth(monthKey);
   const headers = [
-    'Salesman No',
+    'Employee ID',
     'Employee Name',
     'Branch Name',
     'Department',
@@ -978,12 +1148,19 @@ export function buildSalarySlipCsvTemplate(employees: Employee[], monthKey: stri
     'Paid Leave',
     'OT Hours',
     'Basic Salary',
+    'Dearness Allowance',
     'HRA',
-    'Conveyance',
-    'Special Allowance',
-    'OT Amount',
+    'Attendance Allowance',
+    'Washing Allowance',
+    'Convenience Allowance',
+    'Medical Allowance',
+    'Leave Travel Allowance',
+    'Communication Expanses',
+    'Adhoc Allowance',
+    'Traveling Allowance',
+    'Sales Commotion',
     'Incentive',
-    'Other Earnings',
+    'Overtime',
     'PF',
     'ESIC',
     'PT',
@@ -1016,7 +1193,7 @@ export function buildSalarySlipCsvTemplate(employees: Employee[], monthKey: stri
       esc(emp.fullName),
       esc(emp.branchName),
       esc(emp.departmentName || ''),
-      esc(emp.designation || 'Sales Executive'),
+      esc(emp.designation || 'Employee'),
       esc(emp.dateOfJoining || ''),
       esc(monthKey),
       esc(days),
@@ -1025,19 +1202,26 @@ export function buildSalarySlipCsvTemplate(employees: Employee[], monthKey: stri
       esc(4),
       esc(0),
       esc(0),
-      esc(0),
-      esc(0),
-      esc(0),
-      esc(0),
-      esc(0),
-      esc(0),
-      esc(0),
-      esc(0),
-      esc(0),
-      esc(0),
-      esc(0),
-      esc(0),
-      esc(0),
+      esc(0), // Basic Salary
+      esc(0), // Dearness Allowance
+      esc(0), // HRA
+      esc(0), // Attendance Allowance
+      esc(0), // Washing Allowance
+      esc(0), // Convenience Allowance
+      esc(0), // Medical Allowance
+      esc(0), // Leave Travel Allowance
+      esc(0), // Communication Expanses
+      esc(0), // Adhoc Allowance
+      esc(0), // Traveling Allowance
+      esc(0), // Sales Commotion
+      esc(0), // Incentive
+      esc(0), // Overtime
+      esc(0), // PF
+      esc(0), // ESIC
+      esc(0), // PT
+      esc(0), // Advance Recovery
+      esc(0), // TDS
+      esc(0), // Other Deduction
       esc('NEFT'),
       esc(''),
       esc(''),
@@ -1053,6 +1237,65 @@ export function buildSalarySlipCsvTemplate(employees: Employee[], monthKey: stri
   );
 
   return [headers.map(esc).join(','), ...lines].join('\n');
+}
+
+/**
+ * Returns the ordered non-zero earning rows for Official Salary Slip PDFs & Staff App views.
+ */
+export function getSalarySlipEarningBreakdown(
+  slip: SalarySlip,
+  lang: 'en' | 'mr' = 'en',
+): Array<[string, number]> {
+  const isMr = lang === 'mr';
+  const rows: Array<[string, number]> = [
+    [isMr ? 'मूळ पगार (Basic Salary)' : 'Basic Salary', slip.basicPaise],
+    [
+      isMr ? 'महागाई भत्ता (Dearness Allowance)' : 'Dearness Allowance',
+      slip.dearnessAllowancePaise || 0,
+    ],
+    [isMr ? 'घरभाडे भत्ता (HRA)' : 'House Rent Allowance (HRA)', slip.hraPaise],
+    [
+      isMr ? 'हजेरी भत्ता (Attendance Allowance)' : 'Attendance Allowance',
+      slip.attendanceAllowancePaise || 0,
+    ],
+    [
+      isMr ? 'धुलाई भत्ता (Washing Allowance)' : 'Washing Allowance',
+      slip.washingAllowancePaise || 0,
+    ],
+    [
+      isMr ? 'वाहन भत्ता (Convenience Allowance)' : 'Convenience Allowance',
+      slip.conveyancePaise,
+    ],
+    [
+      isMr ? 'वैद्यकीय भत्ता (Medical Allowance)' : 'Medical Allowance',
+      slip.medicalAllowancePaise || 0,
+    ],
+    [
+      isMr ? 'प्रवास रजा भत्ता (Leave Travel Allowance)' : 'Leave Travel Allowance',
+      slip.leaveTravelAllowancePaise || 0,
+    ],
+    [
+      isMr ? 'संपर्क खर्च (Communication Expenses)' : 'Communication Expenses',
+      slip.communicationExpensesPaise || 0,
+    ],
+    [
+      isMr ? 'तात्पुरता भत्ता (Adhoc Allowance)' : 'Adhoc Allowance',
+      slip.adhocAllowancePaise || 0,
+    ],
+    [
+      isMr ? 'प्रवास भत्ता (Traveling Allowance)' : 'Traveling Allowance',
+      slip.travelingAllowancePaise || 0,
+    ],
+    [
+      isMr ? 'विक्री कमिशन (Sales Commission)' : 'Sales Commission',
+      slip.salesCommissionPaise || 0,
+    ],
+    [isMr ? 'विशेष भत्ता (Special Allowance)' : 'Special Allowance', slip.specialAllowancePaise],
+    [isMr ? 'इन्सेंटिव्ह (Incentive)' : 'Incentive', slip.incentivePaise],
+    [isMr ? 'ओव्हरटाईम (Overtime)' : 'Overtime', slip.overtimePaise],
+    [isMr ? 'इतर उत्पन्न (Other Earnings)' : 'Other Earnings', slip.otherEarningsPaise],
+  ];
+  return rows.filter(([, amt], idx) => idx === 0 || amt > 0);
 }
 
 export function getEffectiveDepartmentId(

@@ -7,7 +7,10 @@ import {
 } from 'lucide-react';
 import { formatINRFromPaise, formatMonthLabel } from '../../lib/format';
 import { downloadEmployeeSalarySlipPdf } from '../../lib/pdfGenerator';
-import { paiseToIndianWords } from '../../lib/salarySlipEngine';
+import {
+  getSalarySlipEarningBreakdown,
+  paiseToIndianWords,
+} from '../../lib/salarySlipEngine';
 import type { SalarySlip } from '../../types/incentive';
 
 interface HomeCardProps {
@@ -148,16 +151,7 @@ export function SalarySlipFullList({ slips, isMr }: FullListProps) {
     <div className="space-y-3.5">
       {slips.map((slip) => {
         const isOpen = expandedId === slip.slipId;
-        const allEarnings: Array<[string, number]> = [
-          [isMr ? 'मूळ पगार (Basic)' : 'Basic Salary', slip.basicPaise],
-          ['HRA', slip.hraPaise],
-          [isMr ? 'प्रवास भत्ता (Conveyance)' : 'Conveyance Allowance', slip.conveyancePaise],
-          [isMr ? 'विशेष भत्ता (Special)' : 'Special Allowance', slip.specialAllowancePaise],
-          [isMr ? 'ओव्हरटाईम (Overtime)' : 'Overtime Pay', slip.overtimePaise],
-          [isMr ? 'इन्सेंटिव्ह / बोनस' : 'Incentive / Bonus', slip.incentivePaise],
-          [isMr ? 'इतर उत्पन्न' : 'Other Earnings', slip.otherEarningsPaise],
-        ];
-        const earnings = allEarnings.filter(([, amt], idx) => idx === 0 || amt > 0);
+        const earnings = getSalarySlipEarningBreakdown(slip, isMr ? 'mr' : 'en');
 
         const allDeductions: Array<[string, number]> = [
           ['PF', slip.pfPaise],

@@ -3,6 +3,7 @@ import {
   Award,
   BarChart3,
   Bell,
+  Cake,
   Calendar,
   Check,
   Eye,
@@ -67,8 +68,20 @@ import {
   subscribePortalVisibilitySettings,
 } from '../../services/departmentVisibilityService';
 import { subscribeOwnSalarySlips } from '../../services/salarySlipService';
+import {
+  subscribeActiveBirthdayProfiles,
+  subscribeReceivedBirthdayWishes,
+  subscribeSentBirthdayWishes,
+} from '../../services/birthdayService';
+import {
+  extractMonthDayFromDob,
+  getTodayIstParts,
+  isBirthdayToday,
+} from '../../lib/birthdayEngine';
 import { isMonthVisibleToEmployees } from '../../lib/departmentLeaderboardEngine';
 import type {
+  BirthdayProfile,
+  BirthdayWish,
   DepartmentLeaderboard,
   EmployeeDepartmentRank,
   EmployeeNotification,
@@ -83,12 +96,14 @@ import type {
   SalesTarget,
 } from '../../types/incentive';
 import { BrandLogo, CompanyFooter } from '../common/BrandLogo';
+import { BirthdayWishingCardModal } from '../common/BirthdayWishingCardModal';
 import { AnimatedCounter, PageTransition, WorkspaceSkeleton } from '../common/MotionPrimitives';
 import { OfflineIndicator } from '../common/OfflineIndicator';
 import { PWAInstallButton } from '../common/PWAInstallButton';
 import { DepartmentLeaderboardCard } from './DepartmentLeaderboardCard';
 import { EmployeeSettingsTab } from './EmployeeSettingsTab';
 import { SalarySlipFullList, SalarySlipHomeCard } from './SalarySlipSection';
+import { StaffBirthdaysSection } from './StaffBirthdaysSection';
 
 const EmployeeReportsTab = lazy(() =>
   import('./EmployeeReportsTab').then((m) => ({ default: m.EmployeeReportsTab })),
@@ -224,6 +239,10 @@ export function EmployeePortal() {
   const [visibilityLoaded, setVisibilityLoaded] = useState(false);
   const [deptLeaderboard, setDeptLeaderboard] = useState<DepartmentLeaderboard | null>(null);
   const [deptRank, setDeptRank] = useState<EmployeeDepartmentRank | null>(null);
+  const [birthdayProfiles, setBirthdayProfiles] = useState<BirthdayProfile[]>([]);
+  const [receivedBirthdayWishes, setReceivedBirthdayWishes] = useState<BirthdayWish[]>([]);
+  const [sentBirthdayWishes, setSentBirthdayWishes] = useState<BirthdayWish[]>([]);
+  const [birthdayCardOpen, setBirthdayCardOpen] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState('');
   const [selectedTargetMonth, setSelectedTargetMonth] = useState('');
   const [loading, setLoading] = useState(true);
@@ -405,6 +424,75 @@ export function EmployeePortal() {
     visibilityLoaded,
     visibilitySettings.mode,
     visibilitySettings.visibleMonths.join(','),
+  ]);
+
+  // 2b. Independent Real-Time 12-Branch Birthdays & Wishes Subscriptions
+  // Runs even if Admin temporarily hides incentive months so birthday celebrations never break.
+  const todayIst = useMemo(() => getTodayIstParts(), []);
+  const isOwnBirthdayToday = useMemo(
+    () => isBirthdayToday(employeeProfile?.dateOfBirth),
+    [employeeProfile?.dateOfBirth],
+  );
+
+  useEffect(() => {
+    if (
+      !employeeLoginGate.allowed ||
+      requiresFirstLoginPasswordChange ||
+      !user?.uid ||
+      !employeeProfile?.employeeId
+    ) {
+      setBirthdayProfiles([]);
+      setReceivedBirthdayWishes([]);
+      setSentBirthdayWishes([]);
+      return;
+    }
+
+    const unsubs = [
+      subscribeActiveBirthdayProfiles((profiles) => setBirthdayProfiles(profiles)),
+      subscribeReceivedBirthdayWishes(employeeProfile.employeeId, todayIst.year, (list) =>
+        setReceivedBirthdayWishes(list),
+      ),
+      subscribeSentBirthdayWishes(user.uid, todayIst.year, (list) =>
+        setSentBirthdayWishes(list),
+      ),
+    ];
+
+    return () => {
+      for (const unsub of unsubs) unsub();
+    };
+  }, [
+    employeeLoginGate.allowed,
+    requiresFirstLoginPasswordChange,
+    user?.uid,
+    employeeProfile?.employeeId,
+    todayIst.year,
+  ]);
+
+  // Auto-present the Official House of Muktai Birthday Wishing Card once on the employee's birthday
+  useEffect(() => {
+    if (
+      !employeeLoginGate.allowed ||
+      requiresFirstLoginPasswordChange ||
+      !employeeProfile?.employeeId ||
+      !isOwnBirthdayToday
+    ) {
+      return;
+    }
+    const seenKey = `hom_bday_card_seen_${employeeProfile.employeeId}_${todayIst.isoDate}`;
+    try {
+      if (window.localStorage.getItem(seenKey) !== '1') {
+        setBirthdayCardOpen(true);
+        window.localStorage.setItem(seenKey, '1');
+      }
+    } catch {
+      setBirthdayCardOpen(true);
+    }
+  }, [
+    employeeLoginGate.allowed,
+    requiresFirstLoginPasswordChange,
+    employeeProfile?.employeeId,
+    isOwnBirthdayToday,
+    todayIst.isoDate,
   ]);
 
   // Defensive client-side visibility filter synchronized 1:1 with Firestore Rules
@@ -901,7 +989,7 @@ export function EmployeePortal() {
             <p className="text-sm text-slate-600 leading-relaxed">{employeeLoginGate.message}</p>
             {isDeactivated && employeeProfile && (
               <p className="text-xs font-mono text-slate-500">
-                Salesman No: {employeeProfile.employeeId} · Status: INACTIVE
+                Employee ID: {employeeProfile.employeeId} · Status: INACTIVE
               </p>
             )}
             <button
@@ -1333,6 +1421,16 @@ export function EmployeePortal() {
           </div>
 
           <div className="shrink-0 flex items-center gap-2">
+            {isOwnBirthdayToday && (
+              <button
+                type="button"
+                onClick={() => setBirthdayCardOpen(true)}
+                className="h-9 px-3 rounded-xl bg-[#0F1F3D] hover:bg-[#162B50] text-[#DFC27D] text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition-colors shadow-xs"
+              >
+                <Cake className="w-3.5 h-3.5 shrink-0" />
+                <span>{isMr ? 'शुभेच्छा कार्ड' : 'My Birthday Card'}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -1819,6 +1917,20 @@ export function EmployeePortal() {
                     personalRank={deptRank}
                     isMr={isMr}
                   />
+
+                  {/* 12-Branch Birthdays, Personal Wishing Card & Colleague Wishes */}
+                  {employeeProfile && (
+                    <div id="staff-birthdays-section" className="lg:col-span-12">
+                      <StaffBirthdaysSection
+                        currentEmployee={employeeProfile}
+                        profiles={birthdayProfiles}
+                        receivedWishes={receivedBirthdayWishes}
+                        sentWishes={sentBirthdayWishes}
+                        isMr={isMr}
+                        onOpenMyCard={() => setBirthdayCardOpen(true)}
+                      />
+                    </div>
+                  )}
 
                   {/* Monthly Salary Slip Quick Card (visible when Accounts publishes salary slip) */}
                   <SalarySlipHomeCard
@@ -2470,6 +2582,37 @@ export function EmployeePortal() {
           })}
         </div>
       </nav>
+      <BirthdayWishingCardModal
+        open={birthdayCardOpen}
+        onClose={() => setBirthdayCardOpen(false)}
+        card={
+          employeeProfile
+            ? {
+                fullName: employeeProfile.fullName,
+                employeeId: employeeProfile.employeeId,
+                branchName: employeeProfile.branchName,
+                departmentName: employeeProfile.departmentName,
+                designation: employeeProfile.designation,
+                photoDataUrl: employeeProfile.photoDataUrl,
+                birthMonthDay:
+                  extractMonthDayFromDob(employeeProfile.dateOfBirth)?.birthMonthDay ||
+                  todayIst.monthDay,
+                celebrationYear: todayIst.year,
+              }
+            : null
+        }
+        isMr={isMr}
+        receivedWishesCount={receivedBirthdayWishes.length}
+        onViewWishes={() => {
+          setBirthdayCardOpen(false);
+          setActiveTab('home');
+          window.setTimeout(() => {
+            document
+              .getElementById('staff-birthdays-section')
+              ?.scrollIntoView({ behavior: 'smooth' });
+          }, 120);
+        }}
+      />
       <OfflineIndicator />
     </div>
   );

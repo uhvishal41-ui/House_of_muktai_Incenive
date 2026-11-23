@@ -110,6 +110,10 @@ service cloud.firestore {
       return val is string && val.size() == 10 && val.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
     }
 
+    function isValidMonthDay(val) {
+      return val is string && val.size() == 5 && val.matches('^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$');
+    }
+
     // Validation Blueprints (Anti-Update-Gap)
     function isValidAdminUser(data) {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'active', 'createdAt'])
@@ -155,7 +159,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'employeeId', 'loginId', 'authEmail', 'linkedGoogleEmail', 'authUid', 'fullName',
           'branchId', 'branchName', 'departmentId', 'departmentName', 'photoDataUrl',
-          'designation', 'dateOfJoining', 'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
+          'designation', 'dateOfBirth', 'dateOfJoining', 'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
           'bankName', 'bankAccountMasked', 'bankIfsc',
           'phone', 'address', 'emergencyContact',
           'role', 'status', 'mustChangePassword', 'credentialsProvisioned', 'createdAt', 'updatedAt'
@@ -172,6 +176,7 @@ service cloud.firestore {
         && isOptionalString(data, 'departmentName', 80)
         && isOptionalString(data, 'photoDataUrl', 45000)
         && isNonEmptyString(data.designation, 80)
+        && isOptionalString(data, 'dateOfBirth', 20)
         && isOptionalString(data, 'dateOfJoining', 20)
         && isOptionalString(data, 'panNumber', 20)
         && isOptionalString(data, 'uanNumber', 24)
@@ -699,63 +704,62 @@ service cloud.firestore {
     }
 
     function isValidSalarySlip(data) {
-      return data.keys().hasAll([
-          'slipId', 'monthKey', 'employeeId', 'authUid', 'employeeName', 'branchId', 'branchName',
-          'totalDays', 'paidDays', 'lopDays', 'weeklyOffDays', 'paidLeaveDays', 'overtimeHours',
-          'basicPaise', 'hraPaise', 'conveyancePaise', 'specialAllowancePaise',
-          'overtimePaise', 'incentivePaise', 'otherEarningsPaise', 'grossEarningsPaise',
-          'pfPaise', 'esicPaise', 'ptPaise', 'advanceRecoveryPaise', 'tdsPaise',
-          'otherDeductionPaise', 'totalDeductionsPaise', 'netPayablePaise',
-          'employeeVisible', 'uploadedByEmail', 'uploadedAt', 'updatedAt'
-        ])
-        && data.keys().hasOnly([
+      let da = data.get('dearnessAllowancePaise', 0);
+      let att = data.get('attendanceAllowancePaise', 0);
+      let wash = data.get('washingAllowancePaise', 0);
+      let med = data.get('medicalAllowancePaise', 0);
+      let lta = data.get('leaveTravelAllowancePaise', 0);
+      let comm = data.get('communicationExpensesPaise', 0);
+      let adhoc = data.get('adhocAllowancePaise', 0);
+      let trav = data.get('travelingAllowancePaise', 0);
+      let scomm = data.get('salesCommissionPaise', 0);
+      return data.keys().hasOnly([
           'slipId', 'monthKey', 'employeeId', 'authUid', 'employeeName', 'branchId', 'branchName',
           'departmentId', 'departmentName', 'designation', 'dateOfJoining',
           'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
           'bankName', 'bankAccountMasked', 'bankIfsc',
           'totalDays', 'paidDays', 'lopDays', 'weeklyOffDays', 'paidLeaveDays', 'overtimeHours',
-          'basicPaise', 'hraPaise', 'conveyancePaise', 'specialAllowancePaise',
+          'basicPaise', 'dearnessAllowancePaise', 'hraPaise', 'attendanceAllowancePaise',
+          'washingAllowancePaise', 'conveyancePaise', 'medicalAllowancePaise',
+          'leaveTravelAllowancePaise', 'communicationExpensesPaise', 'adhocAllowancePaise',
+          'travelingAllowancePaise', 'salesCommissionPaise', 'specialAllowancePaise',
           'overtimePaise', 'incentivePaise', 'otherEarningsPaise', 'grossEarningsPaise',
           'pfPaise', 'esicPaise', 'ptPaise', 'advanceRecoveryPaise', 'tdsPaise',
           'otherDeductionPaise', 'totalDeductionsPaise', 'netPayablePaise',
           'paymentMode', 'paymentReference', 'paymentDate', 'remarks',
           'employeeVisible', 'uploadedByEmail', 'uploadedAt', 'updatedAt'
         ])
-        && isValidId(data.slipId)
-        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && data.monthKey is string && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
         && isValidId(data.employeeId)
         && data.authUid is string && data.authUid.size() <= 128
         && isNonEmptyString(data.employeeName, 120)
         && isValidId(data.branchId)
         && isNonEmptyString(data.branchName, 120)
-        && isOptionalDepartmentId(data, 'departmentId')
-        && isOptionalString(data, 'departmentName', 80)
-        && isOptionalString(data, 'designation', 80)
-        && isOptionalString(data, 'dateOfJoining', 20)
-        && isOptionalString(data, 'panNumber', 20)
-        && isOptionalString(data, 'uanNumber', 24)
-        && isOptionalString(data, 'pfNumber', 32)
-        && isOptionalString(data, 'esicNumber', 32)
-        && isOptionalString(data, 'bankName', 80)
-        && isOptionalString(data, 'bankAccountMasked', 32)
-        && isOptionalString(data, 'bankIfsc', 20)
-        && (data.totalDays is int || data.totalDays is float) && data.totalDays >= 0 && data.totalDays <= 31
-        && (data.paidDays is int || data.paidDays is float) && data.paidDays >= 0 && data.paidDays <= 31
-        && (data.lopDays is int || data.lopDays is float) && data.lopDays >= 0 && data.lopDays <= 31
-        && (data.weeklyOffDays is int || data.weeklyOffDays is float) && data.weeklyOffDays >= 0 && data.weeklyOffDays <= 31
-        && (data.paidLeaveDays is int || data.paidLeaveDays is float) && data.paidLeaveDays >= 0 && data.paidLeaveDays <= 31
-        && (data.overtimeHours is int || data.overtimeHours is float) && data.overtimeHours >= 0
+        && data.get('departmentId', '') in ['', 'SAREE', 'LADIES_WEAR', 'KIDS_WEAR', 'MENS_WEAR', 'NON_APPARELS']
+        && data.totalDays >= 0 && data.totalDays <= 31
+        && data.paidDays >= 0 && data.paidDays <= 31
+        && data.lopDays >= 0 && data.weeklyOffDays >= 0 && data.paidLeaveDays >= 0 && data.overtimeHours >= 0
         && data.basicPaise is int && data.basicPaise >= 0
+        && da is int && da >= 0
         && data.hraPaise is int && data.hraPaise >= 0
+        && att is int && att >= 0
+        && wash is int && wash >= 0
         && data.conveyancePaise is int && data.conveyancePaise >= 0
+        && med is int && med >= 0
+        && lta is int && lta >= 0
+        && comm is int && comm >= 0
+        && adhoc is int && adhoc >= 0
+        && trav is int && trav >= 0
+        && scomm is int && scomm >= 0
         && data.specialAllowancePaise is int && data.specialAllowancePaise >= 0
         && data.overtimePaise is int && data.overtimePaise >= 0
         && data.incentivePaise is int && data.incentivePaise >= 0
         && data.otherEarningsPaise is int && data.otherEarningsPaise >= 0
         && data.grossEarningsPaise is int
         && data.grossEarningsPaise == (
-          data.basicPaise + data.hraPaise + data.conveyancePaise + data.specialAllowancePaise
-          + data.overtimePaise + data.incentivePaise + data.otherEarningsPaise
+          data.basicPaise + da + data.hraPaise + att + wash + data.conveyancePaise
+          + med + lta + comm + adhoc + trav + scomm
+          + data.specialAllowancePaise + data.overtimePaise + data.incentivePaise + data.otherEarningsPaise
         )
         && data.pfPaise is int && data.pfPaise >= 0
         && data.esicPaise is int && data.esicPaise >= 0
@@ -770,14 +774,66 @@ service cloud.firestore {
         )
         && data.netPayablePaise is int
         && data.netPayablePaise == (data.grossEarningsPaise - data.totalDeductionsPaise)
-        && (!('paymentMode' in data) || data.paymentMode == '' || data.paymentMode == 'BANK' || data.paymentMode == 'NEFT' || data.paymentMode == 'CASH' || data.paymentMode == 'UPI' || data.paymentMode == 'CHEQUE')
-        && isOptionalString(data, 'paymentReference', 120)
-        && isOptionalString(data, 'paymentDate', 30)
-        && isOptionalString(data, 'remarks', 240)
+        && data.get('paymentMode', '') in ['', 'BANK', 'NEFT', 'CASH', 'UPI', 'CHEQUE']
         && data.employeeVisible is bool
         && isNonEmptyString(data.uploadedByEmail, 180)
         && isNonEmptyString(data.uploadedAt, 40)
         && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    // Privacy-Isolated 12-Branch Birthday Profile (STRICTLY MM-DD only; ZERO birth year, phone, PAN, bank, or salary fields)
+    function isValidBirthdayProfile(data) {
+      return data.keys().hasAll([
+          'employeeId', 'fullName', 'branchId', 'branchName', 'designation',
+          'birthMonthDay', 'birthMonth', 'birthDay', 'active', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'employeeId', 'fullName', 'branchId', 'branchName',
+          'departmentId', 'departmentName', 'designation', 'photoDataUrl',
+          'birthMonthDay', 'birthMonth', 'birthDay', 'active', 'updatedAt'
+        ])
+        && isValidId(data.employeeId)
+        && isNonEmptyString(data.fullName, 120)
+        && isValidId(data.branchId)
+        && isNonEmptyString(data.branchName, 120)
+        && isOptionalDepartmentId(data, 'departmentId')
+        && isOptionalString(data, 'departmentName', 80)
+        && isNonEmptyString(data.designation, 80)
+        && isOptionalString(data, 'photoDataUrl', 45000)
+        && isValidMonthDay(data.birthMonthDay)
+        && data.birthMonth is int && data.birthMonth >= 1 && data.birthMonth <= 12
+        && data.birthDay is int && data.birthDay >= 1 && data.birthDay <= 31
+        && data.active is bool
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    // Immutable Cross-Branch Birthday Wish (1 wish per sender per recipient per year)
+    function isValidBirthdayWish(data) {
+      return data.keys().hasAll([
+          'wishId', 'celebrationYear', 'birthMonthDay',
+          'recipientEmployeeId', 'recipientName', 'recipientBranchName',
+          'senderEmployeeId', 'senderAuthUid', 'senderName', 'senderBranchName',
+          'senderRole', 'message', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'wishId', 'celebrationYear', 'birthMonthDay',
+          'recipientEmployeeId', 'recipientName', 'recipientBranchName',
+          'senderEmployeeId', 'senderAuthUid', 'senderName', 'senderBranchName',
+          'senderRole', 'message', 'createdAt'
+        ])
+        && isValidId(data.wishId)
+        && data.celebrationYear is int && data.celebrationYear >= 2024 && data.celebrationYear <= 2100
+        && isValidMonthDay(data.birthMonthDay)
+        && isValidId(data.recipientEmployeeId)
+        && isNonEmptyString(data.recipientName, 120)
+        && isNonEmptyString(data.recipientBranchName, 120)
+        && isValidId(data.senderEmployeeId)
+        && isValidId(data.senderAuthUid)
+        && isNonEmptyString(data.senderName, 120)
+        && isNonEmptyString(data.senderBranchName, 120)
+        && (data.senderRole == 'EMPLOYEE' || data.senderRole == 'SUPER_ADMIN')
+        && data.message is string && data.message.size() >= 2 && data.message.size() <= 240
+        && isNonEmptyString(data.createdAt, 40);
     }
 
     // Pillar 7 helper: Enforce active_auth_uids matches employee.status atomically when authUid is set
@@ -876,7 +932,7 @@ service cloud.firestore {
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'loginId', 'authEmail', 'linkedGoogleEmail', 'authUid', 'fullName',
               'branchId', 'branchName', 'departmentId', 'departmentName', 'photoDataUrl',
-              'designation', 'dateOfJoining', 'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
+              'designation', 'dateOfBirth', 'dateOfJoining', 'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
               'bankName', 'bankAccountMasked', 'bankIfsc',
               'phone', 'address', 'emergencyContact',
               'role', 'status', 'mustChangePassword', 'credentialsProvisioned', 'updatedAt'
@@ -1255,6 +1311,59 @@ service cloud.firestore {
         && incoming().employeeId == existing().employeeId
         && incoming().uploadedAt == existing().uploadedAt;
       allow delete: if isValidId(slipId) && isSuperAdmin();
+    }
+
+    // 19. Privacy-Isolated 12-Branch Birthday Directory (Super Admin writes; Active Employees read active celebration profiles with ZERO PII)
+    match /birthday_profiles/{employeeId} {
+      allow get: if isValidId(employeeId) && (
+        isSuperAdmin()
+        || (isActiveEmployee() && existing().active == true)
+      );
+      allow list: if isSuperAdmin()
+        || (isActiveEmployee() && resource.data.active == true);
+      allow create: if isValidId(employeeId) && isSuperAdmin() && isValidBirthdayProfile(incoming())
+        && incoming().employeeId == employeeId;
+      allow update: if isValidId(employeeId) && isSuperAdmin() && isValidBirthdayProfile(incoming())
+        && incoming().employeeId == existing().employeeId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'fullName', 'branchId', 'branchName', 'departmentId', 'departmentName',
+          'designation', 'photoDataUrl', 'birthMonthDay', 'birthMonth', 'birthDay',
+          'active', 'updatedAt'
+        ]);
+      allow delete: if isValidId(employeeId) && isSuperAdmin();
+    }
+
+    // 20. Cross-Branch Birthday Wishes (Immutable; 1 wish per sender per recipient per year; Active Employees read wishes received OR sent by self)
+    match /birthday_wishes/{wishId} {
+      allow get: if isValidId(wishId) && (
+        isSuperAdmin()
+        || (isActiveEmployee() && (existing().recipientEmployeeId == activeEmployeeId() || existing().senderAuthUid == request.auth.uid))
+      );
+      allow list: if isSuperAdmin()
+        || (isActiveEmployee() && (resource.data.recipientEmployeeId == activeEmployeeId() || resource.data.senderAuthUid == request.auth.uid));
+      allow create: if isValidId(wishId)
+        && isSignedIn()
+        && isValidBirthdayWish(incoming())
+        && incoming().wishId == wishId
+        && incoming().senderAuthUid == request.auth.uid
+        && exists(/databases/$(database)/documents/birthday_profiles/$(incoming().recipientEmployeeId))
+        && get(/databases/$(database)/documents/birthday_profiles/$(incoming().recipientEmployeeId)).data.active == true
+        && get(/databases/$(database)/documents/birthday_profiles/$(incoming().recipientEmployeeId)).data.birthMonthDay == incoming().birthMonthDay
+        && (
+          (
+            isSuperAdmin()
+            && incoming().senderRole == 'SUPER_ADMIN'
+          )
+          || (
+            isActiveEmployee()
+            && incoming().senderRole == 'EMPLOYEE'
+            && incoming().senderEmployeeId == activeEmployeeId()
+            && incoming().recipientEmployeeId != activeEmployeeId()
+            && wishId == (string(incoming().celebrationYear) + '__' + incoming().recipientEmployeeId + '__' + activeEmployeeId())
+          )
+        );
+      allow update: if false;
+      allow delete: if isValidId(wishId) && isSuperAdmin();
     }
   }
 }

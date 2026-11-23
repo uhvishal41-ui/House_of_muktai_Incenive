@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
 import {
+  Cake,
   Camera,
   Download,
   Edit3,
   FileSpreadsheet,
   FileText,
+  Gift,
   KeyRound,
   Plus,
   Power,
@@ -16,9 +18,19 @@ import {
   UserCheck,
   X,
 } from 'lucide-react';
+import {
+  buildBulkDobCsvTemplate,
+  extractMonthDayFromDob,
+  formatBirthMonthDayLabel,
+  getTodayIstParts,
+  parseBulkDobCsvText,
+  parseBulkDobRows,
+  type BulkDobParseRow,
+} from '../../lib/birthdayEngine';
 import { DEFAULT_EMPLOYEE_PASSWORD, getShareableStaffAppUrl } from '../../lib/companyBrand';
 import {
   buildDepartmentCsvTemplate,
+  COMMON_NON_SALES_DEPARTMENTS,
   compressEmployeePhotoToDataUrl,
   OFFICIAL_DEPARTMENTS,
   parseBulkDepartmentCsvText,
@@ -26,6 +38,10 @@ import {
   type BulkDepartmentParseRow,
 } from '../../lib/departmentLeaderboardEngine';
 import { downloadCredentialSheetPdf } from '../../lib/pdfGenerator';
+import {
+  bulkUpdateEmployeeDobs,
+  syncAllBirthdayProfilesFromEmployees,
+} from '../../services/birthdayService';
 import {
   bulkUpdateEmployeeDepartments,
   recomputeAndSaveDepartmentRankings,
@@ -38,6 +54,8 @@ import {
   updateEmployeeStatus,
   type ProvisionFailureItem,
 } from '../../services/incentiveService';
+import { BirthdayWishingCardModal } from '../common/BirthdayWishingCardModal';
+import { BulkEmployeeMasterDrawer } from './BulkEmployeeMasterDrawer';
 import type {
   Branch,
   DepartmentId,
@@ -63,7 +81,9 @@ export function EmployeeMaster({
 }: Props) {
   const [search, setSearch] = useState('');
   const [branchFilter, setBranchFilter] = useState('ALL');
-  const [departmentFilter, setDepartmentFilter] = useState<'ALL' | 'UNASSIGNED' | DepartmentId>('ALL');
+  const [departmentFilter, setDepartmentFilter] = useState<
+    'ALL' | 'UNASSIGNED' | 'NON_SALES' | DepartmentId
+  >('ALL');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'INACTIVE'>('ALL');
   const [authFilter, setAuthFilter] = useState<'ALL' | 'PENDING' | 'ACTIVE'>('ALL');
   const [showForm, setShowForm] = useState(false);
@@ -74,9 +94,11 @@ export function EmployeeMaster({
   const [fullName, setFullName] = useState('');
   const [branchId, setBranchId] = useState('');
   const [departmentId, setDepartmentId] = useState<DepartmentId | ''>('');
+  const [customDepartmentName, setCustomDepartmentName] = useState('');
   const [photoDataUrl, setPhotoDataUrl] = useState('');
   const [photoError, setPhotoError] = useState<string | null>(null);
-  const [designation, setDesignation] = useState('Sales Executive');
+  const [designation, setDesignation] = useState('');
+  const [dateOfBirth, setDateOfBirth] = useState('');
   const [dateOfJoining, setDateOfJoining] = useState('');
   const [panNumber, setPanNumber] = useState('');
   const [uanNumber, setUanNumber] = useState('');
@@ -107,23 +129,39 @@ export function EmployeeMaster({
   const [toggleReason, setToggleReason] = useState('');
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'warn' | 'err'; text: string } | null>(null);
 
+  // Bulk Employee Master Upload state (Zero Silent Overlap Guard)
+  const [showBulkMaster, setShowBulkMaster] = useState(false);
+
   // Bulk Department Upload state
   const [showBulkDept, setShowBulkDept] = useState(false);
   const [bulkDeptFileName, setBulkDeptFileName] = useState('');
   const [bulkDeptParse, setBulkDeptParse] = useState<BulkDepartmentParseRow[] | null>(null);
   const [savingBulkDept, setSavingBulkDept] = useState(false);
 
+  // Bulk Birthdays (DOB) Upload & Wishing Card Preview state
+  const [showBulkDob, setShowBulkDob] = useState(false);
+  const [bulkDobFileName, setBulkDobFileName] = useState('');
+  const [bulkDobParse, setBulkDobParse] = useState<BulkDobParseRow[] | null>(null);
+  const [savingBulkDob, setSavingBulkDob] = useState(false);
+  const [syncingBirthdays, setSyncingBirthdays] = useState(false);
+  const [previewCardEmp, setPreviewCardEmp] = useState<Employee | null>(null);
+
   const pendingProvisionCount = employees.filter(
     (e) => !e.credentialsProvisioned || !e.authUid,
   ).length;
   const activeLoginCount = employees.length - pendingProvisionCount;
-  const unassignedDeptCount = employees.filter((e) => !e.departmentId).length;
+  const unassignedDeptCount = employees.filter((e) => !e.departmentId && !e.departmentName).length;
+  const nonSalesDeptCount = employees.filter((e) => !e.departmentId && Boolean(e.departmentName)).length;
 
   const filtered = employees.filter((e) => {
     const matchesBranch = branchFilter === 'ALL' || e.branchId === branchFilter;
     const matchesDept =
       departmentFilter === 'ALL' ||
-      (departmentFilter === 'UNASSIGNED' ? !e.departmentId : e.departmentId === departmentFilter);
+      (departmentFilter === 'UNASSIGNED'
+        ? !e.departmentId && !e.departmentName
+        : departmentFilter === 'NON_SALES'
+          ? !e.departmentId && Boolean(e.departmentName)
+          : e.departmentId === departmentFilter);
     const matchesStatus = statusFilter === 'ALL' || e.status === statusFilter;
     const isPendingAuth = !e.credentialsProvisioned || !e.authUid;
     const matchesAuth =
@@ -149,9 +187,11 @@ export function EmployeeMaster({
     setFullName('');
     setBranchId(branches[0]?.branchId || '');
     setDepartmentId('');
+    setCustomDepartmentName('');
     setPhotoDataUrl('');
     setPhotoError(null);
-    setDesignation('Sales Executive');
+    setDesignation('');
+    setDateOfBirth('');
     setDateOfJoining('');
     setPanNumber('');
     setUanNumber('');
@@ -176,9 +216,11 @@ export function EmployeeMaster({
     setFullName(emp.fullName);
     setBranchId(emp.branchId);
     setDepartmentId(emp.departmentId || '');
+    setCustomDepartmentName(!emp.departmentId ? emp.departmentName || '' : '');
     setPhotoDataUrl(emp.photoDataUrl || '');
     setPhotoError(null);
     setDesignation(emp.designation);
+    setDateOfBirth(emp.dateOfBirth || '');
     setDateOfJoining(emp.dateOfJoining || '');
     setPanNumber(emp.panNumber || '');
     setUanNumber(emp.uanNumber || '');
@@ -325,6 +367,151 @@ export function EmployeeMaster({
       });
     } finally {
       e.target.value = '';
+    }
+  };
+
+  const handleDownloadDobTemplate = () => {
+    const csv = buildBulkDobCsvTemplate(employees);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'House_of_Muktai_Birthdays_DOB_Template.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleBulkDobFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBulkDobFileName(file.name);
+    setBulkDobParse(null);
+    setFeedback(null);
+    try {
+      const lower = file.name.toLowerCase();
+      if (lower.endsWith('.csv') || lower.endsWith('.txt')) {
+        const text = await file.text();
+        setBulkDobParse(parseBulkDobCsvText(text, employees));
+      } else if (lower.endsWith('.xls')) {
+        throw new Error(
+          'Legacy Excel 97–2003 (.xls) files are not supported. Please open the file in Excel and Save As .xlsx or .csv, then upload again.',
+        );
+      } else if (lower.endsWith('.xlsx')) {
+        const ExcelJS = await import('exceljs');
+        const wb = new ExcelJS.Workbook();
+        const buf = await file.arrayBuffer();
+        await wb.xlsx.load(buf);
+        const ws = wb.worksheets[0];
+        if (!ws) throw new Error('The Excel file does not contain any worksheet.');
+
+        let headerRowNumber = 1;
+        let bestScore = -1;
+        const maxScan = Math.min(8, ws.rowCount);
+        for (let r = 1; r <= maxScan; r += 1) {
+          let score = 0;
+          ws.getRow(r).eachCell({ includeEmpty: false }, (cell) => {
+            const h = String(cell.text || cell.value || '')
+              .trim()
+              .toLowerCase()
+              .replace(/[^a-z0-9]/g, '');
+            if (
+              h.includes('salesmanno') ||
+              h.includes('employeeid') ||
+              h.includes('empid') ||
+              h.includes('dateofbirth') ||
+              h === 'dob' ||
+              h.includes('birthday')
+            ) {
+              score += 2;
+            }
+          });
+          if (score > bestScore) {
+            bestScore = score;
+            headerRowNumber = r;
+          }
+        }
+
+        const headerRow = ws.getRow(headerRowNumber);
+        const headers: string[] = [];
+        let maxCol = 1;
+        headerRow.eachCell({ includeEmpty: true }, (cell, colNum) => {
+          maxCol = Math.max(maxCol, colNum);
+          headers[colNum] = String(cell.text || cell.value || '').trim();
+        });
+
+        const objects: Array<Record<string, unknown>> = [];
+        ws.eachRow((row, rowNumber) => {
+          if (rowNumber <= headerRowNumber) return;
+          const obj: Record<string, unknown> = {};
+          let hasAny = false;
+          for (let c = 1; c <= maxCol; c += 1) {
+            const h = headers[c];
+            if (!h) continue;
+            const cell = row.getCell(c);
+            const rawVal = cell.value instanceof Date ? cell.value : cell.text || cell.value || '';
+            if (rawVal !== '' && rawVal !== null && rawVal !== undefined) hasAny = true;
+            obj[h] = rawVal;
+          }
+          if (hasAny) objects.push(obj);
+        });
+        setBulkDobParse(parseBulkDobRows(objects, employees));
+      } else {
+        throw new Error('Please upload a .csv or .xlsx file.');
+      }
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Unable to parse DOB file.',
+      });
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const handleApplyBulkDobs = async () => {
+    if (!bulkDobParse) return;
+    const validRows = bulkDobParse.filter((r) => r.status === 'VALID' && r.normalizedDob);
+    if (validRows.length === 0) return;
+    setSavingBulkDob(true);
+    setFeedback(null);
+    try {
+      const res = await bulkUpdateEmployeeDobs(validRows, employees);
+      setShowBulkDob(false);
+      setBulkDobParse(null);
+      setBulkDobFileName('');
+      setFeedback({
+        type: 'ok',
+        text: `Updated Date of Birth for ${res.updatedCount} employee(s) and synced ${res.syncedProfiles} active 12-branch birthday profile(s).`,
+      });
+      await onRefresh();
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Unable to apply bulk Date of Birth update.',
+      });
+    } finally {
+      setSavingBulkDob(false);
+    }
+  };
+
+  const handleSyncBirthdayDirectory = async () => {
+    setSyncingBirthdays(true);
+    setFeedback(null);
+    try {
+      const res = await syncAllBirthdayProfilesFromEmployees(employees);
+      setFeedback({
+        type: 'ok',
+        text: `12-Branch Birthday Directory synced: ${res.synced} active birthday profile(s) published, ${res.removed} inactive/cleared profile(s) removed.`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Unable to sync 12-branch birthday directory.',
+      });
+    } finally {
+      setSyncingBirthdays(false);
     }
   };
 
@@ -518,8 +705,10 @@ export function EmployeeMaster({
         branchId: branch.branchId,
         branchName: branch.branchName,
         departmentId,
+        departmentName: departmentId ? undefined : customDepartmentName.trim(),
         photoDataUrl,
         designation,
+        dateOfBirth,
         dateOfJoining,
         panNumber,
         uanNumber,
@@ -659,7 +848,25 @@ export function EmployeeMaster({
             <button
               type="button"
               onClick={() => {
+                setShowBulkMaster((prev) => !prev);
+                setShowBulkDept(false);
+                setShowBulkDob(false);
+              }}
+              className={`h-8 px-2.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
+                showBulkMaster
+                  ? 'border-[#0F1F3D] bg-[#0F1F3D] text-white'
+                  : 'border-[#B8923A]/50 bg-[#B8923A]/10 hover:bg-[#B8923A]/20 text-[#0F1F3D]'
+              }`}
+            >
+              <Upload className={`w-3.5 h-3.5 ${showBulkMaster ? 'text-[#DFC27D]' : 'text-[#B8923A]'}`} />
+              Bulk Master Upload
+            </button>
+            <button
+              type="button"
+              onClick={() => {
                 setShowBulkDept((prev) => !prev);
+                setShowBulkMaster(false);
+                setShowBulkDob(false);
                 setBulkDeptParse(null);
                 setBulkDeptFileName('');
               }}
@@ -671,6 +878,24 @@ export function EmployeeMaster({
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-[#B8923A]" />
               Bulk Dept. Upload
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowBulkDob((prev) => !prev);
+                setShowBulkMaster(false);
+                setShowBulkDept(false);
+                setBulkDobParse(null);
+                setBulkDobFileName('');
+              }}
+              className={`h-8 px-2.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
+                showBulkDob
+                  ? 'border-[#B8923A] bg-[#B8923A]/15 text-[#0F1F3D]'
+                  : 'border-slate-200 bg-white hover:bg-slate-50 text-[#0F1F3D]'
+              }`}
+            >
+              <Cake className="w-3.5 h-3.5 text-[#B8923A]" />
+              Bulk Birthdays (DOB)
             </button>
             <button
               type="button"
@@ -711,12 +936,15 @@ export function EmployeeMaster({
           <select
             value={departmentFilter}
             onChange={(e) =>
-              setDepartmentFilter(e.target.value as 'ALL' | 'UNASSIGNED' | DepartmentId)
+              setDepartmentFilter(
+                e.target.value as 'ALL' | 'UNASSIGNED' | 'NON_SALES' | DepartmentId,
+              )
             }
             aria-label="Filter by department"
             className="h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm text-slate-700"
           >
-            <option value="ALL">All Departments (5)</option>
+            <option value="ALL">All Departments</option>
+            <option value="NON_SALES">Other / Non-Sales ({nonSalesDeptCount})</option>
             <option value="UNASSIGNED">Unassigned ({unassignedDeptCount})</option>
             {OFFICIAL_DEPARTMENTS.map((dept) => (
               <option key={dept.id} value={dept.id}>
@@ -746,6 +974,22 @@ export function EmployeeMaster({
           </select>
         </div>
       </div>
+
+      {/* Bulk Employee Master Upload Drawer (Zero Silent Overlap Guard) */}
+      {showBulkMaster && (
+        <BulkEmployeeMasterDrawer
+          branches={branches}
+          employees={employees}
+          incentives={incentives}
+          visibilitySettings={visibilitySettings}
+          onClose={() => setShowBulkMaster(false)}
+          onSuccess={async (message) => {
+            setShowBulkMaster(false);
+            setFeedback({ type: 'ok', text: message });
+            await onRefresh();
+          }}
+        />
+      )}
 
       {/* Bulk Department Assignment Drawer (Excel / CSV) */}
       {showBulkDept && (
@@ -894,6 +1138,174 @@ export function EmployeeMaster({
         </div>
       )}
 
+      {/* Bulk Birthdays (DOB) & 12-Branch Birthday Directory Sync Drawer */}
+      {showBulkDob && (
+        <div className="bg-white border border-[#0F1F3D]/25 rounded-xl overflow-hidden shadow-xs">
+          <div className="px-4 sm:px-5 py-3.5 bg-[#0F1F3D] text-white flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold">
+                Bulk Employee Birthdays (DOB) &amp; 12-Branch Wishing Cards
+              </h3>
+              <p className="text-[11px] text-slate-300 mt-0.5">
+                Privacy-isolated directory: employees see only Day &amp; Month (MM-DD) — Birth Year,
+                Phone, PAN &amp; Salary are never shared.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowBulkDob(false)}
+              className="p-1.5 text-slate-300 hover:text-white cursor-pointer"
+              aria-label="Close bulk birthdays upload"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="p-4 sm:p-5 space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex flex-col justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-[#0F1F3D]">
+                    Step 1 · Download Pre-Filled DOB Sheet
+                  </p>
+                  <p className="text-[11px] text-slate-600 mt-1">
+                    Opens in Excel with active employees pre-listed. Fill{' '}
+                    <code className="font-mono text-[#0F1F3D]">YYYY-MM-DD</code> or{' '}
+                    <code className="font-mono text-[#0F1F3D]">DD-MM-YYYY</code>.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleDownloadDobTemplate}
+                  className="h-9 px-3.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-[#0F1F3D] inline-flex items-center justify-center gap-1.5 self-start cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5 text-[#B8923A]" />
+                  Download DOB Template
+                </button>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex flex-col justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-[#0F1F3D]">
+                    Step 2 · Upload Filled Excel (.xlsx) or CSV
+                  </p>
+                  <p className="text-[11px] text-slate-600 mt-1">
+                    Automatically validates Employee IDs &amp; dates, updates Employee Master, and
+                    publishes safe 12-branch profiles.
+                  </p>
+                </div>
+                <label className="h-9 px-3.5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 self-start cursor-pointer">
+                  <Upload className="w-3.5 h-3.5 text-[#DFC27D]" />
+                  <span>
+                    {bulkDobFileName ? `Replace: ${bulkDobFileName}` : 'Choose Excel / CSV File'}
+                  </span>
+                  <input
+                    type="file"
+                    accept=".csv,.xlsx"
+                    onChange={handleBulkDobFileSelect}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex flex-col justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-[#0F1F3D]">
+                    Directory Sync ({employees.filter((e) => e.status === 'ACTIVE' && e.dateOfBirth).length}{' '}
+                    Active with DOB)
+                  </p>
+                  <p className="text-[11px] text-slate-600 mt-1">
+                    Re-syncs all active employee photos, branches &amp; DOBs to the live 12-branch
+                    staff birthday feed.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={syncingBirthdays}
+                  onClick={handleSyncBirthdayDirectory}
+                  className="h-9 px-3.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-[#0F1F3D] inline-flex items-center justify-center gap-1.5 self-start cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 text-[#B8923A] ${syncingBirthdays ? 'animate-spin' : ''}`} />
+                  {syncingBirthdays ? 'Syncing Directory...' : 'Sync 12-Branch Directory'}
+                </button>
+              </div>
+            </div>
+
+            {bulkDobParse && (() => {
+              const validRows = bulkDobParse.filter((r) => r.status === 'VALID');
+              const errorRows = bulkDobParse.filter((r) => r.status === 'ERROR');
+              return (
+                <div className="space-y-3 pt-2 border-t border-slate-100">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-3 text-xs">
+                      <span className="font-semibold text-emerald-700">
+                        Valid DOBs: {validRows.length}
+                      </span>
+                      <span className="text-slate-300">|</span>
+                      <span
+                        className={`font-semibold ${
+                          errorRows.length > 0 ? 'text-amber-700' : 'text-slate-500'
+                        }`}
+                      >
+                        Skipped / Issues: {errorRows.length}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={savingBulkDob || validRows.length === 0}
+                      onClick={handleApplyBulkDobs}
+                      className="h-9 px-4 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      <Cake className="w-3.5 h-3.5" />
+                      {savingBulkDob
+                        ? 'Saving & Syncing Birthdays...'
+                        : `Save ${validRows.length} Birthday(s) & Sync 12 Branches`}
+                    </button>
+                  </div>
+
+                  {errorRows.length > 0 && (
+                    <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1 max-h-36 overflow-y-auto">
+                      <p className="font-semibold">Rows skipped due to validation issues:</p>
+                      {errorRows.slice(0, 15).map((err) => (
+                        <div key={`${err.rowNumber}-${err.employeeId}`} className="font-mono text-[11px]">
+                          Row {err.rowNumber}: [{err.employeeId} / {err.rawDob || 'blank'}] — {err.errorMessage}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {validRows.length > 0 && (
+                    <div className="max-h-56 overflow-y-auto border border-slate-200 rounded-lg">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
+                          <tr>
+                            <th className="py-2 px-3">Emp ID</th>
+                            <th className="py-2 px-3">Employee Name</th>
+                            <th className="py-2 px-3">Branch</th>
+                            <th className="py-2 px-3">Date of Birth</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {validRows.slice(0, 50).map((row) => (
+                            <tr key={`${row.rowNumber}-${row.employeeId}`} className="hover:bg-slate-50">
+                              <td className="py-1.5 px-3 font-mono text-slate-900">{row.employeeId}</td>
+                              <td className="py-1.5 px-3 font-medium text-slate-800">{row.employeeName}</td>
+                              <td className="py-1.5 px-3 text-slate-600">{row.branchName}</td>
+                              <td className="py-1.5 px-3 font-mono font-semibold text-[#0F1F3D]">
+                                {row.normalizedDob}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
       {bulkProvisioning && bulkProgress && (
         <div className="p-4 rounded-xl bg-slate-900 text-white text-xs space-y-2">
           <div className="flex items-center justify-between gap-2">
@@ -960,7 +1372,7 @@ export function EmployeeMaster({
             <table className="w-full text-left border-collapse text-xs">
               <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
                 <tr>
-                  <th className="py-2 px-3">Salesman No</th>
+                  <th className="py-2 px-3">Employee ID</th>
                   <th className="py-2 px-3">Login ID</th>
                   <th className="py-2 px-3">Employee Name</th>
                   <th className="py-2 px-3">Branch</th>
@@ -1061,7 +1473,7 @@ export function EmployeeMaster({
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">
-                Employee ID (Salesman No)
+                Employee ID <span className="text-slate-400 font-normal">(Emp Code / ERP No)</span>
               </label>
               <input
                 type="text"
@@ -1069,7 +1481,7 @@ export function EmployeeMaster({
                 disabled={Boolean(editing)}
                 value={employeeId}
                 onChange={(e) => setEmployeeId(e.target.value.toUpperCase())}
-                placeholder="459"
+                placeholder="e.g. 1131 or EMP001"
                 className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm font-mono disabled:bg-slate-50"
               />
             </div>
@@ -1118,19 +1530,53 @@ export function EmployeeMaster({
 
             <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">
-                Department (Top-3 Sales Leaderboard)
+                Department{' '}
+                <span className="text-slate-400 font-normal">(Sales or Non-Sales)</span>
               </label>
               <select
-                value={departmentId}
-                onChange={(e) => setDepartmentId(e.target.value as DepartmentId | '')}
+                value={
+                  departmentId
+                    ? `SALES:${departmentId}`
+                    : customDepartmentName
+                      ? `NONSALES:${customDepartmentName}`
+                      : ''
+                }
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val.startsWith('SALES:')) {
+                    setDepartmentId(val.slice(6) as DepartmentId);
+                    setCustomDepartmentName('');
+                  } else if (val.startsWith('NONSALES:')) {
+                    setDepartmentId('');
+                    setCustomDepartmentName(val.slice(9));
+                  } else {
+                    setDepartmentId('');
+                    setCustomDepartmentName('');
+                  }
+                }}
                 className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
               >
                 <option value="">— Unassigned —</option>
-                {OFFICIAL_DEPARTMENTS.map((dept) => (
-                  <option key={dept.id} value={dept.id}>
-                    {dept.name}
-                  </option>
-                ))}
+                <optgroup label="5 Sales Counter Departments (Leaderboard Eligible)">
+                  {OFFICIAL_DEPARTMENTS.map((dept) => (
+                    <option key={dept.id} value={`SALES:${dept.id}`}>
+                      {dept.name}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Head Office & Support / Non-Sales Departments">
+                  {COMMON_NON_SALES_DEPARTMENTS.map((name) => (
+                    <option key={name} value={`NONSALES:${name}`}>
+                      {name}
+                    </option>
+                  ))}
+                  {customDepartmentName &&
+                    !COMMON_NON_SALES_DEPARTMENTS.includes(customDepartmentName) && (
+                      <option value={`NONSALES:${customDepartmentName}`}>
+                        {customDepartmentName}
+                      </option>
+                    )}
+                </optgroup>
               </select>
             </div>
 
@@ -1141,6 +1587,7 @@ export function EmployeeMaster({
                 required
                 value={designation}
                 onChange={(e) => setDesignation(e.target.value)}
+                placeholder="e.g. Sales Executive, Accountant, Cashier, HR, Store Manager"
                 className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
               />
             </div>
@@ -1269,6 +1716,17 @@ export function EmployeeMaster({
                 </span>
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                    Date of Birth (DOB · Birthday Card)
+                  </label>
+                  <input
+                    type="date"
+                    value={dateOfBirth}
+                    onChange={(e) => setDateOfBirth(e.target.value)}
+                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
+                  />
+                </div>
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
                     Date of Joining (DOJ)
@@ -1410,7 +1868,7 @@ export function EmployeeMaster({
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                  <th className="py-3 px-4">Salesman No</th>
+                  <th className="py-3 px-4">Employee ID</th>
                   <th className="py-3 px-4">Login ID</th>
                   <th className="py-3 px-4">Employee Name</th>
                   <th className="py-3 px-4">Branch</th>
@@ -1449,7 +1907,15 @@ export function EmployeeMaster({
                         </div>
                         <div className="min-w-0">
                           <div className="font-medium text-slate-900 truncate">{emp.fullName}</div>
-                          <div className="text-xs text-slate-500 truncate">{emp.designation}</div>
+                          <div className="text-xs text-slate-500 truncate">
+                            {emp.designation}
+                            {emp.dateOfBirth && extractMonthDayFromDob(emp.dateOfBirth) && (
+                              <span className="text-[#9A7625] font-medium">
+                                {' '}
+                                · 🎂 {formatBirthMonthDayLabel(emp.dateOfBirth, 'en')}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </td>
@@ -1487,6 +1953,17 @@ export function EmployeeMaster({
                     </td>
                     <td className="py-3 px-4 text-right">
                       <div className="inline-flex items-center gap-3">
+                        {emp.dateOfBirth && extractMonthDayFromDob(emp.dateOfBirth) && (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewCardEmp(emp)}
+                            title="Preview & Download Official Birthday Wishing Card"
+                            className="inline-flex items-center gap-1 text-xs font-medium text-[#9A7625] hover:underline cursor-pointer"
+                          >
+                            <Gift className="w-3.5 h-3.5" />
+                            Card
+                          </button>
+                        )}
                         {(!emp.credentialsProvisioned || !emp.authUid) && (
                           <button
                             type="button"
@@ -1530,6 +2007,27 @@ export function EmployeeMaster({
           </div>
         )}
       </div>
+
+      <BirthdayWishingCardModal
+        open={Boolean(previewCardEmp)}
+        onClose={() => setPreviewCardEmp(null)}
+        card={
+          previewCardEmp
+            ? {
+                fullName: previewCardEmp.fullName,
+                employeeId: previewCardEmp.employeeId,
+                branchName: previewCardEmp.branchName,
+                departmentName: previewCardEmp.departmentName,
+                designation: previewCardEmp.designation,
+                photoDataUrl: previewCardEmp.photoDataUrl,
+                birthMonthDay:
+                  extractMonthDayFromDob(previewCardEmp.dateOfBirth)?.birthMonthDay ||
+                  getTodayIstParts().monthDay,
+                celebrationYear: getTodayIstParts().year,
+              }
+            : null
+        }
+      />
     </div>
   );
 }

@@ -64,6 +64,7 @@
         "phone": { "type": "string", "maxLength": 24 },
         "address": { "type": "string", "maxLength": 240 },
         "emergencyContact": { "type": "string", "maxLength": 120 },
+        "dateOfBirth": { "type": "string", "maxLength": 20 },
         "dateOfJoining": { "type": "string", "maxLength": 20 },
         "panNumber": { "type": "string", "maxLength": 20 },
         "uanNumber": { "type": "string", "maxLength": 24 },
@@ -660,8 +661,17 @@
         "paidLeaveDays": { "type": "number" },
         "overtimeHours": { "type": "number" },
         "basicPaise": { "type": "number" },
+        "dearnessAllowancePaise": { "type": "number" },
         "hraPaise": { "type": "number" },
+        "attendanceAllowancePaise": { "type": "number" },
+        "washingAllowancePaise": { "type": "number" },
         "conveyancePaise": { "type": "number" },
+        "medicalAllowancePaise": { "type": "number" },
+        "leaveTravelAllowancePaise": { "type": "number" },
+        "communicationExpensesPaise": { "type": "number" },
+        "adhocAllowancePaise": { "type": "number" },
+        "travelingAllowancePaise": { "type": "number" },
+        "salesCommissionPaise": { "type": "number" },
         "specialAllowancePaise": { "type": "number" },
         "overtimePaise": { "type": "number" },
         "incentivePaise": { "type": "number" },
@@ -718,6 +728,73 @@
         "uploadedByEmail",
         "uploadedAt",
         "updatedAt"
+      ]
+    },
+    "BirthdayProfile": {
+      "title": "BirthdayProfile",
+      "description": "Privacy-isolated 12-branch employee birthday directory storing ONLY MM-DD (no birth year, phone, PAN, bank, or salary PII)",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "branchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchName": { "type": "string", "maxLength": 120 },
+        "departmentId": { "type": "string", "enum": ["", "SAREE", "LADIES_WEAR", "KIDS_WEAR", "MENS_WEAR", "NON_APPARELS"] },
+        "departmentName": { "type": "string", "maxLength": 80 },
+        "designation": { "type": "string", "maxLength": 80 },
+        "photoDataUrl": { "type": "string", "maxLength": 45000 },
+        "birthMonthDay": { "type": "string", "maxLength": 5, "pattern": "^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$" },
+        "birthMonth": { "type": "number" },
+        "birthDay": { "type": "number" },
+        "active": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 40 }
+      },
+      "required": [
+        "employeeId",
+        "fullName",
+        "branchId",
+        "branchName",
+        "designation",
+        "birthMonthDay",
+        "birthMonth",
+        "birthDay",
+        "active",
+        "updatedAt"
+      ]
+    },
+    "BirthdayWish": {
+      "title": "BirthdayWish",
+      "description": "Immutable colleague or management birthday wish with deterministic 1-wish-per-sender-per-year ID",
+      "type": "object",
+      "properties": {
+        "wishId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "celebrationYear": { "type": "number" },
+        "birthMonthDay": { "type": "string", "maxLength": 5, "pattern": "^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$" },
+        "recipientEmployeeId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recipientName": { "type": "string", "maxLength": 120 },
+        "recipientBranchName": { "type": "string", "maxLength": 120 },
+        "senderEmployeeId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderAuthUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderName": { "type": "string", "maxLength": 120 },
+        "senderBranchName": { "type": "string", "maxLength": 120 },
+        "senderRole": { "type": "string", "enum": ["EMPLOYEE", "SUPER_ADMIN"] },
+        "message": { "type": "string", "minLength": 2, "maxLength": 240 },
+        "createdAt": { "type": "string", "format": "date-time", "maxLength": 40 }
+      },
+      "required": [
+        "wishId",
+        "celebrationYear",
+        "birthMonthDay",
+        "recipientEmployeeId",
+        "recipientName",
+        "recipientBranchName",
+        "senderEmployeeId",
+        "senderAuthUid",
+        "senderName",
+        "senderBranchName",
+        "senderRole",
+        "message",
+        "createdAt"
       ]
     }
   },
@@ -797,6 +874,14 @@
     "/salary_slips/{slipId}": {
       "schema": { "$ref": "#/entities/SalarySlip" },
       "description": "Private monthly employee salary / payment slips with month visibility gating"
+    },
+    "/birthday_profiles/{employeeId}": {
+      "schema": { "$ref": "#/entities/BirthdayProfile" },
+      "description": "Privacy-isolated 12-branch active employee birthday celebration directory (MM-DD only, zero birth year or private PII)"
+    },
+    "/birthday_wishes/{wishId}": {
+      "schema": { "$ref": "#/entities/BirthdayWish" },
+      "description": "Immutable cross-branch colleague and management birthday wishes (1 per sender per recipient per year)"
     }
   }
 }

@@ -44,6 +44,7 @@ export interface Employee {
   departmentName?: string;
   photoDataUrl?: string;
   designation: string;
+  dateOfBirth?: string; // YYYY-MM-DD (private in employees; only MM-DD synced to birthday_profiles)
   dateOfJoining?: string;
   panNumber?: string;
   uanNumber?: string;
@@ -488,8 +489,17 @@ export interface SalarySlip {
   overtimeHours: number;
   // Earnings (paise)
   basicPaise: number;
+  dearnessAllowancePaise?: number;
   hraPaise: number;
+  attendanceAllowancePaise?: number;
+  washingAllowancePaise?: number;
   conveyancePaise: number;
+  medicalAllowancePaise?: number;
+  leaveTravelAllowancePaise?: number;
+  communicationExpensesPaise?: number;
+  adhocAllowancePaise?: number;
+  travelingAllowancePaise?: number;
+  salesCommissionPaise?: number;
   specialAllowancePaise: number;
   overtimePaise: number;
   incentivePaise: number;
@@ -513,6 +523,40 @@ export interface SalarySlip {
   uploadedByEmail: string;
   uploadedAt: string;
   updatedAt: string;
+}
+
+export interface BirthdayProfile {
+  employeeId: string;
+  fullName: string;
+  branchId: string;
+  branchName: string;
+  departmentId?: DepartmentId | '';
+  departmentName?: string;
+  designation: string;
+  photoDataUrl?: string;
+  birthMonthDay: string; // Strictly 'MM-DD' — zero birth year exposed cross-branch
+  birthMonth: number; // 1..12
+  birthDay: number; // 1..31
+  active: boolean;
+  updatedAt: string;
+}
+
+export type BirthdayWishSenderRole = 'EMPLOYEE' | 'SUPER_ADMIN';
+
+export interface BirthdayWish {
+  wishId: string; // `${celebrationYear}__${recipientEmployeeId}__${senderEmployeeId}`
+  celebrationYear: number;
+  birthMonthDay: string; // 'MM-DD'
+  recipientEmployeeId: string;
+  recipientName: string;
+  recipientBranchName: string;
+  senderEmployeeId: string;
+  senderAuthUid: string;
+  senderName: string;
+  senderBranchName: string;
+  senderRole: BirthdayWishSenderRole;
+  message: string;
+  createdAt: string;
 }
 
 

@@ -73,7 +73,7 @@ export function SalarySlipsManager({
 
   const [filterMonth, setFilterMonth] = useState<string>('ALL');
   const [filterBranch, setFilterBranch] = useState<string>('ALL');
-  const [filterDept, setFilterDept] = useState<'ALL' | 'UNASSIGNED' | DepartmentId>('ALL');
+  const [filterDept, setFilterDept] = useState<'ALL' | 'UNASSIGNED' | 'NON_SALES' | DepartmentId>('ALL');
   const [search, setSearch] = useState<string>('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -83,8 +83,14 @@ export function SalarySlipsManager({
     return salarySlips.filter((s) => {
       if (filterMonth !== 'ALL' && s.monthKey !== filterMonth) return false;
       if (filterBranch !== 'ALL' && s.branchId !== filterBranch) return false;
-      if (filterDept === 'UNASSIGNED' && s.departmentId) return false;
-      if (filterDept !== 'ALL' && filterDept !== 'UNASSIGNED' && s.departmentId !== filterDept) {
+      if (filterDept === 'UNASSIGNED' && (s.departmentId || s.departmentName)) return false;
+      if (filterDept === 'NON_SALES' && (Boolean(s.departmentId) || !s.departmentName)) return false;
+      if (
+        filterDept !== 'ALL' &&
+        filterDept !== 'UNASSIGNED' &&
+        filterDept !== 'NON_SALES' &&
+        s.departmentId !== filterDept
+      ) {
         return false;
       }
       if (q) {
@@ -246,9 +252,13 @@ export function SalarySlipsManager({
 
       setParseSummary(null);
       setFileName('');
+      const warningSuffix =
+        res.syncWarnings.length > 0
+          ? ` Note: ${res.syncWarnings.slice(0, 2).join(' ')}`
+          : '';
       setFeedback({
         type: 'ok',
-        text: `Published ${res.slipsPublished} monthly salary slip(s) cleanly.${syncParts.length ? ` ${syncParts.join(' · ')}.` : ''}`,
+        text: `Published ${res.slipsPublished} monthly salary slip(s) cleanly.${syncParts.length ? ` ${syncParts.join(' · ')}.` : ''}${warningSuffix}`,
       });
       await onRefresh();
     } catch (err) {
@@ -336,7 +346,7 @@ export function SalarySlipsManager({
                   Upload Monthly Salary Sheet (.xlsx / .csv)
                 </h2>
                 <p className="text-[11px] text-slate-300">
-                  Matches employees by Salesman No / Employee ID · Strictly private per employee
+                  Matches all employees by Employee ID (Sales &amp; Non-Sales Depts) · Strictly private per employee
                 </p>
               </div>
             </div>
@@ -403,15 +413,20 @@ export function SalarySlipsManager({
           </div>
 
           {/* Supported columns quick guide */}
-          <p className="text-[11px] text-slate-500">
-            Supported columns: <span className="font-medium text-slate-700">Salesman No</span>,{' '}
-            <span className="font-medium text-slate-700">Department</span> (Saree / Ladies Wear /
-            Kids Wear / Mens Wear / Non Apparels),{' '}
-            <span className="font-medium text-slate-700">Total / Paid / LOP Days</span>,{' '}
-            <span className="font-medium text-slate-700">Basic, HRA, Conveyance, Special, OT, Incentive</span>,{' '}
-            <span className="font-medium text-slate-700">PF, ESIC, PT, Advance, TDS</span>, and{' '}
-            <span className="font-medium text-slate-700">Bank / IFSC / UAN / PAN</span>. Bank
-            account numbers are automatically masked as <span className="font-mono">XXXX1234</span>.
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            Template earning columns (14):{' '}
+            <span className="font-medium text-slate-700">
+              Basic Salary, Dearness Allowance, HRA, Attendance Allowance, Washing Allowance,
+              Convenience Allowance, Medical Allowance, Leave Travel Allowance, Communication
+              Expanses, Adhoc Allowance, Traveling Allowance, Sales Commotion, Incentive, Overtime
+            </span>{' '}
+            · Deductions:{' '}
+            <span className="font-medium text-slate-700">PF, ESIC, PT, Advance, TDS</span> ·
+            Identity &amp; Bank:{' '}
+            <span className="font-medium text-slate-700">
+              Employee ID (or ERP Salesman No), Department (Sales Depts + Accounts / HR / Billing / Head Office / Any Dept), Bank / IFSC / UAN / PAN
+            </span>{' '}
+            (Account auto-masked as <span className="font-mono">XXXX1234</span>).
           </p>
 
           {/* Validation Preview */}
@@ -512,9 +527,15 @@ export function SalarySlipsManager({
                           <td className="py-2 px-3">
                             <span className="text-slate-800 font-medium">
                               {row.resolvedDepartment?.name ||
+                                row.customDepartmentName ||
                                 row.matchedEmployee?.departmentName ||
                                 '—'}
                             </span>
+                            {!row.resolvedDepartment && row.customDepartmentName && (
+                              <span className="block text-[10px] text-slate-500">
+                                Non-Sales Dept
+                              </span>
+                            )}
                             {row.willSyncDepartment && (
                               <span className="block text-[10px] font-semibold text-emerald-700">
                                 Will auto-sync
@@ -628,10 +649,13 @@ export function SalarySlipsManager({
 
             <select
               value={filterDept}
-              onChange={(e) => setFilterDept(e.target.value as 'ALL' | 'UNASSIGNED' | DepartmentId)}
+              onChange={(e) =>
+                setFilterDept(e.target.value as 'ALL' | 'UNASSIGNED' | 'NON_SALES' | DepartmentId)
+              }
               className="h-9 px-2.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 bg-white"
             >
               <option value="ALL">All Departments</option>
+              <option value="NON_SALES">Other / Non-Sales Depts</option>
               <option value="UNASSIGNED">Unassigned Dept</option>
               {OFFICIAL_DEPARTMENTS.map((d) => (
                 <option key={d.id} value={d.id}>

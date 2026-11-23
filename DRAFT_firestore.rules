@@ -1,0 +1,1369 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 0: Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // STRICT SUPER ADMIN ONLY (Phase 2: Only SUPER_ADMIN & EMPLOYEE exist; BRANCH_MANAGER disabled)
+    function isSuperAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && (
+          request.auth.token.email == 'uhvishal41@gmail.com'
+          || (
+            exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+            && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'SUPER_ADMIN'
+            && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true
+          )
+        );
+    }
+
+    // ISSUE 1: Server-side Firestore gate for ACTIVE employees (instant revocation when deactivated)
+    function isActiveEmployee() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/active_auth_uids/$(request.auth.uid))
+        && get(/databases/$(database)/documents/active_auth_uids/$(request.auth.uid)).data.active == true;
+    }
+
+    // Server-trusted employeeId bound to this active employee's verified auth UID
+    function activeEmployeeId() {
+      return get(/databases/$(database)/documents/active_auth_uids/$(request.auth.uid)).data.employeeId;
+    }
+
+    // Server-trusted departmentId bound to this active employee's verified auth UID
+    function activeEmployeeDepartmentId() {
+      return get(/databases/$(database)/documents/active_auth_uids/$(request.auth.uid)).data.departmentId;
+    }
+
+    function hasActiveEmployeeDepartment() {
+      return 'departmentId' in get(/databases/$(database)/documents/active_auth_uids/$(request.auth.uid)).data
+        && activeEmployeeDepartmentId() is string
+        && activeEmployeeDepartmentId() != '';
+    }
+
+    // Admin-Controlled Month Visibility Gate (Zero downtime in ALL mode; server-enforced in SELECTED mode)
+    function isVisibilityRestricted() {
+      return exists(/databases/$(database)/documents/portal_settings/visibility)
+        && get(/databases/$(database)/documents/portal_settings/visibility).data.mode == 'SELECTED';
+    }
+
+    function isEmployeeVisibleDoc(data) {
+      return !isVisibilityRestricted() || data.employeeVisible == true;
+    }
+
+    function isNonEmptyString(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    function isOptionalString(data, key, maxLen) {
+      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isOptionalBool(data, key) {
+      return !(key in data) || data[key] is bool;
+    }
+
+    function isOptionalNonNegInt(data, key) {
+      return !(key in data) || (data[key] is int && data[key] >= 0);
+    }
+
+    function isOptionalNonNegNumber(data, key) {
+      return !(key in data) || ((data[key] is int || data[key] is float) && data[key] >= 0);
+    }
+
+    function isValidImportType(val) {
+      return val == 'DAILY' || val == 'MONTHLY' || val == 'CUSTOM_PERIOD';
+    }
+
+    function isValidDepartmentId(val) {
+      return val == 'SAREE'
+        || val == 'LADIES_WEAR'
+        || val == 'KIDS_WEAR'
+        || val == 'MENS_WEAR'
+        || val == 'NON_APPARELS';
+    }
+
+    function isOptionalDepartmentId(data, key) {
+      return !(key in data) || data[key] == '' || isValidDepartmentId(data[key]);
+    }
+
+    function isValidIsoDate(val) {
+      return val is string && val.size() == 10 && val.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
+    function isValidMonthDay(val) {
+      return val is string && val.size() == 5 && val.matches('^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$');
+    }
+
+    // Validation Blueprints (Anti-Update-Gap)
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'active', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'branchId', 'active', 'createdAt'])
+        && isValidId(data.uid)
+        && isNonEmptyString(data.email, 180)
+        && isNonEmptyString(data.displayName, 120)
+        && data.role == 'SUPER_ADMIN'
+        && isOptionalString(data, 'branchId', 64)
+        && data.active is bool
+        && isNonEmptyString(data.createdAt, 40);
+    }
+
+    function isValidActiveAuthUid(data) {
+      return data.keys().hasAll(['authUid', 'employeeId', 'active', 'updatedAt'])
+        && data.keys().hasOnly(['authUid', 'employeeId', 'departmentId', 'active', 'updatedAt'])
+        && isValidId(data.authUid)
+        && isValidId(data.employeeId)
+        && isOptionalDepartmentId(data, 'departmentId')
+        && data.active == true
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    function isValidBranch(data) {
+      return data.keys().hasAll(['branchId', 'branchCode', 'branchName', 'city', 'active', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['branchId', 'branchCode', 'branchName', 'city', 'managerName', 'active', 'createdAt', 'updatedAt'])
+        && isValidId(data.branchId)
+        && data.branchCode is string && data.branchCode.size() >= 2 && data.branchCode.size() <= 24 && data.branchCode.matches('^[A-Z0-9_\\-]+$')
+        && isNonEmptyString(data.branchName, 120)
+        && isNonEmptyString(data.city, 80)
+        && isOptionalString(data, 'managerName', 120)
+        && data.active is bool
+        && isNonEmptyString(data.createdAt, 40)
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    function isValidEmployee(data) {
+      return data.keys().hasAll([
+          'employeeId', 'loginId', 'authEmail', 'fullName', 'branchId', 'branchName',
+          'designation', 'role', 'status', 'mustChangePassword', 'credentialsProvisioned',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'employeeId', 'loginId', 'authEmail', 'linkedGoogleEmail', 'authUid', 'fullName',
+          'branchId', 'branchName', 'departmentId', 'departmentName', 'photoDataUrl',
+          'designation', 'dateOfBirth', 'dateOfJoining', 'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
+          'bankName', 'bankAccountMasked', 'bankIfsc',
+          'phone', 'address', 'emergencyContact',
+          'role', 'status', 'mustChangePassword', 'credentialsProvisioned', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.employeeId)
+        && data.loginId is string && data.loginId.size() >= 3 && data.loginId.size() <= 40 && data.loginId.matches('^[A-Z0-9_\\-]+$')
+        && isNonEmptyString(data.authEmail, 180)
+        && isOptionalString(data, 'linkedGoogleEmail', 180)
+        && isOptionalString(data, 'authUid', 128)
+        && isNonEmptyString(data.fullName, 120)
+        && isValidId(data.branchId)
+        && isNonEmptyString(data.branchName, 120)
+        && isOptionalDepartmentId(data, 'departmentId')
+        && isOptionalString(data, 'departmentName', 80)
+        && isOptionalString(data, 'photoDataUrl', 45000)
+        && isNonEmptyString(data.designation, 80)
+        && isOptionalString(data, 'dateOfBirth', 20)
+        && isOptionalString(data, 'dateOfJoining', 20)
+        && isOptionalString(data, 'panNumber', 20)
+        && isOptionalString(data, 'uanNumber', 24)
+        && isOptionalString(data, 'pfNumber', 32)
+        && isOptionalString(data, 'esicNumber', 32)
+        && isOptionalString(data, 'bankName', 80)
+        && isOptionalString(data, 'bankAccountMasked', 32)
+        && isOptionalString(data, 'bankIfsc', 20)
+        && isOptionalString(data, 'phone', 24)
+        && isOptionalString(data, 'address', 240)
+        && isOptionalString(data, 'emergencyContact', 120)
+        && data.role == 'EMPLOYEE'
+        && (data.status == 'ACTIVE' || data.status == 'INACTIVE')
+        && data.mustChangePassword is bool
+        && data.credentialsProvisioned is bool
+        && isNonEmptyString(data.createdAt, 40)
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    function isValidComponentLabels(labels) {
+      return labels is map
+        && labels.keys().hasAll(['component1', 'component2', 'component3'])
+        && labels.keys().hasOnly(['component1', 'component2', 'component3'])
+        && isNonEmptyString(labels.component1, 80)
+        && isNonEmptyString(labels.component2, 80)
+        && isNonEmptyString(labels.component3, 80);
+    }
+
+    function isValidImportBatch(data) {
+      return data.keys().hasAll([
+          'batchId', 'fileName', 'fileSha256', 'businessDate', 'status',
+          'totalRows', 'validRows', 'errorRows', 'duplicateRows', 'correctionRows',
+          'totalIncentivePaise', 'uploadedByUid', 'uploadedByEmail', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'batchId', 'fileName', 'fileSha256', 'importType', 'periodStart', 'periodEnd',
+          'businessDate', 'status', 'overlapResolutionMode', 'totalRows', 'validRows', 'errorRows',
+          'duplicateRows', 'correctionRows', 'overlapRows', 'supersededRows', 'branchTransferRows',
+          'skippedBlankRows', 'skippedSummaryRows', 'totalIncentivePaise', 'totalSaleAmtPaise', 'totalSaleQty', 'componentLabels',
+          'uploadedByUid', 'uploadedByEmail', 'approvedByEmail', 'publishedByEmail',
+          'publishLockId', 'publishStartedAt', 'publishAttemptCount', 'lastPublishError',
+          'rejectionReason', 'correctionNote', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.batchId)
+        && isNonEmptyString(data.fileName, 180)
+        && isNonEmptyString(data.fileSha256, 128)
+        && (!('importType' in data) || isValidImportType(data.importType))
+        && (!('periodStart' in data) || isValidIsoDate(data.periodStart))
+        && (!('periodEnd' in data) || isValidIsoDate(data.periodEnd))
+        && isNonEmptyString(data.businessDate, 20)
+        && (
+          data.status == 'UPLOADED'
+          || data.status == 'VALIDATED'
+          || data.status == 'APPROVED'
+          || data.status == 'PROCESSING'
+          || data.status == 'PUBLISHED'
+          || data.status == 'FAILED'
+          || data.status == 'REJECTED'
+        )
+        && (
+          !('overlapResolutionMode' in data)
+          || data.overlapResolutionMode == 'BLOCK'
+          || data.overlapResolutionMode == 'SKIP_OVERLAP'
+          || data.overlapResolutionMode == 'RECONCILE_SUPERSEDE'
+        )
+        && data.totalRows is int && data.totalRows >= 0
+        && data.validRows is int && data.validRows >= 0
+        && data.errorRows is int && data.errorRows >= 0
+        && data.duplicateRows is int && data.duplicateRows >= 0
+        && data.correctionRows is int && data.correctionRows >= 0
+        && isOptionalNonNegInt(data, 'overlapRows')
+        && isOptionalNonNegInt(data, 'supersededRows')
+        && isOptionalNonNegInt(data, 'branchTransferRows')
+        && isOptionalNonNegInt(data, 'skippedBlankRows')
+        && isOptionalNonNegInt(data, 'skippedSummaryRows')
+        && data.totalIncentivePaise is int && data.totalIncentivePaise >= 0
+        && isOptionalNonNegInt(data, 'totalSaleAmtPaise')
+        && isOptionalNonNegNumber(data, 'totalSaleQty')
+        && (!('componentLabels' in data) || isValidComponentLabels(data.componentLabels))
+        && isNonEmptyString(data.uploadedByUid, 128)
+        && isNonEmptyString(data.uploadedByEmail, 180)
+        && isOptionalString(data, 'approvedByEmail', 180)
+        && isOptionalString(data, 'publishedByEmail', 180)
+        && isOptionalString(data, 'publishLockId', 128)
+        && isOptionalString(data, 'publishStartedAt', 40)
+        && isOptionalNonNegInt(data, 'publishAttemptCount')
+        && isOptionalString(data, 'lastPublishError', 300)
+        && isOptionalString(data, 'rejectionReason', 300)
+        && isOptionalString(data, 'correctionNote', 300)
+        && isNonEmptyString(data.createdAt, 40)
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    function isValidImportBatchRow(data) {
+      return data.keys().hasAll([
+          'rowId', 'batchId', 'rowNumber', 'businessDate', 'employeeId',
+          'component1Paise', 'component2Paise', 'component3Paise', 'totalPaise',
+          'validationStatus', 'resolution', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'rowId', 'batchId', 'rowNumber', 'importType', 'periodStart', 'periodEnd',
+          'businessDate', 'employeeId', 'employeeName', 'branchId', 'branchName',
+          'component1Paise', 'component2Paise', 'component3Paise', 'totalPaise',
+          'saleAmt1Paise', 'saleQty1', 'saleAmt2Paise', 'saleQty2', 'saleAmt3Paise', 'saleQty3',
+          'totalSaleAmtPaise', 'totalSaleQty',
+          'validationStatus', 'resolution', 'conflictingRecordIds',
+          'correctionReason', 'errorMessage', 'createdAt'
+        ])
+        && isValidId(data.rowId)
+        && isValidId(data.batchId)
+        && data.rowNumber is int && data.rowNumber >= 1
+        && (!('importType' in data) || isValidImportType(data.importType))
+        && isOptionalString(data, 'periodStart', 20)
+        && isOptionalString(data, 'periodEnd', 20)
+        && data.businessDate is string && data.businessDate.size() <= 20
+        && data.employeeId is string && data.employeeId.size() <= 64
+        && isOptionalString(data, 'employeeName', 120)
+        && isOptionalString(data, 'branchId', 64)
+        && isOptionalString(data, 'branchName', 120)
+        && data.component1Paise is int && data.component1Paise >= 0
+        && data.component2Paise is int && data.component2Paise >= 0
+        && data.component3Paise is int && data.component3Paise >= 0
+        && data.totalPaise is int
+        && data.totalPaise == data.component1Paise + data.component2Paise + data.component3Paise
+        && isOptionalNonNegInt(data, 'saleAmt1Paise')
+        && isOptionalNonNegNumber(data, 'saleQty1')
+        && isOptionalNonNegInt(data, 'saleAmt2Paise')
+        && isOptionalNonNegNumber(data, 'saleQty2')
+        && isOptionalNonNegInt(data, 'saleAmt3Paise')
+        && isOptionalNonNegNumber(data, 'saleQty3')
+        && isOptionalNonNegInt(data, 'totalSaleAmtPaise')
+        && isOptionalNonNegNumber(data, 'totalSaleQty')
+        && (
+          data.validationStatus == 'VALID'
+          || data.validationStatus == 'ERROR'
+          || data.validationStatus == 'DUPLICATE_IN_FILE'
+          || data.validationStatus == 'EXISTS_PUBLISHED'
+          || data.validationStatus == 'PERIOD_OVERLAP'
+          || data.validationStatus == 'BRANCH_TRANSFER'
+        )
+        && (
+          data.resolution == 'PUBLISH_NEW'
+          || data.resolution == 'SKIP'
+          || data.resolution == 'CORRECTION'
+          || data.resolution == 'SUPERSEDE_CONFLICTS'
+        )
+        && (
+          !('conflictingRecordIds' in data)
+          || (
+            data.conflictingRecordIds is list
+            && data.conflictingRecordIds.size() <= 60
+            && (
+              data.conflictingRecordIds.size() == 0
+              || (data.conflictingRecordIds[0] is string && data.conflictingRecordIds[0].size() <= 128)
+            )
+          )
+        )
+        && isOptionalString(data, 'correctionReason', 240)
+        && isOptionalString(data, 'errorMessage', 300)
+        && isNonEmptyString(data.createdAt, 40);
+    }
+
+    function isValidPublishedIncentive(data) {
+      return data.keys().hasAll([
+          'recordId', 'businessDate', 'monthKey', 'employeeId', 'authUid', 'employeeName',
+          'branchId', 'branchName', 'component1Label', 'component2Label', 'component3Label',
+          'component1Paise', 'component2Paise', 'component3Paise', 'totalPaise',
+          'status', 'version', 'batchId', 'publishedAt', 'publishedByEmail'
+        ])
+        && data.keys().hasOnly([
+          'recordId', 'importType', 'periodStart', 'periodEnd', 'businessDate', 'monthKey',
+          'employeeId', 'authUid', 'employeeName', 'branchId', 'branchName',
+          'component1Label', 'component2Label', 'component3Label',
+          'component1Paise', 'component2Paise', 'component3Paise', 'totalPaise',
+          'saleAmt1Paise', 'saleQty1', 'saleAmt2Paise', 'saleQty2', 'saleAmt3Paise', 'saleQty3',
+          'totalSaleAmtPaise', 'totalSaleQty',
+          'status', 'version', 'batchId', 'correctionReason',
+          'supersededByBatchId', 'supersededByRecordId', 'supersededAt', 'supersededReason',
+          'employeeVisible', 'publishedAt', 'publishedByEmail'
+        ])
+        && isValidId(data.recordId)
+        && (!('importType' in data) || isValidImportType(data.importType))
+        && (!('periodStart' in data) || isValidIsoDate(data.periodStart))
+        && (!('periodEnd' in data) || isValidIsoDate(data.periodEnd))
+        && isValidIsoDate(data.businessDate)
+        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && isValidId(data.employeeId)
+        && data.authUid is string && data.authUid.size() <= 128
+        && isNonEmptyString(data.employeeName, 120)
+        && isValidId(data.branchId)
+        && isNonEmptyString(data.branchName, 120)
+        && isNonEmptyString(data.component1Label, 80)
+        && isNonEmptyString(data.component2Label, 80)
+        && isNonEmptyString(data.component3Label, 80)
+        && data.component1Paise is int && data.component1Paise >= 0
+        && data.component2Paise is int && data.component2Paise >= 0
+        && data.component3Paise is int && data.component3Paise >= 0
+        && data.totalPaise is int
+        && data.totalPaise == data.component1Paise + data.component2Paise + data.component3Paise
+        && isOptionalNonNegInt(data, 'saleAmt1Paise')
+        && isOptionalNonNegNumber(data, 'saleQty1')
+        && isOptionalNonNegInt(data, 'saleAmt2Paise')
+        && isOptionalNonNegNumber(data, 'saleQty2')
+        && isOptionalNonNegInt(data, 'saleAmt3Paise')
+        && isOptionalNonNegNumber(data, 'saleQty3')
+        && isOptionalNonNegInt(data, 'totalSaleAmtPaise')
+        && isOptionalNonNegNumber(data, 'totalSaleQty')
+        && (data.status == 'PUBLISHED' || data.status == 'SUPERSEDED')
+        && data.version is int && data.version >= 1
+        && isValidId(data.batchId)
+        && isOptionalString(data, 'correctionReason', 240)
+        && isOptionalString(data, 'supersededByBatchId', 64)
+        && isOptionalString(data, 'supersededByRecordId', 128)
+        && isOptionalString(data, 'supersededAt', 40)
+        && isOptionalString(data, 'supersededReason', 240)
+        && isOptionalBool(data, 'employeeVisible')
+        && isNonEmptyString(data.publishedAt, 40)
+        && isNonEmptyString(data.publishedByEmail, 180);
+    }
+
+    function isValidIncentiveVersion(data) {
+      return data.keys().hasAll([
+          'versionId', 'recordId', 'businessDate', 'employeeId', 'branchId',
+          'previousVersion', 'newVersion',
+          'previousComponent1Paise', 'previousComponent2Paise', 'previousComponent3Paise', 'previousTotalPaise',
+          'newComponent1Paise', 'newComponent2Paise', 'newComponent3Paise', 'newTotalPaise',
+          'correctionReason', 'batchId', 'correctedByEmail', 'archivedAt'
+        ])
+        && data.keys().hasOnly([
+          'versionId', 'recordId', 'importType', 'periodStart', 'periodEnd',
+          'businessDate', 'employeeId', 'branchId', 'previousVersion', 'newVersion',
+          'previousComponent1Paise', 'previousComponent2Paise', 'previousComponent3Paise', 'previousTotalPaise',
+          'newComponent1Paise', 'newComponent2Paise', 'newComponent3Paise', 'newTotalPaise',
+          'correctionReason', 'batchId', 'correctedByEmail', 'archivedAt'
+        ])
+        && isValidId(data.versionId)
+        && isValidId(data.recordId)
+        && (!('importType' in data) || isValidImportType(data.importType))
+        && isOptionalString(data, 'periodStart', 20)
+        && isOptionalString(data, 'periodEnd', 20)
+        && isNonEmptyString(data.businessDate, 20)
+        && isValidId(data.employeeId)
+        && isValidId(data.branchId)
+        && data.previousVersion is int && data.previousVersion >= 1
+        && data.newVersion is int && data.newVersion > data.previousVersion
+        && data.previousComponent1Paise is int && data.previousComponent1Paise >= 0
+        && data.previousComponent2Paise is int && data.previousComponent2Paise >= 0
+        && data.previousComponent3Paise is int && data.previousComponent3Paise >= 0
+        && data.previousTotalPaise is int && data.previousTotalPaise == data.previousComponent1Paise + data.previousComponent2Paise + data.previousComponent3Paise
+        && data.newComponent1Paise is int && data.newComponent1Paise >= 0
+        && data.newComponent2Paise is int && data.newComponent2Paise >= 0
+        && data.newComponent3Paise is int && data.newComponent3Paise >= 0
+        && data.newTotalPaise is int && data.newTotalPaise == data.newComponent1Paise + data.newComponent2Paise + data.newComponent3Paise
+        && isNonEmptyString(data.correctionReason, 300)
+        && isValidId(data.batchId)
+        && isNonEmptyString(data.correctedByEmail, 180)
+        && isNonEmptyString(data.archivedAt, 40);
+    }
+
+    function isValidMonthlySummary(data) {
+      return data.keys().hasAll([
+          'summaryId', 'employeeId', 'authUid', 'employeeName', 'branchId', 'branchName',
+          'monthKey', 'component1TotalPaise', 'component2TotalPaise', 'component3TotalPaise',
+          'grandTotalPaise', 'publishedDaysCount', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'summaryId', 'employeeId', 'authUid', 'employeeName', 'branchId', 'branchName',
+          'monthKey', 'sourceType', 'component1TotalPaise', 'component2TotalPaise', 'component3TotalPaise',
+          'grandTotalPaise',
+          'saleAmt1TotalPaise', 'saleQty1Total', 'saleAmt2TotalPaise', 'saleQty2Total',
+          'saleAmt3TotalPaise', 'saleQty3Total', 'totalSaleAmtPaise', 'totalSaleQty',
+          'publishedDaysCount', 'employeeVisible', 'updatedAt'
+        ])
+        && isValidId(data.summaryId)
+        && isValidId(data.employeeId)
+        && data.authUid is string && data.authUid.size() <= 128
+        && isNonEmptyString(data.employeeName, 120)
+        && isValidId(data.branchId)
+        && isNonEmptyString(data.branchName, 120)
+        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && (!('sourceType' in data) || data.sourceType == 'DAILY_AGGREGATE' || data.sourceType == 'MONTHLY_RECORD' || data.sourceType == 'NO_DATA')
+        && data.component1TotalPaise is int && data.component1TotalPaise >= 0
+        && data.component2TotalPaise is int && data.component2TotalPaise >= 0
+        && data.component3TotalPaise is int && data.component3TotalPaise >= 0
+        && data.grandTotalPaise is int && data.grandTotalPaise == data.component1TotalPaise + data.component2TotalPaise + data.component3TotalPaise
+        && isOptionalNonNegInt(data, 'saleAmt1TotalPaise')
+        && isOptionalNonNegNumber(data, 'saleQty1Total')
+        && isOptionalNonNegInt(data, 'saleAmt2TotalPaise')
+        && isOptionalNonNegNumber(data, 'saleQty2Total')
+        && isOptionalNonNegInt(data, 'saleAmt3TotalPaise')
+        && isOptionalNonNegNumber(data, 'saleQty3Total')
+        && isOptionalNonNegInt(data, 'totalSaleAmtPaise')
+        && isOptionalNonNegNumber(data, 'totalSaleQty')
+        && data.publishedDaysCount is int && data.publishedDaysCount >= 0
+        && isOptionalBool(data, 'employeeVisible')
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['logId', 'action', 'actorUid', 'actorEmail', 'actorRole', 'targetType', 'targetId', 'summary', 'createdAt'])
+        && data.keys().hasOnly(['logId', 'action', 'actorUid', 'actorEmail', 'actorRole', 'targetType', 'targetId', 'summary', 'createdAt'])
+        && isValidId(data.logId)
+        && isNonEmptyString(data.action, 80)
+        && data.actorUid == request.auth.uid
+        && isNonEmptyString(data.actorEmail, 180)
+        && isNonEmptyString(data.actorRole, 40)
+        && isNonEmptyString(data.targetType, 64)
+        && isNonEmptyString(data.targetId, 128)
+        && isNonEmptyString(data.summary, 400)
+        && isNonEmptyString(data.createdAt, 40);
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['notificationId', 'employeeId', 'authUid', 'title', 'message', 'businessDate', 'batchId', 'read', 'createdAt'])
+        && data.keys().hasOnly(['notificationId', 'employeeId', 'authUid', 'title', 'message', 'importType', 'periodStart', 'periodEnd', 'businessDate', 'batchId', 'read', 'createdAt', 'readAt'])
+        && isValidId(data.notificationId)
+        && isValidId(data.employeeId)
+        && data.authUid is string && data.authUid.size() <= 128
+        && isNonEmptyString(data.title, 120)
+        && isNonEmptyString(data.message, 320)
+        && (!('importType' in data) || isValidImportType(data.importType))
+        && isOptionalString(data, 'periodStart', 20)
+        && isOptionalString(data, 'periodEnd', 20)
+        && isNonEmptyString(data.businessDate, 20)
+        && isValidId(data.batchId)
+        && data.read is bool
+        && isNonEmptyString(data.createdAt, 40)
+        && isOptionalString(data, 'readAt', 40);
+    }
+
+    function isValidPayoutRecord(data) {
+      return data.keys().hasAll([
+          'payoutId', 'monthKey', 'employeeId', 'authUid', 'employeeName',
+          'branchId', 'branchName', 'grossIncentivePaise', 'adjustmentsNetPaise',
+          'netPayablePaise', 'status', 'updatedByEmail', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'payoutId', 'monthKey', 'employeeId', 'authUid', 'employeeName',
+          'branchId', 'branchName', 'grossIncentivePaise', 'adjustmentsNetPaise',
+          'netPayablePaise', 'status', 'paymentMode', 'paymentReference',
+          'paidAt', 'remarks', 'employeeVisible', 'updatedByEmail', 'updatedAt'
+        ])
+        && isValidId(data.payoutId)
+        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && isValidId(data.employeeId)
+        && data.authUid is string && data.authUid.size() <= 128
+        && isNonEmptyString(data.employeeName, 120)
+        && isValidId(data.branchId)
+        && isNonEmptyString(data.branchName, 120)
+        && data.grossIncentivePaise is int && data.grossIncentivePaise >= 0
+        && data.adjustmentsNetPaise is int
+        && data.netPayablePaise is int
+        && (data.status == 'UNPAID' || data.status == 'APPROVED' || data.status == 'PAID')
+        && (!('paymentMode' in data) || data.paymentMode == '' || data.paymentMode == 'BANK' || data.paymentMode == 'CASH' || data.paymentMode == 'UPI')
+        && isOptionalString(data, 'paymentReference', 120)
+        && isOptionalString(data, 'paidAt', 40)
+        && isOptionalString(data, 'remarks', 240)
+        && isOptionalBool(data, 'employeeVisible')
+        && isNonEmptyString(data.updatedByEmail, 180)
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    function isValidIncentiveAdjustment(data) {
+      return data.keys().hasAll([
+          'adjustmentId', 'monthKey', 'employeeId', 'authUid', 'employeeName',
+          'branchId', 'branchName', 'type', 'amountPaise', 'reason',
+          'status', 'createdByEmail', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'adjustmentId', 'monthKey', 'employeeId', 'authUid', 'employeeName',
+          'branchId', 'branchName', 'type', 'amountPaise', 'reason',
+          'status', 'createdByEmail', 'createdAt', 'voidedByEmail', 'voidedAt', 'employeeVisible'
+        ])
+        && isValidId(data.adjustmentId)
+        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && isValidId(data.employeeId)
+        && data.authUid is string && data.authUid.size() <= 128
+        && isNonEmptyString(data.employeeName, 120)
+        && isValidId(data.branchId)
+        && isNonEmptyString(data.branchName, 120)
+        && (data.type == 'BONUS' || data.type == 'DEDUCTION' || data.type == 'ADVANCE' || data.type == 'RETURN_ADJUSTMENT')
+        && data.amountPaise is int && data.amountPaise > 0
+        && isNonEmptyString(data.reason, 240)
+        && (data.status == 'ACTIVE' || data.status == 'VOIDED')
+        && isNonEmptyString(data.createdByEmail, 180)
+        && isNonEmptyString(data.createdAt, 40)
+        && isOptionalString(data, 'voidedByEmail', 180)
+        && isOptionalString(data, 'voidedAt', 40)
+        && isOptionalBool(data, 'employeeVisible');
+    }
+
+    function isValidSalesTarget(data) {
+      return data.keys().hasAll([
+          'targetId', 'monthKey', 'scope', 'branchId', 'branchName',
+          'targetSaleAmtPaise', 'targetSaleQty', 'updatedByEmail', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'targetId', 'monthKey', 'scope', 'branchId', 'branchName',
+          'employeeId', 'authUid', 'employeeName',
+          'targetSaleAmtPaise', 'targetSaleQty', 'employeeVisible', 'updatedByEmail', 'updatedAt'
+        ])
+        && isValidId(data.targetId)
+        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && (data.scope == 'BRANCH' || data.scope == 'EMPLOYEE')
+        && isValidId(data.branchId)
+        && isNonEmptyString(data.branchName, 120)
+        && isOptionalString(data, 'employeeId', 64)
+        && isOptionalString(data, 'authUid', 128)
+        && isOptionalString(data, 'employeeName', 120)
+        && data.targetSaleAmtPaise is int && data.targetSaleAmtPaise >= 0
+        && (data.targetSaleQty is int || data.targetSaleQty is float) && data.targetSaleQty >= 0
+        && isOptionalBool(data, 'employeeVisible')
+        && isNonEmptyString(data.updatedByEmail, 180)
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    function isValidEmployeeQuery(data) {
+      return data.keys().hasAll([
+          'queryId', 'monthKey', 'employeeId', 'authUid', 'employeeName',
+          'branchId', 'branchName', 'category', 'subject', 'message',
+          'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'queryId', 'monthKey', 'employeeId', 'authUid', 'employeeName',
+          'branchId', 'branchName', 'category', 'subject', 'message',
+          'status', 'adminReply', 'resolvedByEmail', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.queryId)
+        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && isValidId(data.employeeId)
+        && isValidId(data.authUid)
+        && isNonEmptyString(data.employeeName, 120)
+        && isValidId(data.branchId)
+        && isNonEmptyString(data.branchName, 120)
+        && (
+          data.category == 'SALE_AMOUNT'
+          || data.category == 'SALE_QTY'
+          || data.category == 'INCENTIVE_MISMATCH'
+          || data.category == 'PAYOUT_STATUS'
+          || data.category == 'OTHER'
+        )
+        && isNonEmptyString(data.subject, 120)
+        && isNonEmptyString(data.message, 600)
+        && (data.status == 'OPEN' || data.status == 'IN_REVIEW' || data.status == 'RESOLVED')
+        && isOptionalString(data, 'adminReply', 600)
+        && isOptionalString(data, 'resolvedByEmail', 180)
+        && isNonEmptyString(data.createdAt, 40)
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    function isValidPortalVisibilitySettings(data) {
+      return data.keys().hasAll(['settingId', 'mode', 'visibleMonths', 'updatedByEmail', 'updatedAt'])
+        && data.keys().hasOnly(['settingId', 'mode', 'visibleMonths', 'updatedByEmail', 'updatedAt'])
+        && data.settingId == 'visibility'
+        && (data.mode == 'ALL' || data.mode == 'SELECTED')
+        && data.visibleMonths is list
+        && data.visibleMonths.size() <= 48
+        && (
+          data.visibleMonths.size() == 0
+          || (data.visibleMonths[0] is string && data.visibleMonths[0].size() == 7 && data.visibleMonths[0].matches('^[0-9]{4}-[0-9]{2}$'))
+        )
+        && isNonEmptyString(data.updatedByEmail, 180)
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    // Privacy-Hardened Leaderboard Entry: ONLY Rank, Full Name, Branch Name, Photo, Sale Amount (ZERO incentive fields or peer IDs)
+    function isValidLeaderboardEntry(entry) {
+      return entry is map
+        && entry.keys().hasAll(['rank', 'employeeName', 'branchName', 'saleAmtPaise'])
+        && entry.keys().hasOnly(['rank', 'employeeName', 'branchName', 'photoDataUrl', 'saleAmtPaise'])
+        && entry.rank is int && entry.rank >= 1 && entry.rank <= 3
+        && isNonEmptyString(entry.employeeName, 120)
+        && isNonEmptyString(entry.branchName, 120)
+        && isOptionalString(entry, 'photoDataUrl', 45000)
+        && entry.saleAmtPaise is int && entry.saleAmtPaise >= 0;
+    }
+
+    function isValidDepartmentLeaderboard(data) {
+      return data.keys().hasAll([
+          'leaderboardId', 'monthKey', 'departmentId', 'departmentName',
+          'totalParticipants', 'top3', 'employeeVisible', 'updatedByEmail', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'leaderboardId', 'monthKey', 'departmentId', 'departmentName',
+          'totalParticipants', 'top3', 'employeeVisible', 'updatedByEmail', 'updatedAt'
+        ])
+        && isValidId(data.leaderboardId)
+        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && isValidDepartmentId(data.departmentId)
+        && isNonEmptyString(data.departmentName, 80)
+        && data.totalParticipants is int && data.totalParticipants >= 0
+        && data.top3 is list && data.top3.size() <= 3
+        && (data.top3.size() < 1 || isValidLeaderboardEntry(data.top3[0]))
+        && (data.top3.size() < 2 || isValidLeaderboardEntry(data.top3[1]))
+        && (data.top3.size() < 3 || isValidLeaderboardEntry(data.top3[2]))
+        && data.employeeVisible is bool
+        && isNonEmptyString(data.updatedByEmail, 180)
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    function isValidEmployeeDepartmentRank(data) {
+      return data.keys().hasAll([
+          'rankId', 'monthKey', 'employeeId', 'authUid', 'departmentId', 'departmentName',
+          'rank', 'totalParticipants', 'saleAmtPaise', 'gapToTop3Paise', 'gapToRank1Paise',
+          'employeeVisible', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'rankId', 'monthKey', 'employeeId', 'authUid', 'departmentId', 'departmentName',
+          'rank', 'totalParticipants', 'saleAmtPaise', 'gapToTop3Paise', 'gapToRank1Paise',
+          'employeeVisible', 'updatedAt'
+        ])
+        && isValidId(data.rankId)
+        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && isValidId(data.employeeId)
+        && data.authUid is string && data.authUid.size() <= 128
+        && isValidDepartmentId(data.departmentId)
+        && isNonEmptyString(data.departmentName, 80)
+        && data.rank is int && data.rank >= 0
+        && data.totalParticipants is int && data.totalParticipants >= 0
+        && data.saleAmtPaise is int && data.saleAmtPaise >= 0
+        && data.gapToTop3Paise is int && data.gapToTop3Paise >= 0
+        && data.gapToRank1Paise is int && data.gapToRank1Paise >= 0
+        && data.employeeVisible is bool
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    function isValidSalarySlip(data) {
+      let da = data.get('dearnessAllowancePaise', 0);
+      let att = data.get('attendanceAllowancePaise', 0);
+      let wash = data.get('washingAllowancePaise', 0);
+      let med = data.get('medicalAllowancePaise', 0);
+      let lta = data.get('leaveTravelAllowancePaise', 0);
+      let comm = data.get('communicationExpensesPaise', 0);
+      let adhoc = data.get('adhocAllowancePaise', 0);
+      let trav = data.get('travelingAllowancePaise', 0);
+      let scomm = data.get('salesCommissionPaise', 0);
+      return data.keys().hasOnly([
+          'slipId', 'monthKey', 'employeeId', 'authUid', 'employeeName', 'branchId', 'branchName',
+          'departmentId', 'departmentName', 'designation', 'dateOfJoining',
+          'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
+          'bankName', 'bankAccountMasked', 'bankIfsc',
+          'totalDays', 'paidDays', 'lopDays', 'weeklyOffDays', 'paidLeaveDays', 'overtimeHours',
+          'basicPaise', 'dearnessAllowancePaise', 'hraPaise', 'attendanceAllowancePaise',
+          'washingAllowancePaise', 'conveyancePaise', 'medicalAllowancePaise',
+          'leaveTravelAllowancePaise', 'communicationExpensesPaise', 'adhocAllowancePaise',
+          'travelingAllowancePaise', 'salesCommissionPaise', 'specialAllowancePaise',
+          'overtimePaise', 'incentivePaise', 'otherEarningsPaise', 'grossEarningsPaise',
+          'pfPaise', 'esicPaise', 'ptPaise', 'advanceRecoveryPaise', 'tdsPaise',
+          'otherDeductionPaise', 'totalDeductionsPaise', 'netPayablePaise',
+          'paymentMode', 'paymentReference', 'paymentDate', 'remarks',
+          'employeeVisible', 'uploadedByEmail', 'uploadedAt', 'updatedAt'
+        ])
+        && data.monthKey is string && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && isValidId(data.employeeId)
+        && data.authUid is string && data.authUid.size() <= 128
+        && isNonEmptyString(data.employeeName, 120)
+        && isValidId(data.branchId)
+        && isNonEmptyString(data.branchName, 120)
+        && data.get('departmentId', '') in ['', 'SAREE', 'LADIES_WEAR', 'KIDS_WEAR', 'MENS_WEAR', 'NON_APPARELS']
+        && data.totalDays >= 0 && data.totalDays <= 31
+        && data.paidDays >= 0 && data.paidDays <= 31
+        && data.lopDays >= 0 && data.weeklyOffDays >= 0 && data.paidLeaveDays >= 0 && data.overtimeHours >= 0
+        && data.basicPaise is int && data.basicPaise >= 0
+        && da is int && da >= 0
+        && data.hraPaise is int && data.hraPaise >= 0
+        && att is int && att >= 0
+        && wash is int && wash >= 0
+        && data.conveyancePaise is int && data.conveyancePaise >= 0
+        && med is int && med >= 0
+        && lta is int && lta >= 0
+        && comm is int && comm >= 0
+        && adhoc is int && adhoc >= 0
+        && trav is int && trav >= 0
+        && scomm is int && scomm >= 0
+        && data.specialAllowancePaise is int && data.specialAllowancePaise >= 0
+        && data.overtimePaise is int && data.overtimePaise >= 0
+        && data.incentivePaise is int && data.incentivePaise >= 0
+        && data.otherEarningsPaise is int && data.otherEarningsPaise >= 0
+        && data.grossEarningsPaise is int
+        && data.grossEarningsPaise == (
+          data.basicPaise + da + data.hraPaise + att + wash + data.conveyancePaise
+          + med + lta + comm + adhoc + trav + scomm
+          + data.specialAllowancePaise + data.overtimePaise + data.incentivePaise + data.otherEarningsPaise
+        )
+        && data.pfPaise is int && data.pfPaise >= 0
+        && data.esicPaise is int && data.esicPaise >= 0
+        && data.ptPaise is int && data.ptPaise >= 0
+        && data.advanceRecoveryPaise is int && data.advanceRecoveryPaise >= 0
+        && data.tdsPaise is int && data.tdsPaise >= 0
+        && data.otherDeductionPaise is int && data.otherDeductionPaise >= 0
+        && data.totalDeductionsPaise is int
+        && data.totalDeductionsPaise == (
+          data.pfPaise + data.esicPaise + data.ptPaise + data.advanceRecoveryPaise
+          + data.tdsPaise + data.otherDeductionPaise
+        )
+        && data.netPayablePaise is int
+        && data.netPayablePaise == (data.grossEarningsPaise - data.totalDeductionsPaise)
+        && data.get('paymentMode', '') in ['', 'BANK', 'NEFT', 'CASH', 'UPI', 'CHEQUE']
+        && data.employeeVisible is bool
+        && isNonEmptyString(data.uploadedByEmail, 180)
+        && isNonEmptyString(data.uploadedAt, 40)
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    // Privacy-Isolated 12-Branch Birthday Profile (STRICTLY MM-DD only; ZERO birth year, phone, PAN, bank, or salary fields)
+    function isValidBirthdayProfile(data) {
+      return data.keys().hasAll([
+          'employeeId', 'fullName', 'branchId', 'branchName', 'designation',
+          'birthMonthDay', 'birthMonth', 'birthDay', 'active', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'employeeId', 'fullName', 'branchId', 'branchName',
+          'departmentId', 'departmentName', 'designation', 'photoDataUrl',
+          'birthMonthDay', 'birthMonth', 'birthDay', 'active', 'updatedAt'
+        ])
+        && isValidId(data.employeeId)
+        && isNonEmptyString(data.fullName, 120)
+        && isValidId(data.branchId)
+        && isNonEmptyString(data.branchName, 120)
+        && isOptionalDepartmentId(data, 'departmentId')
+        && isOptionalString(data, 'departmentName', 80)
+        && isNonEmptyString(data.designation, 80)
+        && isOptionalString(data, 'photoDataUrl', 45000)
+        && isValidMonthDay(data.birthMonthDay)
+        && data.birthMonth is int && data.birthMonth >= 1 && data.birthMonth <= 12
+        && data.birthDay is int && data.birthDay >= 1 && data.birthDay <= 31
+        && data.active is bool
+        && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    // Immutable Cross-Branch Birthday Wish (1 wish per sender per recipient per year)
+    function isValidBirthdayWish(data) {
+      return data.keys().hasAll([
+          'wishId', 'celebrationYear', 'birthMonthDay',
+          'recipientEmployeeId', 'recipientName', 'recipientBranchName',
+          'senderEmployeeId', 'senderAuthUid', 'senderName', 'senderBranchName',
+          'senderRole', 'message', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'wishId', 'celebrationYear', 'birthMonthDay',
+          'recipientEmployeeId', 'recipientName', 'recipientBranchName',
+          'senderEmployeeId', 'senderAuthUid', 'senderName', 'senderBranchName',
+          'senderRole', 'message', 'createdAt'
+        ])
+        && isValidId(data.wishId)
+        && data.celebrationYear is int && data.celebrationYear >= 2024 && data.celebrationYear <= 2100
+        && isValidMonthDay(data.birthMonthDay)
+        && isValidId(data.recipientEmployeeId)
+        && isNonEmptyString(data.recipientName, 120)
+        && isNonEmptyString(data.recipientBranchName, 120)
+        && isValidId(data.senderEmployeeId)
+        && isValidId(data.senderAuthUid)
+        && isNonEmptyString(data.senderName, 120)
+        && isNonEmptyString(data.senderBranchName, 120)
+        && (data.senderRole == 'EMPLOYEE' || data.senderRole == 'SUPER_ADMIN')
+        && data.message is string && data.message.size() >= 2 && data.message.size() <= 240
+        && isNonEmptyString(data.createdAt, 40);
+    }
+
+    // Pillar 7 helper: Enforce active_auth_uids matches employee.status atomically when authUid is set
+    function isActiveRegistrySyncedAfter(empData) {
+      return !('authUid' in empData)
+        || empData.authUid == ''
+        || (
+          empData.status == 'ACTIVE'
+          && existsAfter(/databases/$(database)/documents/active_auth_uids/$(empData.authUid))
+          && getAfter(/databases/$(database)/documents/active_auth_uids/$(empData.authUid)).data.active == true
+        )
+        || (
+          empData.status == 'INACTIVE'
+          && !existsAfter(/databases/$(database)/documents/active_auth_uids/$(empData.authUid))
+        );
+    }
+
+    // Pillar 7 helper: Ensure rotated/removed previous authUid cannot remain orphaned in active_auth_uids
+    function isPriorAuthUidCleanedUp(oldData, newData) {
+      return !('authUid' in oldData)
+        || oldData.authUid == ''
+        || (('authUid' in newData) && newData.authUid == oldData.authUid)
+        || !existsAfter(/databases/$(database)/documents/active_auth_uids/$(oldData.authUid));
+    }
+
+    // 1. Admins registry (Super Admin writes; verified user may get own doc for consistent auth check)
+    match /admins/{adminUid} {
+      allow get: if isValidId(adminUid) && (
+        isSuperAdmin()
+        || (isSignedIn() && request.auth.token.email_verified == true && request.auth.uid == adminUid)
+      );
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(adminUid) && isSuperAdmin() && isValidAdminUser(incoming()) && incoming().uid == adminUid;
+      allow update: if isValidId(adminUid) && isSuperAdmin() && isValidAdminUser(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'role', 'branchId', 'active']);
+      allow delete: if isValidId(adminUid) && isSuperAdmin();
+    }
+
+    // 1b. Active Employee Auth UID Registry (Issue 1: Instant Firestore access revocation & department binding)
+    match /active_auth_uids/{authUid} {
+      allow get: if isValidId(authUid) && (
+        isSuperAdmin() || (isSignedIn() && request.auth.uid == authUid)
+      );
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(authUid) && isSignedIn() && isValidActiveAuthUid(incoming())
+        && incoming().authUid == authUid
+        && (
+          isSuperAdmin()
+          || (
+            request.auth.uid == authUid
+            && request.auth.token.email_verified == true
+            && getAfter(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.authUid == request.auth.uid
+            && getAfter(/databases/$(database)/documents/employees/$(incoming().employeeId)).data.status == 'ACTIVE'
+          )
+        );
+      allow update: if isValidId(authUid) && isSuperAdmin() && isValidActiveAuthUid(incoming())
+        && incoming().authUid == existing().authUid
+        && incoming().diff(existing()).affectedKeys().hasOnly(['employeeId', 'departmentId', 'active', 'updatedAt']);
+      allow delete: if isValidId(authUid) && isSuperAdmin();
+    }
+
+    // 2. Branch Master (Super Admin only)
+    match /branches/{branchId} {
+      allow get: if isValidId(branchId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(branchId) && isSuperAdmin() && isValidBranch(incoming()) && incoming().branchId == branchId;
+      allow update: if isValidId(branchId) && isSuperAdmin() && isValidBranch(incoming())
+        && incoming().branchId == existing().branchId
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['branchCode', 'branchName', 'city', 'managerName', 'active', 'updatedAt']);
+      allow delete: if isValidId(branchId) && isSuperAdmin();
+    }
+
+    // 3. Employee Master (PII Isolated; Active/Inactive status strictly SUPER ADMIN ONLY; Pillar 7 active_auth_uids sync)
+    match /employees/{employeeId} {
+      allow get: if isValidId(employeeId) && (
+        isSuperAdmin()
+        || (isSignedIn() && existing().authUid == request.auth.uid)
+        || (isSignedIn() && request.auth.token.email_verified == true && 'linkedGoogleEmail' in existing() && existing().linkedGoogleEmail != '' && existing().linkedGoogleEmail == request.auth.token.email)
+      );
+      allow list: if isSuperAdmin()
+        || (isSignedIn() && resource.data.authUid == request.auth.uid)
+        || (isSignedIn() && request.auth.token.email_verified == true && resource.data.linkedGoogleEmail == request.auth.token.email);
+      allow create: if isValidId(employeeId) && isSuperAdmin() && isValidEmployee(incoming())
+        && incoming().employeeId == employeeId
+        && isActiveRegistrySyncedAfter(incoming());
+      allow update: if isValidId(employeeId) && isSignedIn() && isValidEmployee(incoming())
+        && incoming().employeeId == existing().employeeId
+        && incoming().createdAt == existing().createdAt
+        && (
+          // Tier 1: Super Admin full governed update + atomic active_auth_uids sync
+          (
+            isSuperAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'loginId', 'authEmail', 'linkedGoogleEmail', 'authUid', 'fullName',
+              'branchId', 'branchName', 'departmentId', 'departmentName', 'photoDataUrl',
+              'designation', 'dateOfBirth', 'dateOfJoining', 'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
+              'bankName', 'bankAccountMasked', 'bankIfsc',
+              'phone', 'address', 'emergencyContact',
+              'role', 'status', 'mustChangePassword', 'credentialsProvisioned', 'updatedAt'
+            ])
+            && isActiveRegistrySyncedAfter(incoming())
+            && isPriorAuthUidCleanedUp(existing(), incoming())
+          )
+          // Tier 2a: Active employee updating own permitted profile contact fields
+          || (
+            isActiveEmployee()
+            && existing().authUid == request.auth.uid
+            && existing().status == 'ACTIVE'
+            && incoming().authUid == existing().authUid
+            && incoming().loginId == existing().loginId
+            && incoming().authEmail == existing().authEmail
+            && incoming().branchId == existing().branchId
+            && incoming().branchName == existing().branchName
+            && incoming().role == existing().role
+            && incoming().status == existing().status
+            && incoming().diff(existing()).affectedKeys().hasOnly(['phone', 'address', 'emergencyContact', 'mustChangePassword', 'updatedAt'])
+          )
+          // Tier 2b: One-time verified Google self-claim of empty authUid for ACTIVE employee (Issue 6)
+          || (
+            request.auth.token.email_verified == true
+            && existing().status == 'ACTIVE'
+            && 'linkedGoogleEmail' in existing()
+            && existing().linkedGoogleEmail != ''
+            && existing().linkedGoogleEmail == request.auth.token.email
+            && (!('authUid' in existing()) || existing().authUid == '')
+            && incoming().authUid == request.auth.uid
+            && incoming().status == 'ACTIVE'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'updatedAt'])
+            && isActiveRegistrySyncedAfter(incoming())
+          )
+        );
+      allow delete: if false;
+    }
+
+    // 4. Staged & Published Excel Import Batches (SUPER ADMIN ONLY — Zero Employee Access; Audited Edit & Delete)
+    match /import_batches/{batchId} {
+      allow get: if isValidId(batchId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(batchId) && isSuperAdmin() && isValidImportBatch(incoming()) && incoming().batchId == batchId;
+      allow update: if isValidId(batchId) && isSuperAdmin() && isValidImportBatch(incoming())
+        && incoming().batchId == existing().batchId
+        && incoming().fileSha256 == existing().fileSha256
+        && incoming().createdAt == existing().createdAt
+        && (
+          // Action A: Non-terminal batch lifecycle transitions and staged edits
+          (
+            existing().status != 'PUBLISHED'
+            && existing().status != 'REJECTED'
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'fileName', 'importType', 'periodStart', 'periodEnd', 'businessDate',
+              'status', 'overlapResolutionMode', 'totalRows', 'validRows', 'errorRows', 'duplicateRows',
+              'correctionRows', 'overlapRows', 'supersededRows', 'branchTransferRows',
+              'totalIncentivePaise', 'totalSaleAmtPaise', 'totalSaleQty',
+              'approvedByEmail', 'publishedByEmail',
+              'publishLockId', 'publishStartedAt', 'publishAttemptCount', 'lastPublishError',
+              'rejectionReason', 'correctionNote', 'updatedAt'
+            ])
+          )
+          // Action B: Audited post-publish batch metadata & recomputed totals update (status locked to PUBLISHED)
+          || (
+            existing().status == 'PUBLISHED'
+            && incoming().status == 'PUBLISHED'
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'fileName', 'totalRows', 'validRows', 'correctionRows',
+              'totalIncentivePaise', 'totalSaleAmtPaise', 'totalSaleQty',
+              'correctionNote', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(batchId) && isSuperAdmin();
+    }
+
+    // 5. Staged & Published Excel Import Rows (SUPER ADMIN ONLY — Zero Employee Access)
+    match /import_batch_rows/{rowId} {
+      allow get: if isValidId(rowId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(rowId) && isSuperAdmin() && isValidImportBatchRow(incoming()) && incoming().rowId == rowId;
+      allow update: if isValidId(rowId) && isSuperAdmin() && isValidImportBatchRow(incoming())
+        && incoming().rowId == existing().rowId
+        && incoming().batchId == existing().batchId
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'importType', 'periodStart', 'periodEnd', 'businessDate',
+          'employeeName', 'branchId', 'branchName',
+          'component1Paise', 'component2Paise', 'component3Paise', 'totalPaise',
+          'saleAmt1Paise', 'saleQty1', 'saleAmt2Paise', 'saleQty2', 'saleAmt3Paise', 'saleQty3',
+          'totalSaleAmtPaise', 'totalSaleQty',
+          'validationStatus', 'resolution', 'correctionReason', 'conflictingRecordIds', 'errorMessage'
+        ]);
+      allow delete: if isValidId(rowId) && isSuperAdmin();
+    }
+
+    // 6. Published Incentives (ACTIVE Employee Only + Own Auth UID + PUBLISHED + Visible Month)
+    match /published_incentives/{recordId} {
+      allow get: if isValidId(recordId) && (
+        isSuperAdmin()
+        || (isActiveEmployee() && existing().authUid == request.auth.uid && existing().status == 'PUBLISHED' && isEmployeeVisibleDoc(existing()))
+      );
+      allow list: if isSuperAdmin()
+        || (isActiveEmployee() && resource.data.authUid == request.auth.uid && resource.data.status == 'PUBLISHED' && isEmployeeVisibleDoc(resource.data));
+      allow create: if isValidId(recordId) && isSuperAdmin() && isValidPublishedIncentive(incoming())
+        && incoming().recordId == recordId
+        && incoming().status == 'PUBLISHED';
+      allow update: if isValidId(recordId) && isSuperAdmin() && isValidPublishedIncentive(incoming())
+        && incoming().recordId == existing().recordId
+        && incoming().businessDate == existing().businessDate
+        && incoming().employeeId == existing().employeeId
+        && incoming().version >= existing().version
+        && (!('importType' in existing()) || incoming().importType == existing().importType)
+        && (!('periodStart' in existing()) || incoming().periodStart == existing().periodStart)
+        && (!('periodEnd' in existing()) || incoming().periodEnd == existing().periodEnd)
+        && (
+          // Active record correction, authUid backfill, visibility toggle, or soft-superseding during overlap reconciliation
+          (
+            existing().status == 'PUBLISHED'
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'authUid', 'employeeName', 'branchId', 'branchName',
+              'component1Label', 'component2Label', 'component3Label',
+              'component1Paise', 'component2Paise', 'component3Paise', 'totalPaise',
+              'saleAmt1Paise', 'saleQty1', 'saleAmt2Paise', 'saleQty2', 'saleAmt3Paise', 'saleQty3',
+              'totalSaleAmtPaise', 'totalSaleQty',
+              'status', 'version', 'batchId', 'correctionReason',
+              'supersededByBatchId', 'supersededByRecordId', 'supersededAt', 'supersededReason',
+              'employeeVisible', 'publishedAt', 'publishedByEmail'
+            ])
+          )
+          // Already SUPERSEDED record: allow ONLY authUid backfill or visibility stamp
+          || (
+            existing().status == 'SUPERSEDED'
+            && incoming().status == 'SUPERSEDED'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'employeeVisible'])
+          )
+        );
+      allow delete: if isValidId(recordId) && isSuperAdmin();
+    }
+
+    // 7. Immutable Correction Version History (SUPER ADMIN ONLY — Append-Only)
+    match /incentive_versions/{versionId} {
+      allow get: if isValidId(versionId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(versionId) && isSuperAdmin() && isValidIncentiveVersion(incoming()) && incoming().versionId == versionId;
+      allow update, delete: if false;
+    }
+
+    // 8. Pre-Aggregated Monthly Summaries (Super Admin OR Active Employee Own Auth UID + Visible Month)
+    match /monthly_summaries/{summaryId} {
+      allow get: if isValidId(summaryId) && (
+        isSuperAdmin() || (isActiveEmployee() && existing().authUid == request.auth.uid && isEmployeeVisibleDoc(existing()))
+      );
+      allow list: if isSuperAdmin() || (isActiveEmployee() && resource.data.authUid == request.auth.uid && isEmployeeVisibleDoc(resource.data));
+      allow create: if isValidId(summaryId) && isSuperAdmin() && isValidMonthlySummary(incoming()) && incoming().summaryId == summaryId;
+      allow update: if isValidId(summaryId) && isSuperAdmin() && isValidMonthlySummary(incoming())
+        && incoming().summaryId == existing().summaryId
+        && incoming().employeeId == existing().employeeId
+        && incoming().monthKey == existing().monthKey
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'authUid', 'employeeName', 'branchId', 'branchName', 'sourceType',
+          'component1TotalPaise', 'component2TotalPaise', 'component3TotalPaise',
+          'grandTotalPaise',
+          'saleAmt1TotalPaise', 'saleQty1Total', 'saleAmt2TotalPaise', 'saleQty2Total',
+          'saleAmt3TotalPaise', 'saleQty3Total', 'totalSaleAmtPaise', 'totalSaleQty',
+          'publishedDaysCount', 'employeeVisible', 'updatedAt'
+        ]);
+      allow delete: if isValidId(summaryId) && isSuperAdmin();
+    }
+
+    // 9. Append-Only Audit Logs (SUPER ADMIN ONLY — Never deletable)
+    match /audit_logs/{logId} {
+      allow get: if isValidId(logId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(logId) && isSuperAdmin() && isValidAuditLog(incoming()) && incoming().logId == logId;
+      allow update, delete: if false;
+    }
+
+    // 10. Employee Publish Notifications (Active Employee Own Auth UID Only; Super Admin backfill & rollback cleanup)
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && (
+        isSuperAdmin() || (isActiveEmployee() && existing().authUid == request.auth.uid)
+      );
+      allow list: if isSuperAdmin() || (isActiveEmployee() && resource.data.authUid == request.auth.uid);
+      allow create: if isValidId(notificationId) && isSuperAdmin() && isValidNotification(incoming()) && incoming().notificationId == notificationId;
+      allow update: if isValidId(notificationId) && isSignedIn() && isValidNotification(incoming())
+        && incoming().notificationId == existing().notificationId
+        && incoming().employeeId == existing().employeeId
+        && incoming().createdAt == existing().createdAt
+        && (
+          (isSuperAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'read', 'readAt']))
+          || (
+            isActiveEmployee()
+            && existing().authUid == request.auth.uid
+            && incoming().authUid == existing().authUid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['read', 'readAt'])
+          )
+        );
+      allow delete: if isValidId(notificationId) && isSuperAdmin();
+    }
+
+    // 11. Monthly Payout Settlement Records (Super Admin writes; Active Employee reads own + visible month)
+    match /payout_records/{payoutId} {
+      allow get: if isValidId(payoutId) && (
+        isSuperAdmin()
+        || (isActiveEmployee() && isEmployeeVisibleDoc(existing()) && (existing().authUid == request.auth.uid || existing().employeeId == activeEmployeeId()))
+      );
+      allow list: if isSuperAdmin()
+        || (isActiveEmployee() && isEmployeeVisibleDoc(resource.data) && (resource.data.authUid == request.auth.uid || resource.data.employeeId == activeEmployeeId()));
+      allow create: if isValidId(payoutId) && isSuperAdmin() && isValidPayoutRecord(incoming()) && incoming().payoutId == payoutId;
+      allow update: if isValidId(payoutId) && isSuperAdmin() && isValidPayoutRecord(incoming())
+        && incoming().payoutId == existing().payoutId
+        && incoming().employeeId == existing().employeeId
+        && incoming().monthKey == existing().monthKey
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'authUid', 'employeeName', 'branchId', 'branchName',
+          'grossIncentivePaise', 'adjustmentsNetPaise', 'netPayablePaise',
+          'status', 'paymentMode', 'paymentReference', 'paidAt', 'remarks',
+          'employeeVisible', 'updatedByEmail', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // 12. Audited Bonus / Deduction / Advance Adjustments (Super Admin writes; Active Employee reads own ACTIVE + visible month)
+    match /incentive_adjustments/{adjustmentId} {
+      allow get: if isValidId(adjustmentId) && (
+        isSuperAdmin()
+        || (isActiveEmployee() && existing().status == 'ACTIVE' && isEmployeeVisibleDoc(existing()) && (existing().authUid == request.auth.uid || existing().employeeId == activeEmployeeId()))
+      );
+      allow list: if isSuperAdmin()
+        || (isActiveEmployee() && resource.data.status == 'ACTIVE' && isEmployeeVisibleDoc(resource.data) && (resource.data.authUid == request.auth.uid || resource.data.employeeId == activeEmployeeId()));
+      allow create: if isValidId(adjustmentId) && isSuperAdmin() && isValidIncentiveAdjustment(incoming())
+        && incoming().adjustmentId == adjustmentId
+        && incoming().status == 'ACTIVE';
+      allow update: if isValidId(adjustmentId) && isSuperAdmin() && isValidIncentiveAdjustment(incoming())
+        && incoming().adjustmentId == existing().adjustmentId
+        && incoming().employeeId == existing().employeeId
+        && incoming().monthKey == existing().monthKey
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'status', 'voidedByEmail', 'voidedAt', 'employeeVisible']);
+      allow delete: if false;
+    }
+
+    // 13. Monthly Sales Targets (Super Admin writes; Active Employee reads own/branch + visible month)
+    match /sales_targets/{targetId} {
+      allow get: if isValidId(targetId) && (
+        isSuperAdmin()
+        || (isActiveEmployee() && isEmployeeVisibleDoc(existing()) && (existing().scope == 'BRANCH' || existing().authUid == request.auth.uid || existing().employeeId == activeEmployeeId()))
+      );
+      allow list: if isSuperAdmin()
+        || (isActiveEmployee() && isEmployeeVisibleDoc(resource.data) && (resource.data.scope == 'BRANCH' || resource.data.authUid == request.auth.uid || resource.data.employeeId == activeEmployeeId()));
+      allow create: if isValidId(targetId) && isSuperAdmin() && isValidSalesTarget(incoming()) && incoming().targetId == targetId;
+      allow update: if isValidId(targetId) && isSuperAdmin() && isValidSalesTarget(incoming())
+        && incoming().targetId == existing().targetId
+        && incoming().monthKey == existing().monthKey
+        && incoming().scope == existing().scope
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'branchId', 'branchName', 'employeeId', 'authUid', 'employeeName',
+          'targetSaleAmtPaise', 'targetSaleQty', 'employeeVisible', 'updatedByEmail', 'updatedAt'
+        ]);
+      allow delete: if isValidId(targetId) && isSuperAdmin();
+    }
+
+    // 14. Employee Query / Dispute Tickets (Active Employee creates & reads own; Super Admin resolves)
+    match /employee_queries/{queryId} {
+      allow get: if isValidId(queryId) && (
+        isSuperAdmin() || (isActiveEmployee() && existing().authUid == request.auth.uid)
+      );
+      allow list: if isSuperAdmin() || (isActiveEmployee() && resource.data.authUid == request.auth.uid);
+      allow create: if isValidId(queryId) && isActiveEmployee() && isValidEmployeeQuery(incoming())
+        && incoming().queryId == queryId
+        && incoming().authUid == request.auth.uid
+        && incoming().status == 'OPEN'
+        && !('adminReply' in incoming())
+        && !('resolvedByEmail' in incoming());
+      allow update: if isValidId(queryId) && isSuperAdmin() && isValidEmployeeQuery(incoming())
+        && incoming().queryId == existing().queryId
+        && incoming().employeeId == existing().employeeId
+        && incoming().authUid == existing().authUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminReply', 'resolvedByEmail', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // 15. Portal Visibility Settings (Super Admin writes; Active Employees read visibility doc directly)
+    match /portal_settings/{settingId} {
+      allow get: if settingId == 'visibility' && (isSuperAdmin() || isActiveEmployee());
+      allow list: if isSuperAdmin();
+      allow create: if settingId == 'visibility' && isSuperAdmin() && isValidPortalVisibilitySettings(incoming());
+      allow update: if settingId == 'visibility' && isSuperAdmin() && isValidPortalVisibilitySettings(incoming())
+        && incoming().settingId == existing().settingId
+        && incoming().diff(existing()).affectedKeys().hasOnly(['mode', 'visibleMonths', 'updatedByEmail', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // 16. Cross-Branch Department Top-3 Sales Leaderboards (Privacy-Hardened: Active Employee reads OWN Dept + Visible Month ONLY; zero list)
+    match /department_leaderboards/{leaderboardId} {
+      allow get: if isValidId(leaderboardId) && (
+        isSuperAdmin()
+        || (
+          isActiveEmployee()
+          && hasActiveEmployeeDepartment()
+          && (
+            (
+              resource == null
+              && leaderboardId.matches('^[0-9]{4}-[0-9]{2}__' + activeEmployeeDepartmentId() + '$')
+            )
+            || (
+              resource != null
+              && existing().employeeVisible == true
+              && isEmployeeVisibleDoc(existing())
+              && existing().departmentId == activeEmployeeDepartmentId()
+            )
+          )
+        )
+      );
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(leaderboardId) && isSuperAdmin() && isValidDepartmentLeaderboard(incoming())
+        && incoming().leaderboardId == leaderboardId;
+      allow update: if isValidId(leaderboardId) && isSuperAdmin() && isValidDepartmentLeaderboard(incoming())
+        && incoming().leaderboardId == existing().leaderboardId
+        && incoming().monthKey == existing().monthKey
+        && incoming().departmentId == existing().departmentId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'departmentName', 'totalParticipants', 'top3', 'employeeVisible', 'updatedByEmail', 'updatedAt'
+        ]);
+      allow delete: if isValidId(leaderboardId) && isSuperAdmin();
+    }
+
+    // 17. Private Employee Department Ranks (Active Employee reads OWN rank doc + Visible Month ONLY; zero list)
+    match /employee_department_ranks/{rankId} {
+      allow get: if isValidId(rankId) && (
+        isSuperAdmin()
+        || (
+          isActiveEmployee()
+          && (
+            (
+              resource == null
+              && rankId.matches('^[0-9]{4}-[0-9]{2}__' + activeEmployeeId() + '$')
+            )
+            || (
+              resource != null
+              && existing().employeeVisible == true
+              && isEmployeeVisibleDoc(existing())
+              && (existing().authUid == request.auth.uid || existing().employeeId == activeEmployeeId())
+            )
+          )
+        )
+      );
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(rankId) && isSuperAdmin() && isValidEmployeeDepartmentRank(incoming())
+        && incoming().rankId == rankId;
+      allow update: if isValidId(rankId) && isSuperAdmin() && isValidEmployeeDepartmentRank(incoming())
+        && incoming().rankId == existing().rankId
+        && incoming().monthKey == existing().monthKey
+        && incoming().employeeId == existing().employeeId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'authUid', 'departmentId', 'departmentName', 'rank', 'totalParticipants',
+          'saleAmtPaise', 'gapToTop3Paise', 'gapToRank1Paise', 'employeeVisible', 'updatedAt'
+        ]);
+      allow delete: if isValidId(rankId) && isSuperAdmin();
+    }
+
+    // 18. Private Monthly Employee Salary Slips (Super Admin writes; Active Employee reads STRICTLY own visible slips)
+    match /salary_slips/{slipId} {
+      allow get: if isValidId(slipId) && (
+        isSuperAdmin()
+        || (isActiveEmployee() && isEmployeeVisibleDoc(existing()) && (existing().authUid == request.auth.uid || existing().employeeId == activeEmployeeId()))
+      );
+      allow list: if isSuperAdmin()
+        || (isActiveEmployee() && isEmployeeVisibleDoc(resource.data) && (resource.data.authUid == request.auth.uid || resource.data.employeeId == activeEmployeeId()));
+      allow create: if isValidId(slipId) && isSuperAdmin() && isValidSalarySlip(incoming()) && incoming().slipId == slipId;
+      allow update: if isValidId(slipId) && isSuperAdmin() && isValidSalarySlip(incoming())
+        && incoming().slipId == existing().slipId
+        && incoming().monthKey == existing().monthKey
+        && incoming().employeeId == existing().employeeId
+        && incoming().uploadedAt == existing().uploadedAt;
+      allow delete: if isValidId(slipId) && isSuperAdmin();
+    }
+
+    // 19. Privacy-Isolated 12-Branch Birthday Directory (Super Admin writes; Active Employees read active celebration profiles with ZERO PII)
+    match /birthday_profiles/{employeeId} {
+      allow get: if isValidId(employeeId) && (
+        isSuperAdmin()
+        || (isActiveEmployee() && existing().active == true)
+      );
+      allow list: if isSuperAdmin()
+        || (isActiveEmployee() && resource.data.active == true);
+      allow create: if isValidId(employeeId) && isSuperAdmin() && isValidBirthdayProfile(incoming())
+        && incoming().employeeId == employeeId;
+      allow update: if isValidId(employeeId) && isSuperAdmin() && isValidBirthdayProfile(incoming())
+        && incoming().employeeId == existing().employeeId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'fullName', 'branchId', 'branchName', 'departmentId', 'departmentName',
+          'designation', 'photoDataUrl', 'birthMonthDay', 'birthMonth', 'birthDay',
+          'active', 'updatedAt'
+        ]);
+      allow delete: if isValidId(employeeId) && isSuperAdmin();
+    }
+
+    // 20. Cross-Branch Birthday Wishes (Immutable; 1 wish per sender per recipient per year; Active Employees read wishes received OR sent by self)
+    match /birthday_wishes/{wishId} {
+      allow get: if isValidId(wishId) && (
+        isSuperAdmin()
+        || (isActiveEmployee() && (existing().recipientEmployeeId == activeEmployeeId() || existing().senderAuthUid == request.auth.uid))
+      );
+      allow list: if isSuperAdmin()
+        || (isActiveEmployee() && (resource.data.recipientEmployeeId == activeEmployeeId() || resource.data.senderAuthUid == request.auth.uid));
+      allow create: if isValidId(wishId)
+        && isSignedIn()
+        && isValidBirthdayWish(incoming())
+        && incoming().wishId == wishId
+        && incoming().senderAuthUid == request.auth.uid
+        && exists(/databases/$(database)/documents/birthday_profiles/$(incoming().recipientEmployeeId))
+        && get(/databases/$(database)/documents/birthday_profiles/$(incoming().recipientEmployeeId)).data.active == true
+        && get(/databases/$(database)/documents/birthday_profiles/$(incoming().recipientEmployeeId)).data.birthMonthDay == incoming().birthMonthDay
+        && (
+          (
+            isSuperAdmin()
+            && incoming().senderRole == 'SUPER_ADMIN'
+          )
+          || (
+            isActiveEmployee()
+            && incoming().senderRole == 'EMPLOYEE'
+            && incoming().senderEmployeeId == activeEmployeeId()
+            && incoming().recipientEmployeeId != activeEmployeeId()
+            && wishId == (string(incoming().celebrationYear) + '__' + incoming().recipientEmployeeId + '__' + activeEmployeeId())
+          )
+        );
+      allow update: if false;
+      allow delete: if isValidId(wishId) && isSuperAdmin();
+    }
+  }
+}

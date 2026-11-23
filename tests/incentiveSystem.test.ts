@@ -1946,9 +1946,9 @@ test('31. firestore.rules supports Super Admin audited batch edit/update/delete 
 });
 
 // =========================================================================
-// TEST 32: Complete 19-Collection Backup Manifest & Domain Hygiene Invariants
+// TEST 32: Complete 21-Collection Backup Manifest & Domain Hygiene Invariants
 // =========================================================================
-test('32. BACKUP_COLLECTION_NAMES covers all 19 Firestore collections and operationsService uses houseofmuktai.co.in fallback', () => {
+test('32. BACKUP_COLLECTION_NAMES covers all 21 Firestore collections and operationsService uses houseofmuktai.co.in fallback', () => {
   const serviceText = fs.readFileSync(
     path.resolve(process.cwd(), 'src/services/incentiveService.ts'),
     'utf-8',
@@ -1958,7 +1958,7 @@ test('32. BACKUP_COLLECTION_NAMES covers all 19 Firestore collections and operat
   );
   assert.ok(backupArrayMatch, 'BACKUP_COLLECTION_NAMES export must exist');
 
-  const expected19Collections = [
+  const expected21Collections = [
     'admins',
     'active_auth_uids',
     'branches',
@@ -1978,16 +1978,18 @@ test('32. BACKUP_COLLECTION_NAMES covers all 19 Firestore collections and operat
     'department_leaderboards',
     'employee_department_ranks',
     'salary_slips',
+    'birthday_profiles',
+    'birthday_wishes',
   ];
 
-  for (const col of expected19Collections) {
+  for (const col of expected21Collections) {
     assert.ok(
       backupArrayMatch[1].includes(`'${col}'`),
       `BACKUP_COLLECTION_NAMES must include '${col}'`,
     );
   }
   const quotedItems = backupArrayMatch[1].match(/'[^']+'/g) || [];
-  assert.equal(quotedItems.length, 19, 'BACKUP_COLLECTION_NAMES must contain all 19 collections');
+  assert.equal(quotedItems.length, 21, 'BACKUP_COLLECTION_NAMES must contain all 21 collections');
 
   const opsText = fs.readFileSync(
     path.resolve(process.cwd(), 'src/services/operationsService.ts'),
@@ -2738,6 +2740,470 @@ test('45. Department Leaderboard computes ₹1 gapToTop3Paise when fewer than 3 
   );
   assert.equal(rankZero.gapToRank1Paise, 5_000_000);
 });
+
+// =========================================================================
+// TEST 46: Birthday Engine IST Matching, Feb 29 Leap Fallback & Dec→Jan Year Wrap
+// =========================================================================
+test('46. Birthday Engine parses DOBs, handles Feb 29 leap-year fallback on Feb 28, and wraps Dec→Jan upcoming window accurately', async () => {
+  const {
+    parseDobToIso,
+    extractMonthDayFromDob,
+    isBirthdayToday,
+    daysUntilNextBirthday,
+  } = await import('../src/lib/birthdayEngine.ts');
+
+  assert.equal(parseDobToIso('1994-05-18'), '1994-05-18');
+  assert.equal(parseDobToIso('18-05-1994'), '1994-05-18');
+  assert.equal(parseDobToIso('05/11/1998'), '1998-11-05');
+  assert.equal(parseDobToIso('2025-01-01'), ''); // Out of 1940–2015 employee bounds
+  assert.equal(parseDobToIso('31-02-1995'), ''); // Invalid calendar date
+
+  const md = extractMonthDayFromDob('1994-05-18');
+  assert.deepEqual(md, { birthMonthDay: '05-18', birthMonth: 5, birthDay: 18 });
+
+  // Non-leap year (2026-02-28 IST): Feb 29 birthday celebrates on Feb 28
+  const feb28NonLeap = new Date('2026-02-28T06:00:00.000Z'); // 11:30 IST on 2026-02-28
+  assert.equal(isBirthdayToday('1996-02-29', feb28NonLeap), true);
+  assert.equal(daysUntilNextBirthday('02-29', feb28NonLeap), 0);
+
+  // Dec 29 IST -> Jan 2 birthday is 4 days away across year boundary
+  const dec29 = new Date('2026-12-29T06:00:00.000Z'); // 11:30 IST on 2026-12-29
+  assert.equal(daysUntilNextBirthday('01-02', dec29), 4);
+  assert.equal(daysUntilNextBirthday('12-29', dec29), 0);
+});
+
+// =========================================================================
+// TEST 47: Privacy-Isolated Birthday Profile Builder & Deterministic Wish IDs
+// =========================================================================
+test('47. buildBirthdayProfileFromEmployee strips all sensitive PII and excludes INACTIVE staff; wish IDs are deterministic', async () => {
+  const {
+    buildBirthdayProfileFromEmployee,
+    buildDeterministicWishId,
+  } = await import('../src/lib/birthdayEngine.ts');
+
+  const sensitiveActiveEmp: Employee = {
+    ...EMPLOYEES[0],
+    status: 'ACTIVE',
+    dateOfBirth: '1993-08-15',
+    phone: '9876543210',
+    panNumber: 'ABCDE1234F',
+    bankAccountMasked: 'XXXX5678',
+  };
+
+  const profile = buildBirthdayProfileFromEmployee(sensitiveActiveEmp);
+  assert.ok(profile, 'Active employee with DOB must produce a BirthdayProfile');
+  assert.equal(profile.birthMonthDay, '08-15');
+  assert.equal(profile.birthMonth, 8);
+  assert.equal(profile.birthDay, 15);
+  assert.equal(profile.active, true);
+
+  // Zero PII leakage check
+  const keys = Object.keys(profile);
+  assert.equal(keys.includes('dateOfBirth'), false);
+  assert.equal(keys.includes('phone'), false);
+  assert.equal(keys.includes('panNumber'), false);
+  assert.equal(keys.includes('bankAccountMasked'), false);
+  assert.equal(keys.includes('authEmail'), false);
+
+  // INACTIVE employee MUST NOT appear in birthday_profiles
+  const inactiveEmp: Employee = { ...sensitiveActiveEmp, status: 'INACTIVE' };
+  assert.equal(buildBirthdayProfileFromEmployee(inactiveEmp), null);
+
+  // Deterministic 1-wish-per-sender-per-year ID
+  assert.equal(buildDeterministicWishId(2026, '459', '355'), '2026__459__355');
+});
+
+// =========================================================================
+// TEST 48: Bulk DOB CSV Parser Validation (DD-MM-YYYY, YYYY-MM-DD, Unknown ID, Invalid Date)
+// =========================================================================
+test('48. parseBulkDobCsvText validates DD-MM-YYYY & ISO DOBs, skips blank rows, and flags invalid dates & unknown Employee IDs', async () => {
+  const { parseBulkDobCsvText } = await import('../src/lib/birthdayEngine.ts');
+
+  const csv = [
+    'Employee ID,Employee Name,Branch,Date of Birth (YYYY-MM-DD)',
+    '459,Anita Popat Shingade,BARAMATI MIDC,15-08-1993',
+    '355,Ramesh Tukaram Kale,BEED,1991-11-23',
+    '2432,Inactive Staff,BARAMATI MIDC,', // Blank DOB -> skipped cleanly
+    '99999,Ghost Employee,PUNE,1995-04-12', // Unknown ID -> ERROR
+    '459,Anita Popat Shingade,BARAMATI MIDC,31-02-1993', // Invalid calendar date -> ERROR
+  ].join('\n');
+
+  const rows = parseBulkDobCsvText(csv, EMPLOYEES);
+  const valid = rows.filter((r) => r.status === 'VALID');
+  const errors = rows.filter((r) => r.status === 'ERROR');
+
+  assert.equal(valid.length, 2);
+  assert.equal(valid[0].employeeId, '459');
+  assert.equal(valid[0].normalizedDob, '1993-08-15');
+  assert.equal(valid[1].employeeId, '355');
+  assert.equal(valid[1].normalizedDob, '1991-11-23');
+
+  assert.equal(errors.length, 2);
+  assert.match(errors[0].errorMessage || '', /not found in Employee Master/i);
+  assert.match(errors[1].errorMessage || '', /Invalid Date of Birth/i);
+});
+
+// =========================================================================
+// TEST 49: Birthday Firestore Security Rules Invariants (PII Isolation & Immutable Wishes)
+// =========================================================================
+test('49. firestore.rules isolates birthday_profiles PII, enforces immutable 1-per-year birthday_wishes, and blocks self-wishing', () => {
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
+
+  // 1. isValidBirthdayProfile must NOT include dateOfBirth or sensitive keys
+  const bpFn = rulesNoComments.match(/function isValidBirthdayProfile\(data\)\s*\{[\s\S]*?\n    \}/);
+  assert.ok(bpFn, 'isValidBirthdayProfile validator must exist');
+  assert.equal(bpFn[0].includes("'dateOfBirth'"), false, 'birthday_profiles must never store birth year/dateOfBirth');
+  assert.equal(bpFn[0].includes("'phone'"), false);
+  assert.equal(bpFn[0].includes("'panNumber'"), false);
+
+  // 2. match /birthday_profiles/{employeeId} restricts staff reads strictly to active == true
+  const bpBlock = rulesNoComments.match(/match \/birthday_profiles\/\{employeeId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(bpBlock, 'birthday_profiles match block must exist');
+  assert.match(bpBlock[0], /isActiveEmployee\(\) && resource\.data\.active == true/);
+  assert.match(bpBlock[0], /allow create: if isValidId\(employeeId\) && isSuperAdmin\(\)/);
+  assert.match(bpBlock[0], /allow update: if isValidId\(employeeId\) && isSuperAdmin\(\)/);
+
+  // 3. match /birthday_wishes/{wishId} enforces immutability, anti-self-wish, and deterministic ID
+  const bwBlock = rulesNoComments.match(/match \/birthday_wishes\/\{wishId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(bwBlock, 'birthday_wishes match block must exist');
+  assert.match(bwBlock[0], /allow update: if false;/);
+  assert.match(bwBlock[0], /incoming\(\)\.recipientEmployeeId != activeEmployeeId\(\)/);
+  assert.match(bwBlock[0], /incoming\(\)\.senderEmployeeId == activeEmployeeId\(\)/);
+  assert.match(bwBlock[0], /string\(incoming\(\)\.celebrationYear\) \+ '__' \+ incoming\(\)\.recipientEmployeeId \+ '__' \+ activeEmployeeId\(\)/);
+});
+
+// =========================================================================
+// TEST 50: Salary Slip 14 Official Earning Columns, Exact Arithmetic & Rules
+// =========================================================================
+test('50. Salary Slip template & parser support all 14 official earning columns with zero double-counting and synced firestore.rules', async () => {
+  const {
+    buildSalarySlipCsvTemplate,
+    getSalarySlipEarningBreakdown,
+    parseSalaryCsvText,
+  } = await import('../src/lib/salarySlipEngine.ts');
+
+  // 1. Official CSV template includes ALL 14 requested earning headers in exact order
+  const csvTemplate = buildSalarySlipCsvTemplate(EMPLOYEES, '2026-10');
+  const headerLine = csvTemplate.split('\n')[0];
+  const required14 = [
+    'Basic Salary',
+    'Dearness Allowance',
+    'HRA',
+    'Attendance Allowance',
+    'Washing Allowance',
+    'Convenience Allowance',
+    'Medical Allowance',
+    'Leave Travel Allowance',
+    'Communication Expanses',
+    'Adhoc Allowance',
+    'Traveling Allowance',
+    'Sales Commotion',
+    'Incentive',
+    'Overtime',
+  ];
+  let prevIndex = -1;
+  for (const col of required14) {
+    const idx = headerLine.indexOf(col);
+    assert.ok(idx > prevIndex, `Template header must contain "${col}" in exact order`);
+    prevIndex = idx;
+  }
+
+  // 2. Parse a complete row with all 14 earning columns populated (exact user spellings)
+  const fullCsv = [
+    'Employee ID,Employee Name,Branch,Department,Designation,Working Days,Paid Days,LOP Days,Basic Salary,Dearness Allowance,HRA,Attendance Allowance,Washing Allowance,Convenience Allowance,Medical Allowance,Leave Travel Allowance,Communication Expanses,Adhoc Allowance,Traveling Allowance,Sales Commotion,Incentive,Overtime,PF,ESIC,PT,TDS,Advance,Other Deductions,Payment Mode',
+    '459,Anita Popat Shingade,BARAMATI MIDC,Saree Dept.,Sales Executive,30,30,0,15000,2000,3000,1000,500,800,1250,1500,600,750,900,1100,1600,1000,1800,200,200,0,500,100,NEFT',
+  ].join('\n');
+
+  const parsed = parseSalaryCsvText(fullCsv, EMPLOYEES, '2026-10');
+  assert.equal(parsed.rows.length, 1);
+  const row = parsed.rows[0];
+  assert.equal(row.status, 'VALID');
+  assert.equal(row.basicPaise, 1500000);
+  assert.equal(row.dearnessAllowancePaise, 200000);
+  assert.equal(row.hraPaise, 300000);
+  assert.equal(row.attendanceAllowancePaise, 100000);
+  assert.equal(row.washingAllowancePaise, 50000);
+  assert.equal(row.conveyancePaise, 80000);
+  assert.equal(row.medicalAllowancePaise, 125000);
+  assert.equal(row.leaveTravelAllowancePaise, 150000);
+  assert.equal(row.communicationExpensesPaise, 60000);
+  assert.equal(row.adhocAllowancePaise, 75000);
+  assert.equal(row.travelingAllowancePaise, 90000);
+  assert.equal(row.salesCommissionPaise, 110000);
+  assert.equal(row.incentivePaise, 160000);
+  assert.equal(row.overtimePaise, 100000);
+  assert.equal(row.otherEarningsPaise, 0, 'No double-counting into Other Earnings');
+  // Sum = 15000+2000+3000+1000+500+800+1250+1500+600+750+900+1100+1600+1000 = 31000.00 -> 3100000 paise
+  assert.equal(row.grossEarningsPaise, 3100000);
+  // Deductions = 1800+200+200+0+500+100 = 2800.00 -> 280000 paise
+  assert.equal(row.totalDeductionsPaise, 280000);
+  assert.equal(row.netPayablePaise, 2820000);
+
+  // 3. Alternate standard spellings also parse identically without collision
+  const altCsv = [
+    'Employee ID,Basic,DA,HRA,Attendance Allowance,Washing Allowance,Conveyance Allowance,Medical Allowance,LTA,Communication Expenses,Adhoc Allowance,Travelling Allowance,Sales Commission,Incentive,Overtime',
+    '459,10000,1000,2000,500,250,400,600,700,300,350,450,550,900,1000',
+  ].join('\n');
+  const altParsed = parseSalaryCsvText(altCsv, EMPLOYEES, '2026-10');
+  assert.equal(altParsed.rows[0].status, 'VALID');
+  assert.equal(altParsed.rows[0].grossEarningsPaise, 1900000);
+  assert.equal(altParsed.rows[0].leaveTravelAllowancePaise, 70000);
+  assert.equal(altParsed.rows[0].travelingAllowancePaise, 45000);
+  assert.equal(altParsed.rows[0].salesCommissionPaise, 55000);
+
+  // 4. Breakdown helper emits all 14 lines for slip UI & PDF
+  const breakdown = getSalarySlipEarningBreakdown(
+    {
+      basicPaise: row.basicPaise,
+      dearnessAllowancePaise: row.dearnessAllowancePaise,
+      hraPaise: row.hraPaise,
+      attendanceAllowancePaise: row.attendanceAllowancePaise,
+      washingAllowancePaise: row.washingAllowancePaise,
+      conveyancePaise: row.conveyancePaise,
+      medicalAllowancePaise: row.medicalAllowancePaise,
+      leaveTravelAllowancePaise: row.leaveTravelAllowancePaise,
+      communicationExpensesPaise: row.communicationExpensesPaise,
+      adhocAllowancePaise: row.adhocAllowancePaise,
+      travelingAllowancePaise: row.travelingAllowancePaise,
+      salesCommissionPaise: row.salesCommissionPaise,
+      specialAllowancePaise: 0,
+      incentivePaise: row.incentivePaise,
+      overtimePaise: row.overtimePaise,
+      otherEarningsPaise: 0,
+    } as import('../src/types/incentive.ts').SalarySlip,
+    'en',
+  );
+  assert.equal(breakdown.length, 14);
+  assert.equal(
+    breakdown.reduce((sum, [, paise]) => sum + paise, 0),
+    3100000,
+  );
+
+  // 5. firestore.rules validates all 9 new optional earning fields in isValidSalarySlip
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  const slipFn = rulesText.match(/function isValidSalarySlip\(data\)\s*\{[\s\S]*?\n    \}/);
+  assert.ok(slipFn, 'isValidSalarySlip validator must exist in firestore.rules');
+  for (const field of [
+    'dearnessAllowancePaise',
+    'attendanceAllowancePaise',
+    'washingAllowancePaise',
+    'medicalAllowancePaise',
+    'leaveTravelAllowancePaise',
+    'communicationExpensesPaise',
+    'adhocAllowancePaise',
+    'travelingAllowancePaise',
+    'salesCommissionPaise',
+  ]) {
+    assert.ok(slipFn[0].includes(field), `isValidSalarySlip must validate ${field}`);
+  }
+});
+
+// =========================================================================
+// TEST 51: Bulk Employee Master Upload — Zero Silent Overlaps & Clear Error Diagnostics
+// =========================================================================
+test('51. Bulk Employee Master engine prevents silent Branch/Dept/Designation overlaps and explains every validation & duplicate error clearly', async () => {
+  const {
+    buildEmployeeImportDiagnosticsCsv,
+    buildEmployeeMasterCsvTemplate,
+    parseEmployeeMasterCsvText,
+  } = await import('../src/lib/employeeBulkImportEngine.ts');
+
+  const template = buildEmployeeMasterCsvTemplate(BRANCHES, EMPLOYEES, 'blank');
+  assert.match(template.split('\n')[0], /Employee ID,Login ID,Full Name,Branch,Department,Designation/);
+
+  const seededEmployees: Employee[] = [
+    {
+      ...EMPLOYEES[0],
+      departmentId: 'SAREE',
+      departmentName: 'Saree Dept.',
+    },
+    {
+      ...EMPLOYEES[1],
+      departmentId: 'LADIES_WEAR',
+      departmentName: 'Ladies Wear Dept.',
+    },
+    {
+      ...EMPLOYEES[0],
+      employeeId: '777',
+      loginId: 'HOM777',
+      authEmail: 'hom777@auth.homfash.internal',
+      authUid: 'uid-emp-777',
+      fullName: 'Mahesh Kadam',
+      branchId: 'BEED',
+      branchName: 'BEED',
+      departmentId: 'MENS_WEAR',
+      departmentName: 'Mens Wear Dept.',
+    },
+  ];
+
+  const csv = [
+    'HOUSE OF MUKTAI - EMPLOYEE MASTER UPLOAD SHEET',
+    'Employee ID,Login ID,Full Name,Branch,Department,Designation,Status,Date of Birth',
+    // Row 3: Brand-new valid employee -> NEW_READY
+    'EMP901,HOM901,Snehal Deshmukh,BARAMATI MIDC,Saree Dept.,Sales Executive,ACTIVE,1996-05-14',
+    // Row 4: Existing employee 459 with changed Branch + Dept + Designation -> OVERLAP_CONFLICT (NEVER silent overwrite!)
+    '459,HOM459,Anita Popat Shingade,BEED,Mens Wear Dept.,Senior Sales Executive,ACTIVE,',
+    // Row 5: Existing employee 355 identically matching Master -> UNCHANGED
+    '355,HOM355,Asha Abaji Chavan,BARAMATI MOTIBAG,Ladies Wear Dept.,Sales Executive,ACTIVE,',
+    // Row 6: Duplicate Employee ID in same file (repeats EMP901 from row 3) -> DUPLICATE_IN_FILE
+    'EMP901,HOM999,Duplicate Person,BEED,Kids Wear Dept.,Sales Executive,ACTIVE,',
+    // Row 7: Invalid Branch typo ("Baramti MIDC"), invalid Department junk ("12345"), blank Designation, invalid DOB -> ERROR with exact reasons & branch suggestion!
+    'EMP902,HOM902,Rohan Patil,Baramti MIDC,12345,,ACTIVE,32-13-1995',
+    // Row 8: Login ID collision with existing Master employee 777 (not in CSV) -> ERROR explaining who owns HOM777
+    'EMP903,HOM777,Kiran Jadhav,BEED,Non Apparels Dept.,Floor Supervisor,ACTIVE,',
+  ].join('\n');
+
+  const summary = parseEmployeeMasterCsvText(csv, BRANCHES, seededEmployees);
+  assert.equal(summary.totalRows, 6);
+  assert.equal(summary.newReadyCount, 1);
+  assert.equal(summary.overlapConflictCount, 1);
+  assert.equal(summary.orgOverlapCount, 1);
+  assert.equal(summary.unchangedCount, 1);
+  assert.equal(summary.duplicateInFileCount, 1);
+  assert.equal(summary.errorCount, 2);
+
+  // Verify NEW_READY row
+  const newRow = summary.rows.find((r) => r.employeeId === 'EMP901' && r.status === 'NEW_READY');
+  assert.ok(newRow);
+  assert.equal(newRow.branchId, 'BARAMATI_MIDC');
+  assert.equal(newRow.departmentId, 'SAREE');
+  assert.equal(newRow.designation, 'Sales Executive');
+
+  // Verify OVERLAP_CONFLICT row captures exact Branch, Department & Designation diffs
+  const overlapRow = summary.rows.find((r) => r.status === 'OVERLAP_CONFLICT');
+  assert.ok(overlapRow);
+  assert.equal(overlapRow.employeeId, '459');
+  assert.equal(overlapRow.hasOrgOverlap, true);
+  assert.deepEqual(
+    overlapRow.diffs.map((d) => d.field),
+    ['branch', 'department', 'designation'],
+  );
+  assert.match(overlapRow.overlapSummary, /Branch: BARAMATI MIDC -> BEED/);
+  assert.match(overlapRow.overlapSummary, /Department: Saree Dept\. -> Mens Wear Dept\./);
+  assert.match(overlapRow.overlapSummary, /Designation: Sales Executive -> Senior Sales Executive/);
+
+  // Verify DUPLICATE_IN_FILE cites exact first row number (Row 3)
+  const dupRow = summary.rows.find((r) => r.status === 'DUPLICATE_IN_FILE');
+  assert.ok(dupRow);
+  assert.equal(dupRow.duplicateFirstRowNumber, 3);
+  assert.match(dupRow.summaryMessage, /Row 3/);
+
+  // Verify ERROR row #7 lists all 4 exact issues + closest Branch suggestion ("BARAMATI MIDC")
+  const errRow = summary.rows.find((r) => r.rawEmployeeId === 'EMP902');
+  assert.ok(errRow);
+  assert.equal(errRow.status, 'ERROR');
+  assert.equal(errRow.errorDetails.length, 4);
+  const branchErr = errRow.errorDetails.find((e) => e.field === 'Branch');
+  assert.ok(branchErr && /Did you mean "BARAMATI MIDC"\?/.test(branchErr.reason));
+  const deptErr = errRow.errorDetails.find((e) => e.field === 'Department');
+  assert.ok(deptErr && /Saree Dept\./.test(deptErr.reason));
+  const desigErr = errRow.errorDetails.find((e) => e.field === 'Designation');
+  assert.ok(desigErr && /Designation is blank/i.test(desigErr.reason));
+  const dobErr = errRow.errorDetails.find((e) => e.field === 'Date of Birth');
+  assert.ok(dobErr && /Invalid Date of Birth/i.test(dobErr.reason));
+
+  // Verify ERROR row #8 explains Login ID collision with Mahesh Kadam (777)
+  const loginCollisionRow = summary.rows.find((r) => r.rawEmployeeId === 'EMP903');
+  assert.ok(loginCollisionRow);
+  assert.equal(loginCollisionRow.status, 'ERROR');
+  assert.match(loginCollisionRow.summaryMessage, /already assigned to existing employee/i);
+  assert.match(loginCollisionRow.summaryMessage, /777/);
+
+  // Verify Diagnostics CSV exports ONLY the 4 problematic/overlapping rows (not NEW_READY / UNCHANGED)
+  const diagCsv = buildEmployeeImportDiagnosticsCsv(summary.rows);
+  const diagLines = diagCsv.trim().split('\n');
+  assert.equal(diagLines.length, 5, 'Header + 1 overlap + 1 duplicate + 2 error rows = 5 lines');
+  assert.match(diagCsv, /OVERLAP \/ CONFLICT/);
+  assert.match(diagCsv, /DUPLICATE IN FILE/);
+  assert.match(diagCsv, /VALIDATION ERROR/);
+});
+
+// =========================================================================
+// TEST 52: Universal Employee ID & Non-Sales Departments (Accounts, HR, Billing, Management, Head Office)
+// =========================================================================
+test('52. Salary Slip & Employee Master use Employee ID and cleanly support Non-Sales Departments without leaderboard pollution', async () => {
+  const { resolveCanonicalDepartment } = await import('../src/lib/departmentLeaderboardEngine.ts');
+  const { buildSalarySlipCsvTemplate, parseSalaryCsvText } = await import(
+    '../src/lib/salarySlipEngine.ts'
+  );
+  const { parseEmployeeMasterCsvText } = await import('../src/lib/employeeBulkImportEngine.ts');
+
+  // 1. "Management", "Human Resources", "Maintenance" MUST NOT falsely match "Mens Wear Dept."
+  assert.equal(resolveCanonicalDepartment('Management'), null);
+  assert.equal(resolveCanonicalDepartment('Human Resources'), null);
+  assert.equal(resolveCanonicalDepartment('Maintenance'), null);
+  assert.equal(resolveCanonicalDepartment('Accounts'), null);
+  assert.equal(resolveCanonicalDepartment('Mens Wear')?.id, 'MENS_WEAR');
+
+  // 2. Salary Slip template Column 1 uses "Employee ID" (not "Salesman No")
+  const templateCsv = buildSalarySlipCsvTemplate(EMPLOYEES, '2026-11');
+  const headerLine = templateCsv.split('\n')[0];
+  assert.ok(headerLine.startsWith('"Employee ID"'), `Expected Employee ID header, got: ${headerLine.slice(0, 40)}`);
+  assert.equal(headerLine.includes('Salesman No'), false);
+
+  // 3. Bulk Employee Master accepts Non-Sales Departments cleanly & detects Non-Sales overlap changes
+  const existingStaff: Employee[] = [
+    {
+      ...EMPLOYEES[0],
+      employeeId: '1131',
+      loginId: 'HOM1131',
+      fullName: 'Sagar Rajendra Thorat',
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      departmentId: '',
+      departmentName: 'Accounts',
+      designation: 'Senior Accountant',
+    },
+  ];
+
+  const masterCsv = [
+    'Employee ID,Login ID,Full Name,Branch,Department,Designation,Status',
+    '1140,HOM1140,Priya Kulkarni,BARAMATI MIDC,HR,HR Executive,ACTIVE',
+    '1141,HOM1141,Amit Shinde,BEED,Billing,Cashier,ACTIVE',
+    '1142,HOM1142,Suresh Pawar,BARAMATI MOTIBAG,Management,Branch Operations Head,ACTIVE',
+    // Existing employee 1131 changing Accounts -> Head Office must trigger OVERLAP_CONFLICT
+    '1131,HOM1131,Sagar Rajendra Thorat,BARAMATI MIDC,Head Office,Senior Accountant,ACTIVE',
+  ].join('\n');
+
+  const masterParsed = parseEmployeeMasterCsvText(masterCsv, BRANCHES, existingStaff);
+  assert.equal(masterParsed.newReadyCount, 3);
+  assert.equal(masterParsed.overlapConflictCount, 1);
+  assert.equal(masterParsed.errorCount, 0);
+
+  const hrRow = masterParsed.rows.find((r) => r.employeeId === '1140');
+  assert.equal(hrRow?.departmentId, '');
+  assert.equal(hrRow?.departmentName, 'HR & Admin');
+
+  const billingRow = masterParsed.rows.find((r) => r.employeeId === '1141');
+  assert.equal(billingRow?.departmentId, '');
+  assert.equal(billingRow?.departmentName, 'Billing & Cash');
+
+  const mgmtRow = masterParsed.rows.find((r) => r.employeeId === '1142');
+  assert.equal(mgmtRow?.departmentId, '');
+  assert.equal(mgmtRow?.departmentName, 'Management');
+
+  const overlapAccRow = masterParsed.rows.find((r) => r.employeeId === '1131');
+  assert.equal(overlapAccRow?.status, 'OVERLAP_CONFLICT');
+  assert.match(overlapAccRow?.overlapSummary || '', /Department: Accounts -> Head Office/);
+
+  // 4. Salary Slip parser accepts Non-Sales Departments cleanly (both Employee ID and legacy Salesman No)
+  const salaryCsv = [
+    'Employee ID,Employee Name,Branch Name,Department,Designation,Pay Month,Total Days,Paid Days,Basic Salary,HRA,PF,PT,Payment Mode',
+    '1131,Sagar Rajendra Thorat,BARAMATI MIDC,Accounts,Senior Accountant,2026-11,30,30,60000,15000,1800,200,NEFT',
+  ].join('\n');
+
+  const salaryParsed = parseSalaryCsvText(salaryCsv, existingStaff, '2026-11');
+  assert.equal(salaryParsed.validRows.length, 1);
+  assert.equal(salaryParsed.errorRows.length, 0);
+  assert.equal(salaryParsed.validRows[0].resolvedDepartment, null);
+  assert.equal(salaryParsed.validRows[0].customDepartmentName, 'Accounts');
+  assert.equal(salaryParsed.validRows[0].designation, 'Senior Accountant');
+  assert.equal(salaryParsed.validRows[0].grossEarningsPaise, 7_500_000);
+});
+
+
+
 
 
 

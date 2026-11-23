@@ -166,7 +166,7 @@ export function StaffAppLoginView() {
                   htmlFor="staff-loginId"
                   className="block text-xs font-semibold text-slate-700 mb-1.5"
                 >
-                  {isMr ? 'Login ID / Salesman No' : 'Login ID / Salesman No'}
+                  {isMr ? 'लॉगिन आयडी / कर्मचारी आयडी (Employee ID)' : 'Login ID / Employee ID'}
                 </label>
                 <input
                   id="staff-loginId"
