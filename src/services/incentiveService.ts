@@ -40,11 +40,18 @@ import {
   getIncentiveRecordKey,
   resolveCanonicalBranchName,
 } from '../lib/incentiveEngine';
+import { getDepartmentById, isMonthVisibleToEmployees } from '../lib/departmentLeaderboardEngine';
+import { maskBankAccountNumber } from '../lib/salarySlipEngine';
+import {
+  fetchPortalVisibilitySettings,
+  recomputeAndSaveDepartmentRankings,
+} from './departmentVisibilityService';
 import type {
   ActiveAuthUidRecord,
   AuditLog,
   Branch,
   ComponentLabels,
+  DepartmentId,
   Employee,
   EmployeeNotification,
   ImportBatch,
@@ -557,6 +564,7 @@ function buildCleanProvisionedEmployeeDoc(
 ): Employee {
   const cleanLoginId = sanitizeId(emp.loginId || `HOM${emp.employeeId}`).slice(0, 40);
   const safeLoginId = cleanLoginId.length >= 3 ? cleanLoginId : `HOM${sanitizeId(emp.employeeId)}`.slice(0, 40);
+  const resolvedDept = getDepartmentById(emp.departmentId);
   return {
     employeeId: sanitizeId(emp.employeeId).slice(0, 64),
     loginId: safeLoginId,
@@ -565,7 +573,23 @@ function buildCleanProvisionedEmployeeDoc(
     fullName: (emp.fullName || `Salesman ${emp.employeeId}`).trim().slice(0, 120),
     branchId: emp.branchId,
     branchName: (emp.branchName || emp.branchId).trim().slice(0, 120),
+    ...(resolvedDept
+      ? { departmentId: resolvedDept.id, departmentName: resolvedDept.name }
+      : {}),
+    ...(emp.photoDataUrl?.trim()
+      ? { photoDataUrl: emp.photoDataUrl.trim().slice(0, 45000) }
+      : {}),
     designation: (emp.designation || 'Sales Executive').trim().slice(0, 80),
+    ...(emp.dateOfJoining?.trim() ? { dateOfJoining: emp.dateOfJoining.trim().slice(0, 20) } : {}),
+    ...(emp.panNumber?.trim() ? { panNumber: emp.panNumber.trim().toUpperCase().slice(0, 20) } : {}),
+    ...(emp.uanNumber?.trim() ? { uanNumber: emp.uanNumber.trim().slice(0, 24) } : {}),
+    ...(emp.pfNumber?.trim() ? { pfNumber: emp.pfNumber.trim().slice(0, 32) } : {}),
+    ...(emp.esicNumber?.trim() ? { esicNumber: emp.esicNumber.trim().slice(0, 32) } : {}),
+    ...(emp.bankName?.trim() ? { bankName: emp.bankName.trim().slice(0, 80) } : {}),
+    ...(emp.bankAccountMasked?.trim()
+      ? { bankAccountMasked: maskBankAccountNumber(emp.bankAccountMasked) }
+      : {}),
+    ...(emp.bankIfsc?.trim() ? { bankIfsc: emp.bankIfsc.trim().toUpperCase().slice(0, 20) } : {}),
     role: 'EMPLOYEE',
     status: emp.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE',
     mustChangePassword: true,
@@ -600,6 +624,7 @@ export async function provisionSingleEmployeeDefaultLogin(
       const activeEntry: ActiveAuthUidRecord = {
         authUid: prov.uid,
         employeeId: updatedEmp.employeeId,
+        departmentId: updatedEmp.departmentId || '',
         active: true,
         updatedAt: now,
       };
@@ -697,6 +722,7 @@ export async function provisionAllPendingEmployeeLogins(
           const activeEntry: ActiveAuthUidRecord = {
             authUid: prov.uid,
             employeeId: updatedEmp.employeeId,
+            departmentId: updatedEmp.departmentId || '',
             active: true,
             updatedAt: now,
           };
@@ -833,14 +859,17 @@ async function syncEmployeeAuthUidToExistingRecords(
 ): Promise<number> {
   if (!authUid) return 0;
   const cleanEmpId = sanitizeId(employeeId);
-  const [incSnap, sumSnap, ntfSnap, payoutSnap, adjSnap, tgtSnap] = await Promise.all([
-    getDocs(query(collection(db, 'published_incentives'), where('employeeId', '==', cleanEmpId))),
-    getDocs(query(collection(db, 'monthly_summaries'), where('employeeId', '==', cleanEmpId))),
-    getDocs(query(collection(db, 'notifications'), where('employeeId', '==', cleanEmpId))),
-    getDocs(query(collection(db, 'payout_records'), where('employeeId', '==', cleanEmpId))),
-    getDocs(query(collection(db, 'incentive_adjustments'), where('employeeId', '==', cleanEmpId))),
-    getDocs(query(collection(db, 'sales_targets'), where('employeeId', '==', cleanEmpId))),
-  ]);
+  const [incSnap, sumSnap, ntfSnap, payoutSnap, adjSnap, tgtSnap, slipSnap, rankSnap] =
+    await Promise.all([
+      getDocs(query(collection(db, 'published_incentives'), where('employeeId', '==', cleanEmpId))),
+      getDocs(query(collection(db, 'monthly_summaries'), where('employeeId', '==', cleanEmpId))),
+      getDocs(query(collection(db, 'notifications'), where('employeeId', '==', cleanEmpId))),
+      getDocs(query(collection(db, 'payout_records'), where('employeeId', '==', cleanEmpId))),
+      getDocs(query(collection(db, 'incentive_adjustments'), where('employeeId', '==', cleanEmpId))),
+      getDocs(query(collection(db, 'sales_targets'), where('employeeId', '==', cleanEmpId))),
+      getDocs(query(collection(db, 'salary_slips'), where('employeeId', '==', cleanEmpId))),
+      getDocs(query(collection(db, 'employee_department_ranks'), where('employeeId', '==', cleanEmpId))),
+    ]);
 
   const refsToUpdate: Array<ReturnType<typeof doc>> = [];
   for (const d of incSnap.docs) {
@@ -862,6 +891,12 @@ async function syncEmployeeAuthUidToExistingRecords(
     const rec = d.data() as { scope?: string; authUid?: string };
     if (rec.scope === 'EMPLOYEE' && rec.authUid !== authUid) refsToUpdate.push(d.ref);
   }
+  for (const d of slipSnap.docs) {
+    if ((d.data() as { authUid?: string }).authUid !== authUid) refsToUpdate.push(d.ref);
+  }
+  for (const d of rankSnap.docs) {
+    if ((d.data() as { authUid?: string }).authUid !== authUid) refsToUpdate.push(d.ref);
+  }
 
   for (let i = 0; i < refsToUpdate.length; i += 400) {
     const wb = writeBatch(db);
@@ -879,7 +914,17 @@ export async function saveEmployee(input: {
   fullName: string;
   branchId: string;
   branchName: string;
+  departmentId?: DepartmentId | '';
+  photoDataUrl?: string;
   designation: string;
+  dateOfJoining?: string;
+  panNumber?: string;
+  uanNumber?: string;
+  pfNumber?: string;
+  esicNumber?: string;
+  bankName?: string;
+  bankAccountMasked?: string;
+  bankIfsc?: string;
   phone?: string;
   address?: string;
   emergencyContact?: string;
@@ -914,6 +959,57 @@ export async function saveEmployee(input: {
     provisioningNote = prov.message;
   }
 
+  const resolvedDeptId =
+    input.departmentId !== undefined ? input.departmentId : (input.existing?.departmentId || '');
+  const resolvedDept = getDepartmentById(resolvedDeptId);
+  const resolvedPhoto =
+    input.photoDataUrl !== undefined
+      ? input.photoDataUrl.trim().slice(0, 45000)
+      : (input.existing?.photoDataUrl || '');
+
+  const resolvedDoj = (
+    input.dateOfJoining !== undefined ? input.dateOfJoining : input.existing?.dateOfJoining || ''
+  )
+    .trim()
+    .slice(0, 20);
+  const resolvedPan = (
+    input.panNumber !== undefined ? input.panNumber : input.existing?.panNumber || ''
+  )
+    .trim()
+    .toUpperCase()
+    .slice(0, 20);
+  const resolvedUan = (
+    input.uanNumber !== undefined ? input.uanNumber : input.existing?.uanNumber || ''
+  )
+    .trim()
+    .slice(0, 24);
+  const resolvedPf = (
+    input.pfNumber !== undefined ? input.pfNumber : input.existing?.pfNumber || ''
+  )
+    .trim()
+    .slice(0, 32);
+  const resolvedEsic = (
+    input.esicNumber !== undefined ? input.esicNumber : input.existing?.esicNumber || ''
+  )
+    .trim()
+    .slice(0, 32);
+  const resolvedBankName = (
+    input.bankName !== undefined ? input.bankName : input.existing?.bankName || ''
+  )
+    .trim()
+    .slice(0, 80);
+  const resolvedBankAcc = maskBankAccountNumber(
+    input.bankAccountMasked !== undefined
+      ? input.bankAccountMasked
+      : input.existing?.bankAccountMasked || '',
+  );
+  const resolvedBankIfsc = (
+    input.bankIfsc !== undefined ? input.bankIfsc : input.existing?.bankIfsc || ''
+  )
+    .trim()
+    .toUpperCase()
+    .slice(0, 20);
+
   // Phase 2 enforces EMPLOYEE role only (BRANCH_MANAGER disabled)
   const record: Employee = {
     employeeId,
@@ -922,7 +1018,19 @@ export async function saveEmployee(input: {
     fullName: input.fullName.trim().slice(0, 120),
     branchId: input.branchId,
     branchName: input.branchName.trim().slice(0, 120),
+    ...(resolvedDept
+      ? { departmentId: resolvedDept.id, departmentName: resolvedDept.name }
+      : {}),
+    ...(resolvedPhoto ? { photoDataUrl: resolvedPhoto } : {}),
     designation: input.designation.trim().slice(0, 80),
+    ...(resolvedDoj ? { dateOfJoining: resolvedDoj } : {}),
+    ...(resolvedPan ? { panNumber: resolvedPan } : {}),
+    ...(resolvedUan ? { uanNumber: resolvedUan } : {}),
+    ...(resolvedPf ? { pfNumber: resolvedPf } : {}),
+    ...(resolvedEsic ? { esicNumber: resolvedEsic } : {}),
+    ...(resolvedBankName ? { bankName: resolvedBankName } : {}),
+    ...(resolvedBankAcc ? { bankAccountMasked: resolvedBankAcc } : {}),
+    ...(resolvedBankIfsc ? { bankIfsc: resolvedBankIfsc } : {}),
     role: 'EMPLOYEE',
     status: input.status,
     mustChangePassword: input.mustChangePassword,
@@ -954,6 +1062,7 @@ export async function saveEmployee(input: {
         const activeEntry: ActiveAuthUidRecord = {
           authUid,
           employeeId,
+          ...(resolvedDept ? { departmentId: resolvedDept.id } : { departmentId: '' }),
           active: true,
           updatedAt: now,
         };
@@ -974,7 +1083,7 @@ export async function saveEmployee(input: {
       action: input.existing ? 'EMPLOYEE_UPDATED' : 'EMPLOYEE_CREATED',
       targetType: 'employee',
       targetId: employeeId,
-      summary: `${input.existing ? 'Updated' : 'Created'} employee ${employeeId} (${record.fullName}, Login ID: ${loginId}, Branch: ${record.branchName}, Status: ${record.status})`,
+      summary: `${input.existing ? 'Updated' : 'Created'} employee ${employeeId} (${record.fullName}, Login ID: ${loginId}, Branch: ${record.branchName}${resolvedDept ? `, Dept: ${resolvedDept.name}` : ''}, Status: ${record.status})`,
     });
     return { employee: record, provisioningNote };
   } catch (error) {
@@ -1042,6 +1151,7 @@ export async function updateEmployeeStatus(params: {
         const activeEntry: ActiveAuthUidRecord = {
           authUid: params.employee.authUid,
           employeeId: params.employee.employeeId,
+          ...(params.employee.departmentId ? { departmentId: params.employee.departmentId } : { departmentId: '' }),
           active: true,
           updatedAt: now,
         };
@@ -1076,6 +1186,8 @@ export interface LegacyAuthBackfillResult {
   payoutsUpdated: number;
   adjustmentsUpdated: number;
   targetsUpdated: number;
+  salarySlipsUpdated: number;
+  departmentRanksUpdated: number;
   legacyRolesNormalized: number;
   unlinkedEmployeesCount: number;
 }
@@ -1085,7 +1197,8 @@ export interface LegacyAuthBackfillResult {
  * 1. Syncs `/active_auth_uids/{authUid}` for all ACTIVE/INACTIVE employees with provisioned authUid.
  * 2. Normalizes any legacy BRANCH_MANAGER employee records to EMPLOYEE for Phase 2 compliance.
  * 3. Backfills missing/mismatched `authUid` on `published_incentives`, `monthly_summaries`,
- *    `notifications`, `payout_records`, `incentive_adjustments`, and employee `sales_targets`.
+ *    `notifications`, `payout_records`, `incentive_adjustments`, employee `sales_targets`,
+ *    `salary_slips`, and `employee_department_ranks`.
  * Zero duplicate records, zero incentive amount modifications, zero notifications sent.
  */
 export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBackfillResult> {
@@ -1095,29 +1208,47 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
   const now = new Date().toISOString();
 
   try {
-    const [empSnap, activeSnap, incSnap, sumSnap, ntfSnap, payoutSnap, adjSnap, tgtSnap] =
-      await Promise.all([
-        getDocs(collection(db, 'employees')),
-        getDocs(collection(db, 'active_auth_uids')),
-        getDocs(collection(db, 'published_incentives')),
-        getDocs(collection(db, 'monthly_summaries')),
-        getDocs(collection(db, 'notifications')),
-        getDocs(collection(db, 'payout_records')),
-        getDocs(collection(db, 'incentive_adjustments')),
-        getDocs(collection(db, 'sales_targets')),
-      ]);
+    const [
+      empSnap,
+      activeSnap,
+      incSnap,
+      sumSnap,
+      ntfSnap,
+      payoutSnap,
+      adjSnap,
+      tgtSnap,
+      slipSnap,
+      rankSnap,
+    ] = await Promise.all([
+      getDocs(collection(db, 'employees')),
+      getDocs(collection(db, 'active_auth_uids')),
+      getDocs(collection(db, 'published_incentives')),
+      getDocs(collection(db, 'monthly_summaries')),
+      getDocs(collection(db, 'notifications')),
+      getDocs(collection(db, 'payout_records')),
+      getDocs(collection(db, 'incentive_adjustments')),
+      getDocs(collection(db, 'sales_targets')),
+      getDocs(collection(db, 'salary_slips')),
+      getDocs(collection(db, 'employee_department_ranks')),
+    ]);
 
     const employees = empSnap.docs.map((d) => d.data() as Employee);
-    const activeRegistryIds = new Set(activeSnap.docs.map((d) => d.id));
+    const activeRegistryMap = new Map<string, ActiveAuthUidRecord>();
+    for (const d of activeSnap.docs) {
+      activeRegistryMap.set(d.id, d.data() as ActiveAuthUidRecord);
+    }
     const empById = new Map<string, Employee>();
-    const expectedActiveUids = new Map<string, string>(); // authUid -> employeeId
+    const expectedActiveUids = new Map<string, { employeeId: string; departmentId: DepartmentId | '' }>();
     let unlinkedEmployeesCount = 0;
 
     for (const emp of employees) {
       empById.set(sanitizeId(emp.employeeId), emp);
       if (emp.authUid) {
         if (emp.status === 'ACTIVE') {
-          expectedActiveUids.set(emp.authUid, emp.employeeId);
+          expectedActiveUids.set(emp.authUid, {
+            employeeId: emp.employeeId,
+            departmentId: emp.departmentId || '',
+          });
         }
       } else {
         unlinkedEmployeesCount += 1;
@@ -1139,21 +1270,34 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
     let payoutsUpdated = 0;
     let adjustmentsUpdated = 0;
     let targetsUpdated = 0;
+    let salarySlipsUpdated = 0;
+    let departmentRanksUpdated = 0;
 
-    // 1. Add missing active_auth_uids entries for ACTIVE employees
-    for (const [authUid, employeeId] of expectedActiveUids.entries()) {
-      if (!activeRegistryIds.has(authUid)) {
+    // 1. Add missing or out-of-sync active_auth_uids entries (including departmentId) for ACTIVE employees
+    for (const [authUid, info] of expectedActiveUids.entries()) {
+      const existingReg = activeRegistryMap.get(authUid);
+      if (
+        !existingReg ||
+        existingReg.employeeId !== info.employeeId ||
+        (existingReg.departmentId || '') !== info.departmentId
+      ) {
         ops.push({
           kind: 'set',
           ref: doc(db, 'active_auth_uids', authUid),
-          data: { authUid, employeeId, active: true, updatedAt: now },
+          data: {
+            authUid,
+            employeeId: info.employeeId,
+            departmentId: info.departmentId,
+            active: true,
+            updatedAt: now,
+          },
         });
         activeRegistryAdded += 1;
       }
     }
 
     // 2. Remove stale active_auth_uids entries for INACTIVE/orphaned UIDs
-    for (const existingUid of activeRegistryIds) {
+    for (const existingUid of activeRegistryMap.keys()) {
       if (!expectedActiveUids.has(existingUid)) {
         ops.push({
           kind: 'delete',
@@ -1239,6 +1383,28 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
       }
     }
 
+    // 10. Backfill missing/mismatched authUid on salary_slips
+    for (const d of slipSnap.docs) {
+      const rec = d.data() as { employeeId?: string; authUid?: string };
+      if (!rec.employeeId) continue;
+      const emp = empById.get(sanitizeId(rec.employeeId));
+      if (emp?.authUid && rec.authUid !== emp.authUid) {
+        ops.push({ kind: 'update', ref: d.ref, data: { authUid: emp.authUid } });
+        salarySlipsUpdated += 1;
+      }
+    }
+
+    // 11. Backfill missing/mismatched authUid on employee_department_ranks
+    for (const d of rankSnap.docs) {
+      const rec = d.data() as { employeeId?: string; authUid?: string };
+      if (!rec.employeeId) continue;
+      const emp = empById.get(sanitizeId(rec.employeeId));
+      if (emp?.authUid && rec.authUid !== emp.authUid) {
+        ops.push({ kind: 'update', ref: d.ref, data: { authUid: emp.authUid } });
+        departmentRanksUpdated += 1;
+      }
+    }
+
     for (let i = 0; i < ops.length; i += 400) {
       const wb = writeBatch(db);
       for (const op of ops.slice(i, i + 400)) {
@@ -1253,7 +1419,7 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
       action: 'LEGACY_AUTH_UID_BACKFILL',
       targetType: 'system',
       targetId: `BACKFILL_${Date.now()}`,
-      summary: `Synced active_auth_uids (+${activeRegistryAdded}/-${activeRegistryRemoved}), normalized ${legacyRolesNormalized} legacy role(s), backfilled authUid on ${incentivesUpdated} incentives, ${summariesUpdated} summaries, ${notificationsUpdated} notifications, ${payoutsUpdated} payouts, ${adjustmentsUpdated} adjustments, ${targetsUpdated} targets.`,
+      summary: `Synced active_auth_uids (+${activeRegistryAdded}/-${activeRegistryRemoved}), normalized ${legacyRolesNormalized} legacy role(s), backfilled authUid on ${incentivesUpdated} incentives, ${summariesUpdated} summaries, ${notificationsUpdated} notifications, ${payoutsUpdated} payouts, ${adjustmentsUpdated} adjustments, ${targetsUpdated} targets, ${salarySlipsUpdated} salary slips, ${departmentRanksUpdated} dept ranks.`,
     });
 
     return {
@@ -1265,6 +1431,8 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
       payoutsUpdated,
       adjustmentsUpdated,
       targetsUpdated,
+      salarySlipsUpdated,
+      departmentRanksUpdated,
       legacyRolesNormalized,
       unlinkedEmployeesCount,
     };
@@ -1816,8 +1984,11 @@ export async function publishApprovedBatch(params: {
   };
 
   try {
-    // Fetch current published records to enforce fresh overlap protection & double-counting-safe summaries
-    const existingPublishedList = await listAllPublishedIncentives();
+    // Fetch current published records + visibility settings to enforce overlap protection & month visibility
+    const [existingPublishedList, visibilitySettings] = await Promise.all([
+      listAllPublishedIncentives(),
+      fetchPortalVisibilitySettings(),
+    ]);
     const publishedMap = new Map<string, PublishedIncentive>();
     for (const rec of existingPublishedList) {
       publishedMap.set(rec.recordId, rec);
@@ -1951,11 +2122,15 @@ export async function publishApprovedBatch(params: {
             });
           }
 
+          const updatedWithVisibility: PublishedIncentive = {
+            ...updatedRecord,
+            employeeVisible: isMonthVisibleToEmployees(monthKey, visibilitySettings),
+          };
           pendingSets.push({
             ref: doc(db, 'published_incentives', recordId),
-            data: updatedRecord,
+            data: updatedWithVisibility,
           });
-          publishedMap.set(recordId, updatedRecord);
+          publishedMap.set(recordId, updatedWithVisibility);
           correctedCount += 1;
         } else {
           const saleAmt1Paise = row.saleAmt1Paise ?? 0;
@@ -1999,6 +2174,7 @@ export async function publishApprovedBatch(params: {
             status: 'PUBLISHED',
             version: 1,
             batchId: lockedBatch.batchId,
+            employeeVisible: isMonthVisibleToEmployees(monthKey, visibilitySettings),
             publishedAt: now,
             publishedByEmail: (user.email || 'admin').slice(0, 180),
           };
@@ -2050,7 +2226,9 @@ export async function publishApprovedBatch(params: {
     // Recompute affected monthly_summaries cleanly from post-publish PUBLISHED records only (ZERO double counting)
     const allPostPublishRecords = Array.from(publishedMap.values());
     const pendingDeletes: Array<ReturnType<typeof doc>> = [];
+    const affectedMonthKeySet = new Set<string>();
     for (const [summaryId, info] of affectedSummaryKeys.entries()) {
+      affectedMonthKeySet.add(info.monthKey);
       const summaryDoc = buildMonthlySummaryDocument({
         records: allPostPublishRecords,
         employee: info.employee,
@@ -2060,7 +2238,13 @@ export async function publishApprovedBatch(params: {
       if (summaryDoc.sourceType === 'NO_DATA') {
         pendingDeletes.push(doc(db, 'monthly_summaries', summaryId));
       } else {
-        pendingSets.push({ ref: doc(db, 'monthly_summaries', summaryId), data: summaryDoc });
+        pendingSets.push({
+          ref: doc(db, 'monthly_summaries', summaryId),
+          data: {
+            ...summaryDoc,
+            employeeVisible: isMonthVisibleToEmployees(info.monthKey, visibilitySettings),
+          },
+        });
       }
     }
 
@@ -2086,6 +2270,20 @@ export async function publishApprovedBatch(params: {
       lastPublishError: '',
       updatedAt: now,
     });
+
+    // Auto-recompute Cross-Branch 5-Department Top-3 Sales Leaderboards for affected months
+    if (affectedMonthKeySet.size > 0) {
+      try {
+        await recomputeAndSaveDepartmentRankings({
+          monthKeys: Array.from(affectedMonthKeySet),
+          employees: Object.values(params.employeesById),
+          incentives: allPostPublishRecords,
+          visibilitySettings,
+        });
+      } catch {
+        // Non-blocking: Admin can also manually refresh leaderboards from Analytics -> Dept. Leaders
+      }
+    }
 
     await recordAuditLog({
       action: 'IMPORT_BATCH_PUBLISHED',
@@ -2873,6 +3071,7 @@ export async function fetchOwnEmployeeProfile(): Promise<Employee | null> {
             const activeEntry: ActiveAuthUidRecord = {
               authUid: user.uid,
               employeeId: emp.employeeId,
+              ...(emp.departmentId ? { departmentId: emp.departmentId } : { departmentId: '' }),
               active: true,
               updatedAt: now,
             };
@@ -2892,17 +3091,18 @@ export async function fetchOwnEmployeeProfile(): Promise<Employee | null> {
   }
 }
 
-export async function fetchOwnPublishedIncentives(): Promise<PublishedIncentive[]> {
+export async function fetchOwnPublishedIncentives(
+  onlyEmployeeVisible = false,
+): Promise<PublishedIncentive[]> {
   const user = auth.currentUser;
   if (!user) return [];
   try {
-    const snap = await getDocs(
-      query(
-        collection(db, 'published_incentives'),
-        where('authUid', '==', user.uid),
-        where('status', '==', 'PUBLISHED'),
-      ),
-    );
+    const constraints = [
+      where('authUid', '==', user.uid),
+      where('status', '==', 'PUBLISHED'),
+      ...(onlyEmployeeVisible ? [where('employeeVisible', '==', true)] : []),
+    ];
+    const snap = await getDocs(query(collection(db, 'published_incentives'), ...constraints));
     return snap.docs
       .map((d) => d.data() as PublishedIncentive)
       .sort((a, b) => (b.periodStart || b.businessDate).localeCompare(a.periodStart || a.businessDate));
@@ -2911,13 +3111,17 @@ export async function fetchOwnPublishedIncentives(): Promise<PublishedIncentive[
   }
 }
 
-export async function fetchOwnMonthlySummaries(): Promise<MonthlySummary[]> {
+export async function fetchOwnMonthlySummaries(
+  onlyEmployeeVisible = false,
+): Promise<MonthlySummary[]> {
   const user = auth.currentUser;
   if (!user) return [];
   try {
-    const snap = await getDocs(
-      query(collection(db, 'monthly_summaries'), where('authUid', '==', user.uid)),
-    );
+    const constraints = [
+      where('authUid', '==', user.uid),
+      ...(onlyEmployeeVisible ? [where('employeeVisible', '==', true)] : []),
+    ];
+    const snap = await getDocs(query(collection(db, 'monthly_summaries'), ...constraints));
     return snap.docs
       .map((d) => d.data() as MonthlySummary)
       .sort((a, b) => b.monthKey.localeCompare(a.monthKey));
@@ -2964,12 +3168,14 @@ export function subscribeOwnEmployeeProfile(
 export function subscribeOwnPublishedIncentives(
   uid: string,
   onData: (records: PublishedIncentive[]) => void,
+  onlyEmployeeVisible = false,
 ): Unsubscribe {
-  const q = query(
-    collection(db, 'published_incentives'),
+  const constraints = [
     where('authUid', '==', uid),
     where('status', '==', 'PUBLISHED'),
-  );
+    ...(onlyEmployeeVisible ? [where('employeeVisible', '==', true)] : []),
+  ];
+  const q = query(collection(db, 'published_incentives'), ...constraints);
   return onSnapshot(
     q,
     (snap) => {
@@ -2993,8 +3199,13 @@ export function subscribeOwnPublishedIncentives(
 export function subscribeOwnMonthlySummaries(
   uid: string,
   onData: (summaries: MonthlySummary[]) => void,
+  onlyEmployeeVisible = false,
 ): Unsubscribe {
-  const q = query(collection(db, 'monthly_summaries'), where('authUid', '==', uid));
+  const constraints = [
+    where('authUid', '==', uid),
+    ...(onlyEmployeeVisible ? [where('employeeVisible', '==', true)] : []),
+  ];
+  const q = query(collection(db, 'monthly_summaries'), ...constraints);
   return onSnapshot(
     q,
     (snap) => {
@@ -3047,7 +3258,7 @@ export async function markNotificationRead(notificationId: string): Promise<void
   }
 }
 
-// --- STRICTLY READ-ONLY FULL FIRESTORE BACKUP EXPORT (ALL 15 COLLECTIONS) ---
+// --- STRICTLY READ-ONLY FULL FIRESTORE BACKUP EXPORT (ALL 19 COLLECTIONS) ---
 export const BACKUP_COLLECTION_NAMES = [
   'admins',
   'active_auth_uids',
@@ -3064,6 +3275,10 @@ export const BACKUP_COLLECTION_NAMES = [
   'incentive_adjustments',
   'sales_targets',
   'employee_queries',
+  'portal_settings',
+  'department_leaderboards',
+  'employee_department_ranks',
+  'salary_slips',
 ] as const;
 
 export type BackupCollectionName = (typeof BACKUP_COLLECTION_NAMES)[number];

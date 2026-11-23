@@ -8,6 +8,8 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  Presentation,
+  ReceiptIndianRupee,
   RefreshCw,
   Search,
   Smartphone,
@@ -35,6 +37,11 @@ import {
   listAllPayoutRecords,
   listAllSalesTargets,
 } from '../../services/operationsService';
+import {
+  DEFAULT_PORTAL_VISIBILITY,
+  fetchPortalVisibilitySettings,
+} from '../../services/departmentVisibilityService';
+import { listAllSalarySlips } from '../../services/salarySlipService';
 import type {
   AuditLog,
   Branch,
@@ -45,7 +52,9 @@ import type {
   IncentiveVersion,
   MonthlySummary,
   PayoutRecord,
+  PortalVisibilitySettings,
   PublishedIncentive,
+  SalarySlip,
   SalesTarget,
 } from '../../types/incentive';
 import { COMPANY_BRAND, getShareableStaffAppUrl } from '../../lib/companyBrand';
@@ -56,6 +65,7 @@ import { PWAInstallButton } from '../common/PWAInstallButton';
 import { AdminGlobalSearch, type AdminNavTab } from './AdminGlobalSearch';
 import { AdminNotificationCenter } from './AdminNotificationCenter';
 import { AdminOverview } from './AdminOverview';
+import { HindiTrainingDeckModal } from './HindiTrainingDeckModal';
 
 // Route/tab-level code splitting for faster initial Admin Panel load (H2)
 const AdminAnalytics = lazy(() =>
@@ -76,6 +86,9 @@ const ExcelImportWorkflow = lazy(() =>
 const HistoryAndReports = lazy(() =>
   import('./HistoryAndReports').then((m) => ({ default: m.HistoryAndReports })),
 );
+const SalarySlipsManager = lazy(() =>
+  import('./SalarySlipsManager').then((m) => ({ default: m.SalarySlipsManager })),
+);
 
 const NAV_ITEMS: Array<{
   id: AdminNavTab;
@@ -87,6 +100,7 @@ const NAV_ITEMS: Array<{
   { id: 'employees', label: 'Employees', icon: Users },
   { id: 'branches', label: 'Branches', icon: Building2 },
   { id: 'payouts', label: 'Payouts & Queries', icon: Wallet },
+  { id: 'salary', label: 'Salary Slips', icon: ReceiptIndianRupee },
   { id: 'analytics', label: 'Analytics & Targets', icon: BarChart3 },
   { id: 'history', label: 'Approvals & Reports', icon: History },
 ];
@@ -96,6 +110,7 @@ export function AdminShell() {
   const [activeTab, setActiveTab] = useState<AdminNavTab>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [trainingDeckOpen, setTrainingDeckOpen] = useState(false);
 
   const [branches, setBranches] = useState<Branch[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -108,6 +123,10 @@ export function AdminShell() {
   const [adjustments, setAdjustments] = useState<IncentiveAdjustment[]>([]);
   const [salesTargets, setSalesTargets] = useState<SalesTarget[]>([]);
   const [employeeQueries, setEmployeeQueries] = useState<EmployeeQuery[]>([]);
+  const [salarySlips, setSalarySlips] = useState<SalarySlip[]>([]);
+  const [visibilitySettings, setVisibilitySettings] = useState<PortalVisibilitySettings>(
+    DEFAULT_PORTAL_VISIBILITY,
+  );
   const [loadingData, setLoadingData] = useState(true);
   const [syncWarning, setSyncWarning] = useState<string | null>(null);
   const [copiedStaffLink, setCopiedStaffLink] = useState(false);
@@ -162,11 +181,13 @@ export function AdminShell() {
         listAuditLogs(),
       ]);
 
-      const [pr, adj, tgt, qry] = await Promise.all([
+      const [pr, adj, tgt, qry, vis, sl] = await Promise.all([
         listAllPayoutRecords().catch(() => [] as PayoutRecord[]),
         listAllAdjustments().catch(() => [] as IncentiveAdjustment[]),
         listAllSalesTargets().catch(() => [] as SalesTarget[]),
         listAllEmployeeQueries().catch(() => [] as EmployeeQuery[]),
+        fetchPortalVisibilitySettings().catch(() => ({ ...DEFAULT_PORTAL_VISIBILITY })),
+        listAllSalarySlips().catch(() => [] as SalarySlip[]),
       ]);
 
       // Automatically link the 12 official branches & clean legacy placeholders/alias duplicates once on load
@@ -207,6 +228,8 @@ export function AdminShell() {
       setAdjustments(adj);
       setSalesTargets(tgt);
       setEmployeeQueries(qry);
+      setVisibilitySettings(vis);
+      setSalarySlips(sl);
     } finally {
       setLoadingData(false);
     }
@@ -287,8 +310,16 @@ export function AdminShell() {
           })}
         </nav>
 
-        <div className="p-4 border-t border-white/10 bg-[#0B172E]">
-          <div className="mb-3 flex items-center gap-2.5 px-1">
+        <div className="p-4 border-t border-white/10 bg-[#0B172E] space-y-2.5">
+          <button
+            type="button"
+            onClick={() => setTrainingDeckOpen(true)}
+            className="w-full h-9 px-3 rounded-lg border border-[#B8923A]/45 bg-[#1E3A5F]/65 hover:bg-[#1E3A5F] text-xs font-semibold text-[#DFC27D] inline-flex items-center justify-center gap-2 cursor-pointer transition-colors"
+          >
+            <Presentation className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Training PPT (हिंदी)</span>
+          </button>
+          <div className="flex items-center gap-2.5 px-1 pt-1">
             <div className="w-8 h-8 rounded-lg bg-[#1E3A5F] border border-[#B8923A]/40 text-[#DFC27D] text-xs font-bold flex items-center justify-center shrink-0">
               {adminInitials}
             </div>
@@ -377,7 +408,18 @@ export function AdminShell() {
                   );
                 })}
               </nav>
-              <div className="p-4 border-t border-white/10 bg-[#0B172E] space-y-3">
+              <div className="p-4 border-t border-white/10 bg-[#0B172E] space-y-2.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    setTrainingDeckOpen(true);
+                  }}
+                  className="w-full h-10 px-3 rounded-lg border border-[#B8923A]/45 bg-[#1E3A5F]/65 text-sm font-semibold text-[#DFC27D] inline-flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Presentation className="w-4 h-4" />
+                  Training PPT (हिंदी)
+                </button>
                 <p className="text-[11px] text-slate-400 leading-snug">
                   {COMPANY_BRAND.legalName} · Baramati, Pune - 413102
                 </p>
@@ -518,6 +560,7 @@ export function AdminShell() {
                       payoutRecords={payoutRecords}
                       adjustments={adjustments}
                       salesTargets={salesTargets}
+                      visibilitySettings={visibilitySettings}
                       onRefresh={refreshAll}
                     />
                   </Suspense>
@@ -536,6 +579,18 @@ export function AdminShell() {
                     />
                   </Suspense>
                 )}
+                {activeTab === 'salary' && (
+                  <Suspense fallback={<WorkspaceSkeleton />}>
+                    <SalarySlipsManager
+                      branches={branches}
+                      employees={employees}
+                      incentives={incentives}
+                      salarySlips={salarySlips}
+                      visibilitySettings={visibilitySettings}
+                      onRefresh={refreshAll}
+                    />
+                  </Suspense>
+                )}
                 {activeTab === 'branches' && (
                   <Suspense fallback={<WorkspaceSkeleton />}>
                     <BranchMaster
@@ -550,6 +605,8 @@ export function AdminShell() {
                     <EmployeeMaster
                       branches={branches}
                       employees={employees}
+                      incentives={incentives}
+                      visibilitySettings={visibilitySettings}
                       onRefresh={refreshAll}
                     />
                   </Suspense>
@@ -576,6 +633,7 @@ export function AdminShell() {
                       auditLogs={auditLogs}
                       payoutRecords={payoutRecords}
                       adjustments={adjustments}
+                      visibilitySettings={visibilitySettings}
                       onRefresh={refreshAll}
                     />
                   </Suspense>
@@ -593,7 +651,12 @@ export function AdminShell() {
         branches={branches}
         employees={employees}
         batches={batches}
+        salarySlips={salarySlips}
         onNavigate={(tab) => setActiveTab(tab)}
+      />
+      <HindiTrainingDeckModal
+        open={trainingDeckOpen}
+        onClose={() => setTrainingDeckOpen(false)}
       />
       <OfflineIndicator />
     </div>

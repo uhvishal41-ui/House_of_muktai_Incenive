@@ -5,9 +5,17 @@ export type ImportType = 'DAILY' | 'MONTHLY' | 'CUSTOM_PERIOD';
 
 export type OverlapResolutionMode = 'BLOCK' | 'SKIP_OVERLAP' | 'RECONCILE_SUPERSEDE';
 
+export type DepartmentId =
+  | 'SAREE'
+  | 'LADIES_WEAR'
+  | 'KIDS_WEAR'
+  | 'MENS_WEAR'
+  | 'NON_APPARELS';
+
 export interface ActiveAuthUidRecord {
   authUid: string;
   employeeId: string;
+  departmentId?: DepartmentId | '';
   active: true;
   updatedAt: string;
 }
@@ -32,7 +40,18 @@ export interface Employee {
   fullName: string;
   branchId: string;
   branchName: string;
+  departmentId?: DepartmentId | '';
+  departmentName?: string;
+  photoDataUrl?: string;
   designation: string;
+  dateOfJoining?: string;
+  panNumber?: string;
+  uanNumber?: string;
+  pfNumber?: string;
+  esicNumber?: string;
+  bankName?: string;
+  bankAccountMasked?: string;
+  bankIfsc?: string;
   phone?: string;
   address?: string;
   emergencyContact?: string;
@@ -174,6 +193,7 @@ export interface PublishedIncentive {
   supersededByRecordId?: string;
   supersededAt?: string;
   supersededReason?: string;
+  employeeVisible?: boolean;
   publishedAt: string;
   publishedByEmail: string;
 }
@@ -227,6 +247,7 @@ export interface MonthlySummary {
   totalSaleAmtPaise?: number;
   totalSaleQty?: number;
   publishedDaysCount: number;
+  employeeVisible?: boolean;
   updatedAt: string;
 }
 
@@ -322,6 +343,7 @@ export interface PayoutRecord {
   paymentReference?: string;
   paidAt?: string;
   remarks?: string;
+  employeeVisible?: boolean;
   updatedByEmail: string;
   updatedAt: string;
 }
@@ -340,6 +362,7 @@ export interface IncentiveAdjustment {
   amountPaise: number; // Always positive integer paise; BONUS adds, others subtract
   reason: string;
   status: 'ACTIVE' | 'VOIDED';
+  employeeVisible?: boolean;
   createdByEmail: string;
   createdAt: string;
   voidedByEmail?: string;
@@ -357,6 +380,7 @@ export interface SalesTarget {
   employeeName?: string;
   targetSaleAmtPaise: number;
   targetSaleQty: number;
+  employeeVisible?: boolean;
   updatedByEmail: string;
   updatedAt: string;
 }
@@ -387,4 +411,109 @@ export interface EmployeeQuery {
   createdAt: string;
   updatedAt: string;
 }
+
+export type VisibilityMode = 'ALL' | 'SELECTED';
+
+export interface PortalVisibilitySettings {
+  settingId: 'visibility';
+  mode: VisibilityMode;
+  visibleMonths: string[]; // YYYY-MM array (bounded <= 36)
+  updatedByEmail: string;
+  updatedAt: string;
+}
+
+export interface DepartmentLeaderboardEntry {
+  rank: 1 | 2 | 3;
+  employeeName: string;
+  branchName: string;
+  saleAmtPaise: number; // ONLY Sale Amount — strictly ZERO incentive figures or private PII
+  photoDataUrl: string;
+}
+
+export interface DepartmentLeaderboard {
+  leaderboardId: string; // `${monthKey}__${departmentId}`
+  monthKey: string;
+  departmentId: DepartmentId;
+  departmentName: string;
+  totalParticipants: number;
+  top3: DepartmentLeaderboardEntry[];
+  employeeVisible: boolean;
+  updatedByEmail: string;
+  updatedAt: string;
+}
+
+export interface EmployeeDepartmentRank {
+  rankId: string; // `${monthKey}__${employeeId}`
+  monthKey: string;
+  employeeId: string;
+  authUid: string;
+  departmentId: DepartmentId;
+  departmentName: string;
+  rank: number; // 1..N when saleAmtPaise > 0; 0 when no sale recorded yet
+  totalParticipants: number;
+  saleAmtPaise: number;
+  gapToTop3Paise: number; // 0 if already inside Top 3
+  gapToRank1Paise: number;
+  employeeVisible: boolean;
+  updatedAt: string;
+}
+
+export type SalarySlipPaymentMode = '' | 'BANK' | 'NEFT' | 'CASH' | 'UPI' | 'CHEQUE';
+
+export interface SalarySlip {
+  slipId: string; // `${monthKey}__${employeeId}`
+  monthKey: string; // YYYY-MM
+  employeeId: string;
+  authUid: string;
+  employeeName: string;
+  branchId: string;
+  branchName: string;
+  departmentId?: DepartmentId | '';
+  departmentName?: string;
+  designation?: string;
+  dateOfJoining?: string;
+  panNumber?: string;
+  uanNumber?: string;
+  pfNumber?: string;
+  esicNumber?: string;
+  bankName?: string;
+  bankAccountMasked?: string;
+  bankIfsc?: string;
+  // Attendance
+  totalDays: number;
+  paidDays: number;
+  lopDays: number;
+  weeklyOffDays: number;
+  paidLeaveDays: number;
+  overtimeHours: number;
+  // Earnings (paise)
+  basicPaise: number;
+  hraPaise: number;
+  conveyancePaise: number;
+  specialAllowancePaise: number;
+  overtimePaise: number;
+  incentivePaise: number;
+  otherEarningsPaise: number;
+  grossEarningsPaise: number;
+  // Deductions (paise)
+  pfPaise: number;
+  esicPaise: number;
+  ptPaise: number;
+  advanceRecoveryPaise: number;
+  tdsPaise: number;
+  otherDeductionPaise: number;
+  totalDeductionsPaise: number;
+  // Net & Payment
+  netPayablePaise: number;
+  paymentMode?: SalarySlipPaymentMode;
+  paymentReference?: string;
+  paymentDate?: string;
+  remarks?: string;
+  employeeVisible: boolean;
+  uploadedByEmail: string;
+  uploadedAt: string;
+  updatedAt: string;
+}
+
+
 

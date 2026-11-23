@@ -1946,9 +1946,9 @@ test('31. firestore.rules supports Super Admin audited batch edit/update/delete 
 });
 
 // =========================================================================
-// TEST 32: Complete 15-Collection Backup Manifest & Domain Hygiene Invariants
+// TEST 32: Complete 19-Collection Backup Manifest & Domain Hygiene Invariants
 // =========================================================================
-test('32. BACKUP_COLLECTION_NAMES covers all 15 Firestore collections and operationsService uses houseofmuktai.co.in fallback', () => {
+test('32. BACKUP_COLLECTION_NAMES covers all 19 Firestore collections and operationsService uses houseofmuktai.co.in fallback', () => {
   const serviceText = fs.readFileSync(
     path.resolve(process.cwd(), 'src/services/incentiveService.ts'),
     'utf-8',
@@ -1958,7 +1958,7 @@ test('32. BACKUP_COLLECTION_NAMES covers all 15 Firestore collections and operat
   );
   assert.ok(backupArrayMatch, 'BACKUP_COLLECTION_NAMES export must exist');
 
-  const expected15Collections = [
+  const expected19Collections = [
     'admins',
     'active_auth_uids',
     'branches',
@@ -1974,16 +1974,20 @@ test('32. BACKUP_COLLECTION_NAMES covers all 15 Firestore collections and operat
     'incentive_adjustments',
     'sales_targets',
     'employee_queries',
+    'portal_settings',
+    'department_leaderboards',
+    'employee_department_ranks',
+    'salary_slips',
   ];
 
-  for (const col of expected15Collections) {
+  for (const col of expected19Collections) {
     assert.ok(
       backupArrayMatch[1].includes(`'${col}'`),
       `BACKUP_COLLECTION_NAMES must include '${col}'`,
     );
   }
   const quotedItems = backupArrayMatch[1].match(/'[^']+'/g) || [];
-  assert.equal(quotedItems.length, 15, 'BACKUP_COLLECTION_NAMES must contain all 15 collections');
+  assert.equal(quotedItems.length, 19, 'BACKUP_COLLECTION_NAMES must contain all 19 collections');
 
   const opsText = fs.readFileSync(
     path.resolve(process.cwd(), 'src/services/operationsService.ts'),
@@ -2053,19 +2057,19 @@ test('34. firestore.rules & services ensure PAID payouts, adjustments, and perso
     /function activeEmployeeId\(\)\s*\{\s*return get\(\/databases\/\$\(database\)\/documents\/active_auth_uids\/\$\(request\.auth\.uid\)\)\.data\.employeeId;\s*\}/,
   );
 
-  // 2. payout_records, incentive_adjustments, and sales_targets strictly gate by isActiveEmployee() + (authUid || activeEmployeeId())
+  // 2. payout_records, incentive_adjustments, and sales_targets strictly gate by isActiveEmployee() + isEmployeeVisibleDoc(...) + (authUid || activeEmployeeId())
   const payoutBlock = rulesNoComments.match(/match \/payout_records\/\{payoutId\}\s*\{[\s\S]*?\n    \}/);
   assert.ok(payoutBlock, 'payout_records match block must exist');
-  assert.match(payoutBlock[0], /isActiveEmployee\(\) && \(existing\(\)\.authUid == request\.auth\.uid \|\| existing\(\)\.employeeId == activeEmployeeId\(\)\)/);
-  assert.match(payoutBlock[0], /isActiveEmployee\(\) && \(resource\.data\.authUid == request\.auth\.uid \|\| resource\.data\.employeeId == activeEmployeeId\(\)\)/);
+  assert.match(payoutBlock[0], /isActiveEmployee\(\) && isEmployeeVisibleDoc\(existing\(\)\) && \(existing\(\)\.authUid == request\.auth\.uid \|\| existing\(\)\.employeeId == activeEmployeeId\(\)\)/);
+  assert.match(payoutBlock[0], /isActiveEmployee\(\) && isEmployeeVisibleDoc\(resource\.data\) && \(resource\.data\.authUid == request\.auth\.uid \|\| resource\.data\.employeeId == activeEmployeeId\(\)\)/);
 
   const adjBlock = rulesNoComments.match(/match \/incentive_adjustments\/\{adjustmentId\}\s*\{[\s\S]*?\n    \}/);
   assert.ok(adjBlock, 'incentive_adjustments match block must exist');
-  assert.match(adjBlock[0], /isActiveEmployee\(\) && resource\.data\.status == 'ACTIVE' && \(resource\.data\.authUid == request\.auth\.uid \|\| resource\.data\.employeeId == activeEmployeeId\(\)\)/);
+  assert.match(adjBlock[0], /isActiveEmployee\(\) && resource\.data\.status == 'ACTIVE' && isEmployeeVisibleDoc\(resource\.data\) && \(resource\.data\.authUid == request\.auth\.uid \|\| resource\.data\.employeeId == activeEmployeeId\(\)\)/);
 
   const targetBlock = rulesNoComments.match(/match \/sales_targets\/\{targetId\}\s*\{[\s\S]*?\n    \}/);
   assert.ok(targetBlock, 'sales_targets match block must exist');
-  assert.match(targetBlock[0], /isActiveEmployee\(\) && \(resource\.data\.scope == 'BRANCH' \|\| resource\.data\.authUid == request\.auth\.uid \|\| resource\.data\.employeeId == activeEmployeeId\(\)\)/);
+  assert.match(targetBlock[0], /isActiveEmployee\(\) && isEmployeeVisibleDoc\(resource\.data\) && \(resource\.data\.scope == 'BRANCH' \|\| resource\.data\.authUid == request\.auth\.uid \|\| resource\.data\.employeeId == activeEmployeeId\(\)\)/);
 
   // 3. incentiveService.ts backfills authUid across payout_records, incentive_adjustments, and sales_targets too
   const svcText = fs.readFileSync(
@@ -2079,14 +2083,662 @@ test('34. firestore.rules & services ensure PAID payouts, adjustments, and perso
   assert.ok(svcText.includes('adjustmentsUpdated'));
   assert.ok(svcText.includes('targetsUpdated'));
 
-  // 4. operationsService.ts supports dual authUid + employeeId subscription, batch payout upsert, and operational sync
+  // 4. operationsService.ts supports dual authUid + employeeId subscription, visibility filter, batch payout upsert, and operational sync
   const opsText = fs.readFileSync(
     path.resolve(process.cwd(), 'src/services/operationsService.ts'),
     'utf-8',
   );
   assert.ok(opsText.includes('export async function upsertPayoutRecordsBatch'));
   assert.ok(opsText.includes('export async function syncOperationalAuthUids'));
-  assert.ok(opsText.includes("query(collection(db, 'payout_records'), where('employeeId', '==', cleanEmpId))"));
+  assert.ok(opsText.includes("where('employeeId', '==', cleanEmpId)"));
+  assert.ok(opsText.includes("where('employeeVisible', '==', true)"));
 });
+
+// =========================================================================
+// TEST 35: Admin Month Visibility Rules (ALL, Single Month, Multi-Select, Empty)
+// =========================================================================
+test('35. Admin Month Visibility engine accurately gates ALL, single-month (Oct 2026 only), multi-month, and zero-month selections', async () => {
+  const {
+    isMonthVisibleToEmployees,
+    filterVisibleMonths,
+  } = await import('../src/lib/departmentLeaderboardEngine.ts');
+
+  const allMonths = ['2026-10', '2026-09', '2026-08'];
+
+  // 1. Default / ALL mode shows every published month
+  assert.equal(isMonthVisibleToEmployees('2026-10', null), true);
+  assert.equal(
+    isMonthVisibleToEmployees('2026-08', {
+      settingId: 'visibility',
+      mode: 'ALL',
+      visibleMonths: [],
+      updatedByEmail: 'uhvishal41@gmail.com',
+      updatedAt: '2026-11-01T00:00:00Z',
+    }),
+    true,
+  );
+  assert.deepEqual(
+    filterVisibleMonths(allMonths, {
+      settingId: 'visibility',
+      mode: 'ALL',
+      visibleMonths: [],
+      updatedByEmail: 'uhvishal41@gmail.com',
+      updatedAt: '2026-11-01T00:00:00Z',
+    }),
+    ['2026-10', '2026-09', '2026-08'],
+  );
+
+  // 2. Single-month restriction: ONLY Oct 2026 visible to staff
+  const octOnly = {
+    settingId: 'visibility' as const,
+    mode: 'SELECTED' as const,
+    visibleMonths: ['2026-10'],
+    updatedByEmail: 'uhvishal41@gmail.com',
+    updatedAt: '2026-11-01T00:00:00Z',
+  };
+  assert.equal(isMonthVisibleToEmployees('2026-10', octOnly), true);
+  assert.equal(isMonthVisibleToEmployees('2026-09', octOnly), false);
+  assert.equal(isMonthVisibleToEmployees('2026-08', octOnly), false);
+  assert.deepEqual(filterVisibleMonths(allMonths, octOnly), ['2026-10']);
+
+  // 3. Multi-select restriction: Oct 2026 & Sep 2026 visible
+  const multiSelect = {
+    settingId: 'visibility' as const,
+    mode: 'SELECTED' as const,
+    visibleMonths: ['2026-10', '2026-09'],
+    updatedByEmail: 'uhvishal41@gmail.com',
+    updatedAt: '2026-11-01T00:00:00Z',
+  };
+  assert.deepEqual(filterVisibleMonths(allMonths, multiSelect), ['2026-10', '2026-09']);
+
+  // 4. Empty selected list hides all months from staff
+  const hideAll = {
+    settingId: 'visibility' as const,
+    mode: 'SELECTED' as const,
+    visibleMonths: [],
+    updatedByEmail: 'uhvishal41@gmail.com',
+    updatedAt: '2026-11-01T00:00:00Z',
+  };
+  assert.deepEqual(filterVisibleMonths(allMonths, hideAll), []);
+});
+
+// =========================================================================
+// TEST 36: 5-Department Canonical Mapping & Bulk CSV Template / Parser
+// =========================================================================
+test('36. Official 5 textile departments resolve fuzzy retail spellings and Bulk CSV parser validates employee assignments', async () => {
+  const {
+    OFFICIAL_DEPARTMENTS,
+    resolveCanonicalDepartment,
+    buildDepartmentCsvTemplate,
+    parseBulkDepartmentCsvText,
+  } = await import('../src/lib/departmentLeaderboardEngine.ts');
+
+  // Exactly 5 official departments
+  assert.equal(OFFICIAL_DEPARTMENTS.length, 5);
+  assert.deepEqual(
+    OFFICIAL_DEPARTMENTS.map((d) => d.id),
+    ['SAREE', 'LADIES_WEAR', 'KIDS_WEAR', 'MENS_WEAR', 'NON_APPARELS'],
+  );
+
+  // Fuzzy resolution of common retail spellings (including user prompt variations)
+  assert.equal(resolveCanonicalDepartment('Saree Dept.')?.id, 'SAREE');
+  assert.equal(resolveCanonicalDepartment('Lediesware Dept.')?.id, 'LADIES_WEAR');
+  assert.equal(resolveCanonicalDepartment('Kids ware')?.id, 'KIDS_WEAR');
+  assert.equal(resolveCanonicalDepartment('Mens ware Dept.')?.id, 'MENS_WEAR');
+  assert.equal(resolveCanonicalDepartment('Non Apparels Dept.')?.id, 'NON_APPARELS');
+  assert.equal(resolveCanonicalDepartment('Unknown Dept'), null);
+
+  const mockEmployees: Employee[] = [
+    {
+      employeeId: 'EMP001',
+      loginId: 'emp001',
+      authEmail: 'emp001@homfash.com',
+      fullName: 'Aarav Kulkarni',
+      branchId: 'SUPA',
+      branchName: 'Supa Branch',
+      departmentId: 'KIDS_WEAR',
+      departmentName: 'Kids Wear Dept.',
+      designation: 'Sales Executive',
+      role: 'EMPLOYEE',
+      status: 'ACTIVE',
+      mustChangePassword: false,
+      credentialsProvisioned: true,
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    },
+    {
+      employeeId: 'EMP002',
+      loginId: 'emp002',
+      authEmail: 'emp002@homfash.com',
+      fullName: 'Snehal Jadhav',
+      branchId: 'DHARASHIV',
+      branchName: 'Dharashiv Branch',
+      designation: 'Sales Executive',
+      role: 'EMPLOYEE',
+      status: 'ACTIVE',
+      mustChangePassword: false,
+      credentialsProvisioned: true,
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    },
+  ];
+
+  const csvTemplate = buildDepartmentCsvTemplate(mockEmployees);
+  assert.ok(csvTemplate.includes('EMP001'));
+  assert.ok(csvTemplate.includes('Kids Wear Dept.'));
+
+  const parsedRows = parseBulkDepartmentCsvText(
+    [
+      'Employee ID,Full Name,Branch,Department',
+      'EMP001,Aarav Kulkarni,Supa Branch,Kids ware',
+      'EMP002,Snehal Jadhav,Dharashiv Branch,Lediesware Dept.',
+      'EMP999,Ghost User,Supa Branch,Saree Dept.',
+      'EMP002,Snehal Jadhav,Dharashiv Branch,Invalid Dept',
+    ].join('\n'),
+    mockEmployees,
+  );
+
+  assert.equal(parsedRows.length, 4);
+  assert.equal(parsedRows[0].employeeId, 'EMP001');
+  assert.equal(parsedRows[0].status, 'UNCHANGED');
+  assert.equal(parsedRows[0].resolvedDepartment?.id, 'KIDS_WEAR');
+  assert.equal(parsedRows[1].employeeId, 'EMP002');
+  assert.equal(parsedRows[1].status, 'READY');
+  assert.equal(parsedRows[1].resolvedDepartment?.id, 'LADIES_WEAR');
+  assert.equal(parsedRows[2].status, 'UNKNOWN_EMPLOYEE');
+  assert.equal(parsedRows[3].status, 'INVALID_DEPARTMENT');
+});
+
+// =========================================================================
+// TEST 37: 40-Employee Cross-Branch Kids Wear Top-3 Ranking & Zero-Incentive Privacy
+// =========================================================================
+test('37. 40-employee Kids Wear ranking crowns #1 Supa, #2 Dharashiv, #3 Shrigonda with ZERO peer incentives and exact personal rank', async () => {
+  const {
+    computeDepartmentLeaderboardsAndRanks,
+    buildDepartmentLeaderboardId,
+    buildEmployeeRankId,
+  } = await import('../src/lib/departmentLeaderboardEngine.ts');
+
+  const branchNames = [
+    'Supa', 'Dharashiv', 'Shrigonda', 'Baramati', 'Indapur', 'Akluj',
+    'Daund', 'Phaltan', 'Karjat', 'Jamkhed', 'Patas', 'Kurkumbh',
+  ];
+
+  // Build 40 ACTIVE Kids Wear employees across all 12 branches
+  const employees: Employee[] = [];
+  const incentives: PublishedIncentive[] = [];
+
+  for (let i = 1; i <= 40; i++) {
+    const branchIdx = (i - 1) % branchNames.length;
+    const branchName = branchNames[branchIdx];
+    const branchId = branchName.toUpperCase();
+    const empId = `KW_${String(i).padStart(2, '0')}`;
+
+    employees.push({
+      employeeId: empId,
+      loginId: empId.toLowerCase(),
+      authEmail: `${empId.toLowerCase()}@homfash.com`,
+      authUid: `uid_${empId}`,
+      fullName: `Kids Staff ${i} (${branchName})`,
+      branchId,
+      branchName,
+      departmentId: 'KIDS_WEAR',
+      departmentName: 'Kids Wear Dept.',
+      photoDataUrl: i <= 3 ? `data:image/jpeg;base64,MOCK_PHOTO_${i}` : undefined,
+      designation: 'Sales Executive',
+      role: 'EMPLOYEE',
+      status: 'ACTIVE',
+      mustChangePassword: false,
+      credentialsProvisioned: true,
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    });
+
+    // Make #1 = Supa (i=1: ₹5,00,000), #2 = Dharashiv (i=2: ₹4,60,000), #3 = Shrigonda (i=3: ₹4,20,000)
+    // Staff 4..39 descend by ₹10,000 each; Staff 40 has ₹0 sale (no incentive record)
+    if (i < 40) {
+      const saleRupees =
+        i === 1 ? 500_000 : i === 2 ? 460_000 : i === 3 ? 420_000 : 420_000 - (i - 3) * 10_000;
+      const salePaise = saleRupees * 100;
+      incentives.push({
+        recordId: `rec_${empId}_2026-10`,
+        businessDate: '2026-10-31',
+        monthKey: '2026-10',
+        employeeId: empId,
+        authUid: `uid_${empId}`,
+        employeeName: `Kids Staff ${i} (${branchName})`,
+        branchId,
+        branchName,
+        component1Label: 'C1',
+        component2Label: 'C2',
+        component3Label: 'C3',
+        component1Paise: 50_000,
+        component2Paise: 30_000,
+        component3Paise: 20_000,
+        totalPaise: 100_000,
+        totalSaleAmtPaise: salePaise,
+        totalSaleQty: 120,
+        status: 'PUBLISHED',
+        version: 1,
+        batchId: 'batch_oct_2026',
+        publishedAt: '2026-11-01T00:00:00Z',
+        publishedByEmail: 'uhvishal41@gmail.com',
+      });
+    }
+  }
+
+  const { leaderboards, employeeRanks } = computeDepartmentLeaderboardsAndRanks({
+    monthKey: '2026-10',
+    employees,
+    incentives,
+    employeeVisible: true,
+    updatedByEmail: 'uhvishal41@gmail.com',
+    now: '2026-11-01T10:00:00Z',
+  });
+
+  const kidsBoard = leaderboards.find(
+    (b) => b.leaderboardId === buildDepartmentLeaderboardId('2026-10', 'KIDS_WEAR'),
+  );
+  assert.ok(kidsBoard, 'Kids Wear leaderboard must be generated');
+  assert.equal(kidsBoard.totalParticipants, 40);
+  assert.equal(kidsBoard.top3.length, 3);
+
+  // Exact Top 3 verification
+  assert.equal(kidsBoard.top3[0].rank, 1);
+  assert.equal(kidsBoard.top3[0].employeeName, 'Kids Staff 1 (Supa)');
+  assert.equal(kidsBoard.top3[0].branchName, 'Supa');
+  assert.equal(kidsBoard.top3[0].saleAmtPaise, 50_000_000);
+  assert.equal(kidsBoard.top3[0].photoDataUrl, 'data:image/jpeg;base64,MOCK_PHOTO_1');
+
+  assert.equal(kidsBoard.top3[1].rank, 2);
+  assert.equal(kidsBoard.top3[1].branchName, 'Dharashiv');
+  assert.equal(kidsBoard.top3[1].saleAmtPaise, 46_000_000);
+
+  assert.equal(kidsBoard.top3[2].rank, 3);
+  assert.equal(kidsBoard.top3[2].branchName, 'Shrigonda');
+  assert.equal(kidsBoard.top3[2].saleAmtPaise, 42_000_000);
+
+  // Privacy invariant: strictly ZERO incentive, peer employeeId, or PII fields on every Top-3 entry
+  for (const entry of kidsBoard.top3) {
+    const keys = Object.keys(entry);
+    assert.equal('totalPaise' in entry, false);
+    assert.equal('component1Paise' in entry, false);
+    assert.equal('component2Paise' in entry, false);
+    assert.equal('component3Paise' in entry, false);
+    assert.equal('employeeId' in entry, false);
+    assert.equal('phone' in entry, false);
+    assert.equal('authEmail' in entry, false);
+    assert.ok(
+      keys.every((k) =>
+        ['rank', 'employeeName', 'branchName', 'photoDataUrl', 'saleAmtPaise'].includes(k),
+      ),
+    );
+  }
+
+  // Personal rank #12 out of 40 + exact gap to surpass Top 3 (#3 + ₹1)
+  const rank12 = employeeRanks.find(
+    (r) => r.rankId === buildEmployeeRankId('2026-10', 'KW_12'),
+  );
+  assert.ok(rank12, 'Rank doc for KW_12 must exist');
+  assert.equal(rank12.rank, 12);
+  assert.equal(rank12.totalParticipants, 40);
+  // KW_12 sale = 420,000 - 9*10,000 = 330,000; Top 3 cutoff (#3) = 420,000 => gap to surpass = ₹90,001 (9,000,100 paise)
+  assert.equal(rank12.saleAmtPaise, 33_000_000);
+  assert.equal(rank12.gapToTop3Paise, 9_000_100);
+  assert.equal(rank12.gapToRank1Paise, 17_000_000);
+
+  // Employee #40 with ₹0 sale receives rank 0 (Unranked) while still counting in 40 participants
+  const rank40 = employeeRanks.find(
+    (r) => r.rankId === buildEmployeeRankId('2026-10', 'KW_40'),
+  );
+  assert.ok(rank40);
+  assert.equal(rank40.rank, 0);
+  assert.equal(rank40.saleAmtPaise, 0);
+  assert.equal(rank40.gapToTop3Paise, 42_000_100);
+});
+
+// =========================================================================
+// TEST 38: Firestore Rules Hardening for Month Visibility & Department Leaderboards
+// =========================================================================
+test('38. firestore.rules enforces month visibility across monthly collections and isolates department leaderboards & personal ranks', () => {
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
+
+  // 1. Visibility helper functions exist
+  assert.match(rulesNoComments, /function isVisibilityRestricted\(\)/);
+  assert.match(rulesNoComments, /function isEmployeeVisibleDoc\(data\)/);
+  assert.match(rulesNoComments, /function activeEmployeeDepartmentId\(\)/);
+
+  // 2. isValidLeaderboardEntry strictly uses hasOnly without any incentive field or peer ID
+  const entryFn = rulesNoComments.match(/function isValidLeaderboardEntry\(entry\)\s*\{[\s\S]*?\n    \}/);
+  assert.ok(entryFn, 'isValidLeaderboardEntry must exist');
+  assert.ok(
+    entryFn[0].includes("entry.keys().hasOnly(['rank', 'employeeName', 'branchName', 'photoDataUrl', 'saleAmtPaise'])"),
+  );
+  assert.equal(entryFn[0].includes('totalPaise'), false);
+  assert.equal(entryFn[0].includes('component1Paise'), false);
+
+  // 3. portal_settings/visibility readable by Active Employees, writable ONLY by Super Admin
+  const settingsBlock = rulesNoComments.match(/match \/portal_settings\/\{settingId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(settingsBlock);
+  assert.match(settingsBlock[0], /allow get: if settingId == 'visibility' && \(isSuperAdmin\(\) \|\| isActiveEmployee\(\)\);/);
+  assert.match(settingsBlock[0], /allow list: if isSuperAdmin\(\);/);
+  assert.match(settingsBlock[0], /allow delete: if false;/);
+
+  // 4. department_leaderboards: zero staff list; staff get requires own departmentId + visible month
+  const lbBlock = rulesNoComments.match(/match \/department_leaderboards\/\{leaderboardId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(lbBlock);
+  assert.match(lbBlock[0], /allow list: if isSuperAdmin\(\);/);
+  assert.match(lbBlock[0], /existing\(\)\.departmentId == activeEmployeeDepartmentId\(\)/);
+  assert.match(lbBlock[0], /isEmployeeVisibleDoc\(existing\(\)\)/);
+
+  // 5. employee_department_ranks: zero staff list; staff get requires own authUid/employeeId + visible month
+  const rankBlock = rulesNoComments.match(/match \/employee_department_ranks\/\{rankId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(rankBlock);
+  assert.match(rankBlock[0], /allow list: if isSuperAdmin\(\);/);
+  assert.match(rankBlock[0], /existing\(\)\.authUid == request\.auth\.uid \|\| existing\(\)\.employeeId == activeEmployeeId\(\)/);
+  assert.match(rankBlock[0], /isEmployeeVisibleDoc\(existing\(\)\)/);
+
+  // 6. published_incentives & monthly_summaries enforce isEmployeeVisibleDoc on both get & list
+  const pubBlock = rulesNoComments.match(/match \/published_incentives\/\{recordId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(pubBlock);
+  assert.match(pubBlock[0], /isEmployeeVisibleDoc\(existing\(\)\)/);
+  assert.match(pubBlock[0], /isEmployeeVisibleDoc\(resource\.data\)/);
+
+  const sumBlock = rulesNoComments.match(/match \/monthly_summaries\/\{summaryId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(sumBlock);
+  assert.match(sumBlock[0], /isEmployeeVisibleDoc\(existing\(\)\)/);
+  assert.match(sumBlock[0], /isEmployeeVisibleDoc\(resource\.data\)/);
+});
+
+// =========================================================================
+// TEST 39: Salary Slip Indian Words Converter & Privacy-Safe Bank Account Masking
+// =========================================================================
+test('39. Salary Slip engine converts paise to Indian English currency words and strictly masks bank account numbers', async () => {
+  const {
+    paiseToIndianWords,
+    maskBankAccountNumber,
+    buildSalarySlipId,
+    normalizeMonthKeyFromCell,
+  } = await import('../src/lib/salarySlipEngine.ts');
+
+  // Indian currency words checks
+  assert.equal(paiseToIndianWords(1_850_000), 'Rupees Eighteen Thousand Five Hundred Only');
+  assert.equal(
+    paiseToIndianWords(1_850_050),
+    'Rupees Eighteen Thousand Five Hundred And Fifty Paise Only',
+  );
+  assert.equal(
+    paiseToIndianWords(12_345_600),
+    'Rupees One Lakh Twenty Three Thousand Four Hundred Fifty Six Only',
+  );
+  assert.equal(paiseToIndianWords(0), 'Rupees Zero Only');
+
+  // Privacy-safe bank account masking
+  assert.equal(maskBankAccountNumber('123456789012'), 'XXXX9012');
+  assert.equal(maskBankAccountNumber('XXXX9012'), 'XXXX9012');
+  assert.equal(maskBankAccountNumber('9876'), 'XXXX9876');
+  assert.equal(maskBankAccountNumber(''), '');
+
+  // Deterministic Slip ID & flexible month parsing
+  assert.equal(buildSalarySlipId('2026-10', '459'), '2026-10__459');
+  assert.equal(normalizeMonthKeyFromCell('Oct-2026'), '2026-10');
+  assert.equal(normalizeMonthKeyFromCell('2026-10'), '2026-10');
+  assert.equal(normalizeMonthKeyFromCell('10/2026'), '2026-10');
+});
+
+// =========================================================================
+// TEST 40: Monthly Salary Sheet CSV Template, Payroll Math & Auto-Department Sync
+// =========================================================================
+test('40. Salary Slip CSV parser computes exact Gross/Deductions/Net math, masks bank accounts, flags errors, and detects Auto-Department Sync', async () => {
+  const {
+    buildSalarySlipCsvTemplate,
+    parseSalaryCsvText,
+  } = await import('../src/lib/salarySlipEngine.ts');
+
+  // Template pre-fills active staff
+  const templateCsv = buildSalarySlipCsvTemplate(EMPLOYEES, '2026-10');
+  assert.ok(templateCsv.includes('459'));
+  assert.ok(templateCsv.includes('355'));
+  assert.equal(templateCsv.includes('2432'), false, 'Inactive staff should not be pre-filled');
+
+  // Parse realistic payroll CSV with fuzzy department names, duplicate employee, and unknown ID
+  const csvInput = [
+    'Employee ID,Full Name,Branch,Department,Designation,Month,Total Days,Paid Days,LOP Days,Basic,HRA,Conveyance,Special Allowance,Overtime,Incentive / Bonus,Other Earnings,PF,ESIC,PT,Advance / Loan Recovery,TDS,Other Deduction,Bank Name,Bank A/c No,IFSC,PAN,UAN,PF No,ESIC No,DOJ,Payment Mode,Payment Date,Payment Ref,Remarks',
+    '459,Anita Popat Shingade,BARAMATI MIDC,Kids ware,Senior Sales Executive,Oct-2026,31,30,1,15000,4000,1000,1500,500,1200,0,1800,150,200,500,0,0,HDFC Bank,123456789012,HDFC0001234,ABCDE1234F,100998877665,MH/PUN/12345,3112345678,2023-04-01,BANK,2026-11-05,NEFT998877,Diwali Bonus Included',
+    '355,Asha Abaji Chavan,BARAMATI MOTIBAG,Lediesware Dept.,Sales Executive,2026-10,31,31,0,12000,3000,500,0,0,0,0,1440,120,200,0,0,0,SBI,998877665544,SBIN0004321,PQRSX5678K,,,,,,UPI,2026-11-05,UPI1122,',
+    '459,Anita Popat Shingade,BARAMATI MIDC,Kids ware,Senior Sales Executive,2026-10,31,30,1,15000,0,0,0,0,0,0,0,0,0,0,0,0,,,,,,,,,,,',
+    '9999,Unknown Staff,BARAMATI MIDC,Saree Dept.,Sales Executive,2026-10,31,31,0,10000,0,0,0,0,0,0,0,0,0,0,0,0,,,,,,,,,,,',
+  ].join('\n');
+
+  const summary = parseSalaryCsvText(csvInput, EMPLOYEES, '2026-10');
+  assert.equal(summary.rows.length, 4);
+  assert.equal(summary.validRows.length, 2);
+  assert.equal(summary.duplicateRows.length, 1);
+  assert.equal(summary.errorRows.length, 1);
+  assert.equal(summary.departmentSyncCount, 2);
+
+  // Verify Row 1 exact payroll arithmetic & bank masking
+  const row459 = summary.rows[0];
+  assert.equal(row459.status, 'VALID');
+  assert.equal(row459.willSyncDepartment, true);
+  assert.equal(row459.resolvedDepartment?.id, 'KIDS_WEAR');
+  assert.equal(row459.resolvedDepartment?.name, 'Kids Wear Dept.');
+  assert.equal(row459.grossEarningsPaise, 2_320_000); // 15000+4000+1000+1500+500+1200 = ₹23,200
+  assert.equal(row459.totalDeductionsPaise, 265_000); // 1800+150+200+500 = ₹2,650
+  assert.equal(row459.netPayablePaise, 2_055_000); // ₹20,550
+  assert.equal(row459.bankAccountMasked, 'XXXX9012');
+  assert.equal(row459.paymentMode, 'BANK');
+
+  // Verify Row 2 department normalization
+  const row355 = summary.rows[1];
+  assert.equal(row355.status, 'VALID');
+  assert.equal(row355.resolvedDepartment?.id, 'LADIES_WEAR');
+  assert.equal(row355.resolvedDepartment?.name, 'Ladies Wear Dept.');
+  assert.equal(row355.bankAccountMasked, 'XXXX5544');
+  assert.equal(row355.grossEarningsPaise, 1_550_000); // ₹15,500
+  assert.equal(row355.totalDeductionsPaise, 176_000); // ₹1,760
+  assert.equal(row355.netPayablePaise, 1_374_000); // ₹13,740
+
+  // Verify duplicate & unknown employee errors
+  assert.equal(summary.rows[2].status, 'DUPLICATE_IN_FILE');
+  assert.equal(summary.rows[3].status, 'ERROR');
+  assert.match(summary.rows[3].errorMessage, /not found in Employee Master/i);
+
+  // Summary KPIs sum strictly VALID rows
+  assert.equal(summary.totalGrossPaise, 3_870_000);
+  assert.equal(summary.totalDeductionsPaise, 441_000);
+  assert.equal(summary.totalNetPaise, 3_429_000);
+});
+
+// =========================================================================
+// TEST 41: Salary Slip Firestore Rules Invariants & Month Visibility Integration
+// =========================================================================
+test('41. firestore.rules enforces exact Salary Slip arithmetic & privacy isolation and Month Visibility cascades to salary_slips', () => {
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
+
+  // 1. isValidSalarySlip enforces exact earnings/deductions/net payable math
+  const fnMatch = rulesNoComments.match(/function isValidSalarySlip\(data\)\s*\{[\s\S]*?\n    \}/);
+  assert.ok(fnMatch, 'isValidSalarySlip validator must exist in firestore.rules');
+  assert.ok(fnMatch[0].includes('data.grossEarningsPaise == ('));
+  assert.ok(fnMatch[0].includes('data.totalDeductionsPaise == ('));
+  assert.ok(fnMatch[0].includes('data.netPayablePaise == (data.grossEarningsPaise - data.totalDeductionsPaise)'));
+
+  // 2. match /salary_slips/{slipId} strictly isolates private staff reads & restricts writes to Super Admin
+  const slipBlock = rulesNoComments.match(/match \/salary_slips\/\{slipId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(slipBlock, 'salary_slips match block must exist');
+  assert.match(
+    slipBlock[0],
+    /isActiveEmployee\(\) && isEmployeeVisibleDoc\(existing\(\)\) && \(existing\(\)\.authUid == request\.auth\.uid \|\| existing\(\)\.employeeId == activeEmployeeId\(\)\)/,
+  );
+  assert.match(
+    slipBlock[0],
+    /isActiveEmployee\(\) && isEmployeeVisibleDoc\(resource\.data\) && \(resource\.data\.authUid == request\.auth\.uid \|\| resource\.data\.employeeId == activeEmployeeId\(\)\)/,
+  );
+  assert.match(slipBlock[0], /allow create: if isValidId\(slipId\) && isSuperAdmin\(\) && isValidSalarySlip\(incoming\(\)\)/);
+  assert.match(slipBlock[0], /incoming\(\)\.uploadedAt == existing\(\)\.uploadedAt/);
+  assert.match(slipBlock[0], /allow delete: if isValidId\(slipId\) && isSuperAdmin\(\);/);
+
+  // 3. departmentVisibilityService cascades Admin Month Visibility toggles to salary_slips
+  const visSvcText = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/services/departmentVisibilityService.ts'),
+    'utf-8',
+  );
+  assert.ok(
+    visSvcText.includes("'salary_slips'"),
+    'VISIBILITY_SCOPED_COLLECTIONS must include salary_slips',
+  );
+});
+
+// =========================================================================
+// TEST 42: Salary Slip Header Substring Collision Guard (Zero Ghost Amounts / Double-Counting)
+// =========================================================================
+test('42. Salary Slip parser prevents short-key collisions (pl/ta/da/wo/tax/deduction) when optional columns are omitted', async () => {
+  const { parseSalaryCsvText } = await import('../src/lib/salarySlipEngine.ts');
+
+  // Minimal HR sheet that intentionally OMITS Paid Leave, Conveyance, Special Allowance, Weekly Off, TDS, and Other Deduction
+  // while INCLUDING Employee ID=459 (contains "pl"), Total Days=31 (contains "ta" & "da"), Worked Days=28 (contains "wo"),
+  // Professional Tax=200 (contains "tax"), and PF Deduction=1800 (contains "deduction")
+  const minimalCsv = [
+    'Employee ID,Employee Name,Total Days,Worked Days,Basic Salary,HRA,PF Deduction,Professional Tax,Total Deductions',
+    '459,Anita Popat Shingade,31,28,15000,3000,1800,200,2000',
+  ].join('\n');
+
+  const res = parseSalaryCsvText(minimalCsv, EMPLOYEES, '2026-10');
+  assert.equal(res.validRows.length, 1);
+  const row = res.validRows[0];
+
+  assert.equal(row.totalDays, 31);
+  assert.equal(row.paidDays, 28);
+  assert.equal(row.paidLeaveDays, 0, 'pl must NOT match employeeid (459)');
+  assert.equal(row.weeklyOffDays, 0, 'wo must NOT match workeddays (28)');
+  assert.equal(row.conveyancePaise, 0, 'ta must NOT match totaldays (31)');
+  assert.equal(row.specialAllowancePaise, 0, 'da must NOT match totaldays (31)');
+  assert.equal(row.tdsPaise, 0, 'tax must NOT double-count Professional Tax (200)');
+  assert.equal(row.otherDeductionPaise, 0, 'deduction must NOT double-count PF Deduction or Total Deductions');
+  assert.equal(row.basicPaise, 1_500_000);
+  assert.equal(row.hraPaise, 300_000);
+  assert.equal(row.grossEarningsPaise, 1_800_000); // Exactly ₹18,000
+  assert.equal(row.pfPaise, 180_000);
+  assert.equal(row.ptPaise, 20_000);
+  assert.equal(row.totalDeductionsPaise, 200_000); // Exactly ₹2,000
+  assert.equal(row.netPayablePaise, 1_600_000); // Exactly ₹16,000
+});
+
+// =========================================================================
+// TEST 43: Salary Slip Attendance Bounds (<= 31 & Paid <= Total) & Negative Net Pay Guard
+// =========================================================================
+test('43. Salary Slip parser rejects attendance days > 31, Paid Days > Total Days, and Negative Net Pay before Firestore write', async () => {
+  const { parseSalaryCsvText } = await import('../src/lib/salarySlipEngine.ts');
+
+  const badRowsCsv = [
+    'Salesman No,Total Days,Paid Days,Basic Salary,PF,Advance Recovery',
+    '459,35,30,15000,1800,0', // Total Days > 31
+    '355,30,31,15000,1800,0', // Paid Days > Total Days
+  ].join('\n');
+
+  const res1 = parseSalaryCsvText(badRowsCsv, EMPLOYEES, '2026-10');
+  assert.equal(res1.validRows.length, 0);
+  assert.equal(res1.errorRows.length, 2);
+  assert.match(res1.errorRows[0].errorMessage, /between 0 and 31/i);
+  assert.match(res1.errorRows[1].errorMessage, /cannot exceed Total Days/i);
+
+  const negNetCsv = [
+    'Salesman No,Total Days,Paid Days,Basic Salary,Advance Recovery',
+    '459,31,30,10000,12000', // Deductions ₹12,000 > Gross ₹10,000
+  ].join('\n');
+
+  const res2 = parseSalaryCsvText(negNetCsv, EMPLOYEES, '2026-10');
+  assert.equal(res2.validRows.length, 0);
+  assert.equal(res2.errorRows.length, 1);
+  assert.match(res2.errorRows[0].errorMessage, /Net Payable cannot be negative/i);
+});
+
+// =========================================================================
+// TEST 44: Salary Slip Company Banner Header Auto-Detection & Date Cell Normalization
+// =========================================================================
+test('44. Salary Slip parser auto-detects header row below Row 1–2 company banners and normalizes Date cells to YYYY-MM-DD', async () => {
+  const { parseSalaryCsvText, normalizeDateCellToIso } = await import(
+    '../src/lib/salarySlipEngine.ts'
+  );
+
+  // Date normalization tests (Excel Date object, DD-MM-YYYY, DD/MM/YYYY, ISO)
+  assert.equal(normalizeDateCellToIso(new Date('2026-11-05T06:00:00.000Z')), '2026-11-05');
+  assert.equal(normalizeDateCellToIso('05-11-2026'), '2026-11-05');
+  assert.equal(normalizeDateCellToIso('1/4/2023'), '2023-04-01');
+  assert.equal(normalizeDateCellToIso('2026-10-01'), '2026-10-01');
+
+  // CSV with 2 title banner rows before actual headers on Row 3
+  const bannerCsv = [
+    'SHRIMUKTAI MART PRIVATE LIMITED — HOUSE OF MUKTAI',
+    'Monthly Payroll Register — Oct 2026',
+    'Salesman No,Employee Name,DOJ,Basic Salary,HRA,Payment Date',
+    '459,Anita Popat Shingade,01-04-2023,15000,3000,05/11/2026',
+  ].join('\n');
+
+  const res = parseSalaryCsvText(bannerCsv, EMPLOYEES, '2026-10');
+  assert.equal(res.validRows.length, 1);
+  assert.equal(res.validRows[0].employeeId, '459');
+  assert.equal(res.validRows[0].dateOfJoining, '2023-04-01');
+  assert.equal(res.validRows[0].paymentDate, '2026-11-05');
+  assert.equal(res.validRows[0].netPayablePaise, 1_800_000);
+});
+
+// =========================================================================
+// TEST 45: Department Top-3 Leaderboard Gap Math When < 3 Active Sellers Exist
+// =========================================================================
+test('45. Department Leaderboard computes ₹1 gapToTop3Paise when fewer than 3 sellers exist in a department', async () => {
+  const { computeDepartmentLeaderboardsAndRanks } = await import(
+    '../src/lib/departmentLeaderboardEngine.ts'
+  );
+
+  const deptEmps: Employee[] = [
+    { ...EMPLOYEES[0], employeeId: 'E1', fullName: 'Seller One', departmentId: 'KIDS_WEAR', departmentName: 'Kids Wear Dept.', status: 'ACTIVE' },
+    { ...EMPLOYEES[1], employeeId: 'E2', fullName: 'Seller Two', departmentId: 'KIDS_WEAR', departmentName: 'Kids Wear Dept.', status: 'ACTIVE' },
+    { ...EMPLOYEES[0], employeeId: 'E3', fullName: 'Zero Seller', departmentId: 'KIDS_WEAR', departmentName: 'Kids Wear Dept.', status: 'ACTIVE' },
+  ];
+
+  const incs: PublishedIncentive[] = [
+    makePublishedRecord({
+      importType: 'MONTHLY',
+      periodStart: '2026-10-01',
+      periodEnd: '2026-10-31',
+      employeeId: 'E1',
+      saleAmt1Paise: 5_000_000, // ₹50,000
+    }),
+    makePublishedRecord({
+      importType: 'MONTHLY',
+      periodStart: '2026-10-01',
+      periodEnd: '2026-10-31',
+      employeeId: 'E2',
+      saleAmt1Paise: 3_000_000, // ₹30,000
+    }),
+  ];
+
+  const { leaderboards, employeeRanks } = computeDepartmentLeaderboardsAndRanks({
+    monthKey: '2026-10',
+    employees: deptEmps,
+    incentives: incs,
+    employeeVisible: true,
+    updatedByEmail: 'uhvishal41@gmail.com',
+  });
+
+  const kidsBoard = leaderboards.find((b) => b.departmentId === 'KIDS_WEAR');
+  assert.ok(kidsBoard);
+  assert.equal(kidsBoard.top3.length, 2);
+
+  const rankZero = employeeRanks.find((r) => r.employeeId === 'E3');
+  assert.ok(rankZero);
+  assert.equal(rankZero.rank, 0);
+  assert.equal(
+    rankZero.gapToTop3Paise,
+    100,
+    'With only 2 sellers on podium, open 3rd spot needs only ₹1 (100 paise), not Rank #2 + ₹1',
+  );
+  assert.equal(rankZero.gapToRank1Paise, 5_000_000);
+});
+
+
 
 

@@ -1,10 +1,12 @@
 import { jsPDF } from 'jspdf';
 import { COMPANY_BRAND, DEFAULT_EMPLOYEE_PASSWORD } from './companyBrand';
 import { formatMonthLabel, formatQty, formatShortDate } from './format';
+import { paiseToIndianWords } from './salarySlipEngine';
 import type {
   Employee,
   IncentiveAdjustment,
   PayoutRecord,
+  SalarySlip,
 } from '../types/incentive';
 
 function formatRsPdf(paise: number): string {
@@ -682,3 +684,285 @@ export async function downloadCredentialSheetPdf(params: {
 
   doc.save(`house-of-muktai-staff-logins-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
+
+export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<void> {
+  const logoDataUrl = await loadBrandLogoPngDataUrl();
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 15;
+  const contentW = pageWidth - margin * 2;
+  const monthLabel = formatMonthLabel(slip.monthKey);
+
+  let y = drawCorporateLetterhead({
+    doc,
+    logoDataUrl,
+    documentTitle: 'MONTHLY SALARY SLIP',
+    rightMetaTop: `PAY PERIOD: ${monthLabel.toUpperCase()}`,
+    rightMetaBottom: `Generated: ${new Date().toLocaleDateString('en-IN')}`,
+    margin,
+  });
+
+  // 1. Employee & Statutory Identity Block (2-column executive card)
+  const boxH = 42;
+  doc.setDrawColor(203, 213, 225);
+  doc.setFillColor(248, 250, 252);
+  doc.roundedRect(margin, y, contentW, boxH, 2, 2, 'FD');
+
+  const midX = margin + contentW * 0.52;
+  doc.setDrawColor(226, 232, 240);
+  doc.line(midX - 3, y + 4, midX - 3, y + boxH - 4);
+
+  const leftRows: Array<[string, string]> = [
+    ['Employee Name', slip.employeeName],
+    ['Salesman No / ID', slip.employeeId],
+    ['Branch', slip.branchName],
+    ['Department', slip.departmentName || '—'],
+    ['Designation', slip.designation || 'Sales Executive'],
+    ['Date of Joining', slip.dateOfJoining || '—'],
+  ];
+  const rightRows: Array<[string, string]> = [
+    ['Bank Name', slip.bankName || '—'],
+    ['Account No', slip.bankAccountMasked || '—'],
+    ['IFSC Code', slip.bankIfsc || '—'],
+    ['PAN', slip.panNumber || '—'],
+    ['UAN / PF No', [slip.uanNumber, slip.pfNumber].filter(Boolean).join(' / ') || '—'],
+    ['ESIC No', slip.esicNumber || '—'],
+  ];
+
+  leftRows.forEach(([label, value], i) => {
+    const ry = y + 7 + i * 6;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.8);
+    doc.setTextColor(100, 116, 139);
+    doc.text(label, margin + 4, ry);
+    doc.setFont('helvetica', i === 0 ? 'bold' : 'normal');
+    doc.setTextColor(15, 31, 61);
+    doc.text(String(value || '—').slice(0, 32), margin + 33, ry);
+  });
+
+  rightRows.forEach(([label, value], i) => {
+    const ry = y + 7 + i * 6;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.8);
+    doc.setTextColor(100, 116, 139);
+    doc.text(label, midX, ry);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(15, 31, 61);
+    doc.text(String(value || '—').slice(0, 30), midX + 26, ry);
+  });
+
+  y += boxH + 5;
+
+  // 2. Attendance Summary Strip (6 clean cells)
+  const attendanceCols = [
+    { label: 'Total Days', value: String(slip.totalDays) },
+    { label: 'Paid Days', value: String(slip.paidDays) },
+    { label: 'LOP / Absent', value: String(slip.lopDays) },
+    { label: 'Weekly Off', value: String(slip.weeklyOffDays) },
+    { label: 'Paid Leave', value: String(slip.paidLeaveDays) },
+    { label: 'OT Hours', value: String(slip.overtimeHours) },
+  ];
+  const attW = contentW / attendanceCols.length;
+  doc.setDrawColor(203, 213, 225);
+  doc.setFillColor(255, 255, 255);
+  doc.roundedRect(margin, y, contentW, 14, 1.5, 1.5, 'FD');
+
+  attendanceCols.forEach((col, i) => {
+    const cx = margin + i * attW;
+    if (i > 0) {
+      doc.setDrawColor(226, 232, 240);
+      doc.line(cx, y, cx, y + 14);
+    }
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    doc.setTextColor(100, 116, 139);
+    doc.text(col.label, cx + attW / 2, y + 5, { align: 'center' });
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.2);
+    doc.setTextColor(15, 31, 61);
+    doc.text(col.value, cx + attW / 2, y + 11, { align: 'center' });
+  });
+
+  y += 20;
+
+  // 3. Side-by-Side Earnings & Deductions Table
+  const halfW = contentW / 2;
+  const headerH = 8.5;
+
+  // Navy Header Bar
+  doc.setFillColor(15, 31, 61);
+  doc.rect(margin, y, contentW, headerH, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.2);
+  doc.text('EARNINGS', margin + 4, y + 5.7);
+  doc.text('AMOUNT', margin + halfW - 4, y + 5.7, { align: 'right' });
+  doc.text('DEDUCTIONS', margin + halfW + 4, y + 5.7);
+  doc.text('AMOUNT', pageWidth - margin - 4, y + 5.7, { align: 'right' });
+
+  // Vertical gold divider in header
+  doc.setDrawColor(184, 146, 58);
+  doc.setLineWidth(0.4);
+  doc.line(margin + halfW, y, margin + halfW, y + headerH);
+  y += headerH;
+
+  const allEarningsRows: Array<[string, number]> = [
+    ['Basic Salary', slip.basicPaise],
+    ['House Rent Allowance (HRA)', slip.hraPaise],
+    ['Conveyance Allowance', slip.conveyancePaise],
+    ['Special Allowance', slip.specialAllowancePaise],
+    ['Overtime Pay', slip.overtimePaise],
+    ['Incentive / Bonus', slip.incentivePaise],
+    ['Other Earnings', slip.otherEarningsPaise],
+  ];
+  const earningsRows = allEarningsRows.filter(([, amt], idx) => idx === 0 || amt > 0);
+
+  const allDeductionRows: Array<[string, number]> = [
+    ['Provident Fund (PF)', slip.pfPaise],
+    ['ESIC Contribution', slip.esicPaise],
+    ['Professional Tax (PT)', slip.ptPaise],
+    ['Advance / Loan Recovery', slip.advanceRecoveryPaise],
+    ['Income Tax (TDS)', slip.tdsPaise],
+    ['Other Deductions', slip.otherDeductionPaise],
+  ];
+  const deductionRows = allDeductionRows.filter(([, amt]) => amt > 0);
+
+  if (deductionRows.length === 0) {
+    deductionRows.push(['No Deductions', 0]);
+  }
+
+  const maxLines = Math.max(earningsRows.length, deductionRows.length, 5);
+  const rowH = 7.4;
+
+  for (let i = 0; i < maxLines; i += 1) {
+    if (i % 2 === 1) {
+      doc.setFillColor(248, 250, 252);
+      doc.rect(margin, y, contentW, rowH, 'F');
+    }
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.25);
+    doc.rect(margin, y, halfW, rowH, 'S');
+    doc.rect(margin + halfW, y, halfW, rowH, 'S');
+
+    const earn = earningsRows[i];
+    if (earn) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.2);
+      doc.setTextColor(30, 41, 59);
+      doc.text(earn[0], margin + 4, y + 5);
+      doc.setFont('helvetica', 'bold');
+      doc.text(formatRsPdf(earn[1]), margin + halfW - 4, y + 5, { align: 'right' });
+    }
+
+    const ded = deductionRows[i];
+    if (ded) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.2);
+      doc.setTextColor(30, 41, 59);
+      doc.text(ded[0], margin + halfW + 4, y + 5);
+      doc.setFont('helvetica', 'bold');
+      doc.text(formatRsPdf(ded[1]), pageWidth - margin - 4, y + 5, { align: 'right' });
+    }
+
+    y += rowH;
+  }
+
+  // Gross & Total Deductions Footer Row
+  doc.setFillColor(241, 245, 249);
+  doc.rect(margin, y, contentW, 9, 'F');
+  doc.setDrawColor(203, 213, 225);
+  doc.rect(margin, y, halfW, 9, 'S');
+  doc.rect(margin + halfW, y, halfW, 9, 'S');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.6);
+  doc.setTextColor(15, 31, 61);
+  doc.text('GROSS EARNINGS (A)', margin + 4, y + 6);
+  doc.text(formatRsPdf(slip.grossEarningsPaise), margin + halfW - 4, y + 6, { align: 'right' });
+
+  doc.text('TOTAL DEDUCTIONS (B)', margin + halfW + 4, y + 6);
+  doc.text(formatRsPdf(slip.totalDeductionsPaise), pageWidth - margin - 4, y + 6, {
+    align: 'right',
+  });
+
+  y += 15;
+
+  // 4. Net Payable Highlight Box (Corporate Navy + Heritage Gold)
+  doc.setFillColor(15, 31, 61);
+  doc.roundedRect(margin, y, contentW, 25, 2, 2, 'F');
+  doc.setFillColor(184, 146, 58);
+  doc.rect(margin, y, contentW, 1.8, 'F');
+
+  doc.setTextColor(223, 194, 125);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.2);
+  doc.text('NET SALARY PAYABLE (A - B)', margin + 5, y + 8.5);
+
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(15);
+  doc.text(formatRsPdf(slip.netPayablePaise), pageWidth - margin - 5, y + 10, {
+    align: 'right',
+  });
+
+  doc.setTextColor(226, 232, 240);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.8);
+  const wordsText = `In Words: ${paiseToIndianWords(slip.netPayablePaise)}`;
+  const wrappedWords = doc.splitTextToSize(wordsText, contentW - 10);
+  doc.text(wrappedWords.slice(0, 2), margin + 5, y + 17.5);
+
+  y += 31;
+
+  // 5. Settlement & Remarks Metadata Strip
+  const settlementParts: string[] = [];
+  if (slip.paymentMode) settlementParts.push(`Mode: ${slip.paymentMode}`);
+  if (slip.paymentDate) settlementParts.push(`Date: ${slip.paymentDate}`);
+  if (slip.paymentReference) settlementParts.push(`Ref / UTR: ${slip.paymentReference}`);
+
+  if (settlementParts.length > 0 || slip.remarks) {
+    doc.setDrawColor(226, 232, 240);
+    doc.setFillColor(248, 250, 252);
+    const metaH = slip.remarks ? 17 : 11;
+    doc.roundedRect(margin, y, contentW, metaH, 1.5, 1.5, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.8);
+    doc.setTextColor(15, 31, 61);
+    doc.text(
+      settlementParts.length > 0
+        ? `Settlement Details: ${settlementParts.join('   |   ')}`
+        : 'Settlement Notes:',
+      margin + 4,
+      y + 6.5,
+    );
+    if (slip.remarks) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.6);
+      doc.setTextColor(71, 85, 105);
+      doc.text(`Remarks: ${slip.remarks.slice(0, 120)}`, margin + 4, y + 13);
+    }
+    y += metaH + 6;
+  }
+
+  // Authorized computer-generated notice
+  doc.setFont('helvetica', 'italic');
+  doc.setFontSize(7.5);
+  doc.setTextColor(100, 116, 139);
+  doc.text(
+    'This is a computer-generated confidential salary slip issued by SHRIMUKTAI MART PRIVATE LIMITED and does not require a physical signature.',
+    margin,
+    Math.min(y + 4, 266),
+  );
+
+  drawCorporateFooter({
+    doc,
+    margin,
+    note: `Confidential Payroll Statement (${monthLabel}) — Issued strictly for ${slip.employeeName} (${slip.employeeId}).`,
+    pageNumber: 1,
+    totalPages: 1,
+  });
+
+  const safeEmp = slip.employeeId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  doc.save(`house-of-muktai-salary-slip-${safeEmp}-${slip.monthKey}.pdf`);
+}
+

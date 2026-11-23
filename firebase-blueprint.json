@@ -22,6 +22,7 @@
       "properties": {
         "authUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "employeeId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "departmentId": { "type": "string", "enum": ["", "SAREE", "LADIES_WEAR", "KIDS_WEAR", "MENS_WEAR", "NON_APPARELS"] },
         "active": { "type": "boolean" },
         "updatedAt": { "type": "string", "format": "date-time", "maxLength": 40 }
       },
@@ -56,10 +57,21 @@
         "fullName": { "type": "string", "maxLength": 120 },
         "branchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "branchName": { "type": "string", "maxLength": 120 },
+        "departmentId": { "type": "string", "enum": ["", "SAREE", "LADIES_WEAR", "KIDS_WEAR", "MENS_WEAR", "NON_APPARELS"] },
+        "departmentName": { "type": "string", "maxLength": 80 },
+        "photoDataUrl": { "type": "string", "maxLength": 45000 },
         "designation": { "type": "string", "maxLength": 80 },
         "phone": { "type": "string", "maxLength": 24 },
         "address": { "type": "string", "maxLength": 240 },
         "emergencyContact": { "type": "string", "maxLength": 120 },
+        "dateOfJoining": { "type": "string", "maxLength": 20 },
+        "panNumber": { "type": "string", "maxLength": 20 },
+        "uanNumber": { "type": "string", "maxLength": 24 },
+        "pfNumber": { "type": "string", "maxLength": 32 },
+        "esicNumber": { "type": "string", "maxLength": 32 },
+        "bankName": { "type": "string", "maxLength": 80 },
+        "bankAccountMasked": { "type": "string", "maxLength": 32 },
+        "bankIfsc": { "type": "string", "maxLength": 20 },
         "role": { "type": "string", "enum": ["EMPLOYEE"] },
         "status": { "type": "string", "enum": ["ACTIVE", "INACTIVE"] },
         "mustChangePassword": { "type": "boolean" },
@@ -237,6 +249,7 @@
         "supersededByRecordId": { "type": "string", "maxLength": 128 },
         "supersededAt": { "type": "string", "format": "date-time", "maxLength": 40 },
         "supersededReason": { "type": "string", "maxLength": 240 },
+        "employeeVisible": { "type": "boolean" },
         "publishedAt": { "type": "string", "format": "date-time", "maxLength": 40 },
         "publishedByEmail": { "type": "string", "maxLength": 180 }
       },
@@ -339,6 +352,7 @@
         "totalSaleAmtPaise": { "type": "number" },
         "totalSaleQty": { "type": "number" },
         "publishedDaysCount": { "type": "number" },
+        "employeeVisible": { "type": "boolean" },
         "updatedAt": { "type": "string", "format": "date-time", "maxLength": 40 }
       },
       "required": [
@@ -415,6 +429,7 @@
         "paymentReference": { "type": "string", "maxLength": 120 },
         "paidAt": { "type": "string", "maxLength": 40 },
         "remarks": { "type": "string", "maxLength": 240 },
+        "employeeVisible": { "type": "boolean" },
         "updatedByEmail": { "type": "string", "maxLength": 180 },
         "updatedAt": { "type": "string", "format": "date-time", "maxLength": 40 }
       },
@@ -453,7 +468,8 @@
         "createdByEmail": { "type": "string", "maxLength": 180 },
         "createdAt": { "type": "string", "format": "date-time", "maxLength": 40 },
         "voidedByEmail": { "type": "string", "maxLength": 180 },
-        "voidedAt": { "type": "string", "maxLength": 40 }
+        "voidedAt": { "type": "string", "maxLength": 40 },
+        "employeeVisible": { "type": "boolean" }
       },
       "required": [
         "adjustmentId",
@@ -486,6 +502,7 @@
         "employeeName": { "type": "string", "maxLength": 120 },
         "targetSaleAmtPaise": { "type": "number" },
         "targetSaleQty": { "type": "number" },
+        "employeeVisible": { "type": "boolean" },
         "updatedByEmail": { "type": "string", "maxLength": 180 },
         "updatedAt": { "type": "string", "format": "date-time", "maxLength": 40 }
       },
@@ -537,6 +554,171 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "PortalVisibilitySettings": {
+      "title": "PortalVisibilitySettings",
+      "description": "Super Admin controlled employee month visibility settings (ALL or SELECTED months)",
+      "type": "object",
+      "properties": {
+        "settingId": { "type": "string", "enum": ["visibility"] },
+        "mode": { "type": "string", "enum": ["ALL", "SELECTED"] },
+        "visibleMonths": { "type": "array" },
+        "updatedByEmail": { "type": "string", "maxLength": 180 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 40 }
+      },
+      "required": ["settingId", "mode", "visibleMonths", "updatedByEmail", "updatedAt"]
+    },
+    "DepartmentLeaderboard": {
+      "title": "DepartmentLeaderboard",
+      "description": "Privacy-safe cross-branch Top 3 Sales Leaderboard per department and month (ONLY Sale Amount, Name, Branch, Photo; zero incentive amounts)",
+      "type": "object",
+      "properties": {
+        "leaderboardId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "monthKey": { "type": "string", "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}$" },
+        "departmentId": { "type": "string", "enum": ["SAREE", "LADIES_WEAR", "KIDS_WEAR", "MENS_WEAR", "NON_APPARELS"] },
+        "departmentName": { "type": "string", "maxLength": 80 },
+        "totalParticipants": { "type": "number" },
+        "top3": { "type": "array" },
+        "employeeVisible": { "type": "boolean" },
+        "updatedByEmail": { "type": "string", "maxLength": 180 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 40 }
+      },
+      "required": [
+        "leaderboardId",
+        "monthKey",
+        "departmentId",
+        "departmentName",
+        "totalParticipants",
+        "top3",
+        "employeeVisible",
+        "updatedByEmail",
+        "updatedAt"
+      ]
+    },
+    "EmployeeDepartmentRank": {
+      "title": "EmployeeDepartmentRank",
+      "description": "Private personal department rank and gap-to-Top-3 standing per active employee and month",
+      "type": "object",
+      "properties": {
+        "rankId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "monthKey": { "type": "string", "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}$" },
+        "employeeId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authUid": { "type": "string", "maxLength": 128 },
+        "departmentId": { "type": "string", "enum": ["SAREE", "LADIES_WEAR", "KIDS_WEAR", "MENS_WEAR", "NON_APPARELS"] },
+        "departmentName": { "type": "string", "maxLength": 80 },
+        "rank": { "type": "number" },
+        "totalParticipants": { "type": "number" },
+        "saleAmtPaise": { "type": "number" },
+        "gapToTop3Paise": { "type": "number" },
+        "gapToRank1Paise": { "type": "number" },
+        "employeeVisible": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 40 }
+      },
+      "required": [
+        "rankId",
+        "monthKey",
+        "employeeId",
+        "authUid",
+        "departmentId",
+        "departmentName",
+        "rank",
+        "totalParticipants",
+        "saleAmtPaise",
+        "gapToTop3Paise",
+        "gapToRank1Paise",
+        "employeeVisible",
+        "updatedAt"
+      ]
+    },
+    "SalarySlip": {
+      "title": "SalarySlip",
+      "description": "Monthly employee salary / payment slip with attendance, earnings, deductions, net payable, and visibility gating",
+      "type": "object",
+      "properties": {
+        "slipId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "monthKey": { "type": "string", "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}$" },
+        "employeeId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authUid": { "type": "string", "maxLength": 128 },
+        "employeeName": { "type": "string", "maxLength": 120 },
+        "branchId": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "branchName": { "type": "string", "maxLength": 120 },
+        "departmentId": { "type": "string", "enum": ["", "SAREE", "LADIES_WEAR", "KIDS_WEAR", "MENS_WEAR", "NON_APPARELS"] },
+        "departmentName": { "type": "string", "maxLength": 80 },
+        "designation": { "type": "string", "maxLength": 80 },
+        "dateOfJoining": { "type": "string", "maxLength": 20 },
+        "panNumber": { "type": "string", "maxLength": 20 },
+        "uanNumber": { "type": "string", "maxLength": 24 },
+        "pfNumber": { "type": "string", "maxLength": 32 },
+        "esicNumber": { "type": "string", "maxLength": 32 },
+        "bankName": { "type": "string", "maxLength": 80 },
+        "bankAccountMasked": { "type": "string", "maxLength": 32 },
+        "bankIfsc": { "type": "string", "maxLength": 20 },
+        "totalDays": { "type": "number" },
+        "paidDays": { "type": "number" },
+        "lopDays": { "type": "number" },
+        "weeklyOffDays": { "type": "number" },
+        "paidLeaveDays": { "type": "number" },
+        "overtimeHours": { "type": "number" },
+        "basicPaise": { "type": "number" },
+        "hraPaise": { "type": "number" },
+        "conveyancePaise": { "type": "number" },
+        "specialAllowancePaise": { "type": "number" },
+        "overtimePaise": { "type": "number" },
+        "incentivePaise": { "type": "number" },
+        "otherEarningsPaise": { "type": "number" },
+        "grossEarningsPaise": { "type": "number" },
+        "pfPaise": { "type": "number" },
+        "esicPaise": { "type": "number" },
+        "ptPaise": { "type": "number" },
+        "advanceRecoveryPaise": { "type": "number" },
+        "tdsPaise": { "type": "number" },
+        "otherDeductionPaise": { "type": "number" },
+        "totalDeductionsPaise": { "type": "number" },
+        "netPayablePaise": { "type": "number" },
+        "paymentMode": { "type": "string", "enum": ["", "BANK", "NEFT", "CASH", "UPI", "CHEQUE"] },
+        "paymentReference": { "type": "string", "maxLength": 120 },
+        "paymentDate": { "type": "string", "maxLength": 30 },
+        "remarks": { "type": "string", "maxLength": 240 },
+        "employeeVisible": { "type": "boolean" },
+        "uploadedByEmail": { "type": "string", "maxLength": 180 },
+        "uploadedAt": { "type": "string", "format": "date-time", "maxLength": 40 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 40 }
+      },
+      "required": [
+        "slipId",
+        "monthKey",
+        "employeeId",
+        "authUid",
+        "employeeName",
+        "branchId",
+        "branchName",
+        "totalDays",
+        "paidDays",
+        "lopDays",
+        "weeklyOffDays",
+        "paidLeaveDays",
+        "overtimeHours",
+        "basicPaise",
+        "hraPaise",
+        "conveyancePaise",
+        "specialAllowancePaise",
+        "overtimePaise",
+        "incentivePaise",
+        "otherEarningsPaise",
+        "grossEarningsPaise",
+        "pfPaise",
+        "esicPaise",
+        "ptPaise",
+        "advanceRecoveryPaise",
+        "tdsPaise",
+        "otherDeductionPaise",
+        "totalDeductionsPaise",
+        "netPayablePaise",
+        "employeeVisible",
+        "uploadedByEmail",
+        "uploadedAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -546,7 +728,7 @@
     },
     "/active_auth_uids/{authUid}": {
       "schema": { "$ref": "#/entities/ActiveAuthUid" },
-      "description": "Active employee auth UID access gate synced atomically with employees/{employeeId}.status"
+      "description": "Active employee auth UID access gate synced atomically with employees/{employeeId}.status and departmentId"
     },
     "/branches/{branchId}": {
       "schema": { "$ref": "#/entities/Branch" },
@@ -554,7 +736,7 @@
     },
     "/employees/{employeeId}": {
       "schema": { "$ref": "#/entities/Employee" },
-      "description": "Employee master records with Super Admin controlled status and isolated authUid mapping"
+      "description": "Employee master records with Super Admin controlled status, 5-department mapping, HR statutory fields, photo thumbnail, and isolated authUid"
     },
     "/import_batches/{batchId}": {
       "schema": { "$ref": "#/entities/ImportBatch" },
@@ -599,6 +781,22 @@
     "/employee_queries/{queryId}": {
       "schema": { "$ref": "#/entities/EmployeeQuery" },
       "description": "Employee incentive/sales query tickets"
+    },
+    "/portal_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/PortalVisibilitySettings" },
+      "description": "Super Admin controlled global employee visibility settings"
+    },
+    "/department_leaderboards/{leaderboardId}": {
+      "schema": { "$ref": "#/entities/DepartmentLeaderboard" },
+      "description": "Privacy-safe cross-branch Top 3 Sales Leaderboard per department and month"
+    },
+    "/employee_department_ranks/{rankId}": {
+      "schema": { "$ref": "#/entities/EmployeeDepartmentRank" },
+      "description": "Private personal department rank per active employee and month"
+    },
+    "/salary_slips/{slipId}": {
+      "schema": { "$ref": "#/entities/SalarySlip" },
+      "description": "Private monthly employee salary / payment slips with month visibility gating"
     }
   }
 }

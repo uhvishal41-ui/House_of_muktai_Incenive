@@ -601,6 +601,11 @@ async function startServer() {
         setHeaders: (res, filePath) => {
           if (filePath.endsWith('.webmanifest')) {
             res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+          } else if (filePath.endsWith('.pptx')) {
+            res.setHeader(
+              'Content-Type',
+              'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            );
           }
         },
       }),

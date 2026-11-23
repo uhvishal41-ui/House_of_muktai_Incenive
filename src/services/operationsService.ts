@@ -12,6 +12,8 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
+import { isMonthVisibleToEmployees } from '../lib/departmentLeaderboardEngine';
+import { fetchPortalVisibilitySettings } from './departmentVisibilityService';
 import type {
   AdjustmentType,
   Employee,
@@ -112,6 +114,7 @@ export function subscribeOwnPayoutRecords(
   uid: string,
   onData: (records: PayoutRecord[]) => void,
   employeeId?: string,
+  onlyEmployeeVisible = false,
 ): Unsubscribe {
   let byUidMap = new Map<string, PayoutRecord>();
   let byEmpMap = new Map<string, PayoutRecord>();
@@ -124,8 +127,12 @@ export function subscribeOwnPayoutRecords(
     onData(Array.from(merged.values()).sort((a, b) => b.monthKey.localeCompare(a.monthKey)));
   };
 
+  const uidConstraints = [
+    where('authUid', '==', uid),
+    ...(onlyEmployeeVisible ? [where('employeeVisible', '==', true)] : []),
+  ];
   const unsubUid = onSnapshot(
-    query(collection(db, 'payout_records'), where('authUid', '==', uid)),
+    query(collection(db, 'payout_records'), ...uidConstraints),
     (snap) => {
       byUidMap = new Map(
         snap.docs.map((d) => {
@@ -145,9 +152,15 @@ export function subscribeOwnPayoutRecords(
   );
 
   const cleanEmpId = employeeId?.trim();
+  const empConstraints = cleanEmpId
+    ? [
+        where('employeeId', '==', cleanEmpId),
+        ...(onlyEmployeeVisible ? [where('employeeVisible', '==', true)] : []),
+      ]
+    : [];
   const unsubEmp = cleanEmpId
     ? onSnapshot(
-        query(collection(db, 'payout_records'), where('employeeId', '==', cleanEmpId)),
+        query(collection(db, 'payout_records'), ...empConstraints),
         (snap) => {
           byEmpMap = new Map(
             snap.docs.map((d) => {
@@ -189,6 +202,7 @@ function buildPayoutRecordPayload(
   params: UpsertPayoutRecordInput,
   actorEmail: string,
   now: string,
+  employeeVisible: boolean,
 ): PayoutRecord {
   const payoutId = `${params.monthKey}_${params.employeeId}`.replace(/[^a-zA-Z0-9_-]/g, '_');
   const netPayablePaise = Math.round(params.grossIncentivePaise + params.adjustmentsNetPaise);
@@ -211,6 +225,7 @@ function buildPayoutRecordPayload(
       : {}),
     ...(params.status === 'PAID' ? { paidAt: params.paidAt || now } : {}),
     ...(params.remarks?.trim() ? { remarks: params.remarks.trim().slice(0, 240) } : {}),
+    employeeVisible,
     updatedByEmail: actorEmail,
     updatedAt: now,
   };
@@ -219,7 +234,13 @@ function buildPayoutRecordPayload(
 export async function upsertPayoutRecord(params: UpsertPayoutRecordInput): Promise<PayoutRecord> {
   const actor = requireActor();
   const now = new Date().toISOString();
-  const payload = buildPayoutRecordPayload(params, actor.email, now);
+  const visibility = await fetchPortalVisibilitySettings();
+  const payload = buildPayoutRecordPayload(
+    params,
+    actor.email,
+    now,
+    isMonthVisibleToEmployees(params.monthKey, visibility),
+  );
 
   try {
     await setDoc(doc(db, 'payout_records', payload.payoutId), payload);
@@ -244,7 +265,15 @@ export async function upsertPayoutRecordsBatch(params: {
   if (params.items.length === 0) return [];
   const actor = requireActor();
   const now = new Date().toISOString();
-  const records = params.items.map((item) => buildPayoutRecordPayload(item, actor.email, now));
+  const visibility = await fetchPortalVisibilitySettings();
+  const records = params.items.map((item) =>
+    buildPayoutRecordPayload(
+      item,
+      actor.email,
+      now,
+      isMonthVisibleToEmployees(item.monthKey, visibility),
+    ),
+  );
 
   try {
     const CHUNK_SIZE = 400;
@@ -388,6 +417,7 @@ export function subscribeOwnActiveAdjustments(
   uid: string,
   onData: (adjustments: IncentiveAdjustment[]) => void,
   employeeId?: string,
+  onlyEmployeeVisible = false,
 ): Unsubscribe {
   let byUidMap = new Map<string, IncentiveAdjustment>();
   let byEmpMap = new Map<string, IncentiveAdjustment>();
@@ -400,12 +430,13 @@ export function subscribeOwnActiveAdjustments(
     onData(Array.from(merged.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
   };
 
+  const uidConstraints = [
+    where('authUid', '==', uid),
+    where('status', '==', 'ACTIVE'),
+    ...(onlyEmployeeVisible ? [where('employeeVisible', '==', true)] : []),
+  ];
   const unsubUid = onSnapshot(
-    query(
-      collection(db, 'incentive_adjustments'),
-      where('authUid', '==', uid),
-      where('status', '==', 'ACTIVE'),
-    ),
+    query(collection(db, 'incentive_adjustments'), ...uidConstraints),
     (snap) => {
       byUidMap = new Map(
         snap.docs.map((d) => {
@@ -425,13 +456,16 @@ export function subscribeOwnActiveAdjustments(
   );
 
   const cleanEmpId = employeeId?.trim();
+  const empConstraints = cleanEmpId
+    ? [
+        where('employeeId', '==', cleanEmpId),
+        where('status', '==', 'ACTIVE'),
+        ...(onlyEmployeeVisible ? [where('employeeVisible', '==', true)] : []),
+      ]
+    : [];
   const unsubEmp = cleanEmpId
     ? onSnapshot(
-        query(
-          collection(db, 'incentive_adjustments'),
-          where('employeeId', '==', cleanEmpId),
-          where('status', '==', 'ACTIVE'),
-        ),
+        query(collection(db, 'incentive_adjustments'), ...empConstraints),
         (snap) => {
           byEmpMap = new Map(
             snap.docs.map((d) => {
@@ -470,6 +504,7 @@ export async function createIncentiveAdjustment(params: {
   if (cleanAmt <= 0) throw new Error('Adjustment amount must be greater than zero.');
   const cleanReason = params.reason.trim();
   if (cleanReason.length < 3) throw new Error('Please enter a clear adjustment reason.');
+  const visibility = await fetchPortalVisibilitySettings();
 
   const adjustmentId = `ADJ_${Date.now()}_${params.employeeId}`.replace(/[^a-zA-Z0-9_-]/g, '_');
   const record: IncentiveAdjustment = {
@@ -484,6 +519,7 @@ export async function createIncentiveAdjustment(params: {
     amountPaise: cleanAmt,
     reason: cleanReason.slice(0, 240),
     status: 'ACTIVE',
+    employeeVisible: isMonthVisibleToEmployees(params.monthKey, visibility),
     createdByEmail: actor.email,
     createdAt: now,
   };
@@ -563,6 +599,7 @@ export function subscribeOwnRelevantSalesTargets(
   uid: string,
   onData: (targets: SalesTarget[]) => void,
   employeeId?: string,
+  onlyEmployeeVisible = false,
 ): Unsubscribe {
   let branchMap = new Map<string, SalesTarget>();
   let empUidMap = new Map<string, SalesTarget>();
@@ -579,8 +616,10 @@ export function subscribeOwnRelevantSalesTargets(
     onData(Array.from(merged.values()));
   };
 
+  const visFilter = onlyEmployeeVisible ? [where('employeeVisible', '==', true)] : [];
+
   const unsubBranch = onSnapshot(
-    query(collection(db, 'sales_targets'), where('scope', '==', 'BRANCH')),
+    query(collection(db, 'sales_targets'), where('scope', '==', 'BRANCH'), ...visFilter),
     (snap) => {
       branchMap = new Map(
         snap.docs.map((d) => {
@@ -600,7 +639,7 @@ export function subscribeOwnRelevantSalesTargets(
   );
 
   const unsubEmpUid = onSnapshot(
-    query(collection(db, 'sales_targets'), where('authUid', '==', uid)),
+    query(collection(db, 'sales_targets'), where('authUid', '==', uid), ...visFilter),
     (snap) => {
       empUidMap = new Map(
         snap.docs.map((d) => {
@@ -622,7 +661,7 @@ export function subscribeOwnRelevantSalesTargets(
   const cleanEmpId = employeeId?.trim();
   const unsubEmpId = cleanEmpId
     ? onSnapshot(
-        query(collection(db, 'sales_targets'), where('employeeId', '==', cleanEmpId)),
+        query(collection(db, 'sales_targets'), where('employeeId', '==', cleanEmpId), ...visFilter),
         (snap) => {
           empIdMap = new Map(
             snap.docs.map((d) => {
@@ -661,6 +700,7 @@ function buildSalesTargetRecord(
   params: UpsertSalesTargetInput,
   actorEmail: string,
   now: string,
+  employeeVisible: boolean,
 ): SalesTarget {
   const keyPart = params.scope === 'BRANCH' ? params.branchId : params.employeeId || 'UNKNOWN';
   const targetId = `${params.scope}_${params.monthKey}_${keyPart}`.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -678,6 +718,7 @@ function buildSalesTargetRecord(
       : {}),
     targetSaleAmtPaise: Math.max(0, Math.round(params.targetSaleAmtPaise)),
     targetSaleQty: Math.max(0, Math.round(params.targetSaleQty * 100) / 100),
+    employeeVisible,
     updatedByEmail: actorEmail,
     updatedAt: now,
   };
@@ -686,7 +727,13 @@ function buildSalesTargetRecord(
 export async function upsertSalesTarget(params: UpsertSalesTargetInput): Promise<SalesTarget> {
   const actor = requireActor();
   const now = new Date().toISOString();
-  const record = buildSalesTargetRecord(params, actor.email, now);
+  const visibility = await fetchPortalVisibilitySettings();
+  const record = buildSalesTargetRecord(
+    params,
+    actor.email,
+    now,
+    isMonthVisibleToEmployees(params.monthKey, visibility),
+  );
 
   try {
     await setDoc(doc(db, 'sales_targets', record.targetId), record);
@@ -711,7 +758,15 @@ export async function upsertSalesTargetsBatch(params: {
   if (params.items.length === 0) return [];
   const actor = requireActor();
   const now = new Date().toISOString();
-  const records = params.items.map((item) => buildSalesTargetRecord(item, actor.email, now));
+  const visibility = await fetchPortalVisibilitySettings();
+  const records = params.items.map((item) =>
+    buildSalesTargetRecord(
+      item,
+      actor.email,
+      now,
+      isMonthVisibleToEmployees(item.monthKey, visibility),
+    ),
+  );
 
   try {
     const CHUNK_SIZE = 400;

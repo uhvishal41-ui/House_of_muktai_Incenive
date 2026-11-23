@@ -1,13 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Building2, FileSpreadsheet, Search, Users, X } from 'lucide-react';
+import { Building2, FileSpreadsheet, ReceiptIndianRupee, Search, Users, X } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
-import { formatINRFromPaise } from '../../lib/format';
-import type { Branch, Employee, ImportBatch } from '../../types/incentive';
+import { formatINRFromPaise, formatMonthLabel } from '../../lib/format';
+import type { Branch, Employee, ImportBatch, SalarySlip } from '../../types/incentive';
 
 export type AdminNavTab =
   | 'overview'
   | 'analytics'
   | 'payouts'
+  | 'salary'
   | 'branches'
   | 'employees'
   | 'import'
@@ -19,6 +20,7 @@ interface Props {
   branches: Branch[];
   employees: Employee[];
   batches: ImportBatch[];
+  salarySlips?: SalarySlip[];
   onNavigate: (tab: AdminNavTab) => void;
 }
 
@@ -28,6 +30,7 @@ export function AdminGlobalSearch({
   branches,
   employees,
   batches,
+  salarySlips = [],
   onNavigate,
 }: Props) {
   const [query, setQuery] = useState('');
@@ -56,6 +59,7 @@ export function AdminGlobalSearch({
       return {
         employees: employees.slice(0, 5),
         branches: branches.slice(0, 4),
+        salarySlips: salarySlips.slice(0, 3),
         batches: batches.slice(0, 3),
       };
     }
@@ -66,7 +70,8 @@ export function AdminGlobalSearch({
           e.fullName.toLowerCase().includes(trimmed) ||
           e.employeeId.toLowerCase().includes(trimmed) ||
           e.loginId.toLowerCase().includes(trimmed) ||
-          e.branchName.toLowerCase().includes(trimmed),
+          e.branchName.toLowerCase().includes(trimmed) ||
+          (e.departmentName || '').toLowerCase().includes(trimmed),
       )
       .slice(0, 8);
 
@@ -76,6 +81,19 @@ export function AdminGlobalSearch({
           b.branchName.toLowerCase().includes(trimmed) ||
           b.branchCode.toLowerCase().includes(trimmed) ||
           b.city.toLowerCase().includes(trimmed),
+      )
+      .slice(0, 5);
+
+    const matchedSalarySlips = salarySlips
+      .filter(
+        (s) =>
+          s.employeeName.toLowerCase().includes(trimmed) ||
+          s.employeeId.toLowerCase().includes(trimmed) ||
+          s.branchName.toLowerCase().includes(trimmed) ||
+          (s.departmentName || '').toLowerCase().includes(trimmed) ||
+          s.monthKey.toLowerCase().includes(trimmed) ||
+          formatMonthLabel(s.monthKey).toLowerCase().includes(trimmed) ||
+          'salary slip payslip'.includes(trimmed),
       )
       .slice(0, 5);
 
@@ -91,12 +109,16 @@ export function AdminGlobalSearch({
     return {
       employees: matchedEmployees,
       branches: matchedBranches,
+      salarySlips: matchedSalarySlips,
       batches: matchedBatches,
     };
-  }, [trimmed, employees, branches, batches]);
+  }, [trimmed, employees, branches, salarySlips, batches]);
 
   const totalMatches =
-    results.employees.length + results.branches.length + results.batches.length;
+    results.employees.length +
+    results.branches.length +
+    results.salarySlips.length +
+    results.batches.length;
 
   const jumpTo = (tab: AdminNavTab) => {
     onNavigate(tab);
@@ -136,7 +158,7 @@ export function AdminGlobalSearch({
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search employees, Salesman No, branches, or import batches..."
+                placeholder="Search employees, departments, salary slips, branches, or batches..."
                 className="flex-1 bg-transparent text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none"
               />
               <button
@@ -153,7 +175,7 @@ export function AdminGlobalSearch({
             <div className="max-h-[65vh] overflow-y-auto divide-y divide-slate-100">
               {totalMatches === 0 ? (
                 <div className="py-10 px-6 text-center text-sm text-slate-500">
-                  No employees, branches, or batches matched &ldquo;{query}&rdquo;.
+                  No employees, departments, salary slips, branches, or batches matched &ldquo;{query}&rdquo;.
                 </div>
               ) : (
                 <>
@@ -178,7 +200,9 @@ export function AdminGlobalSearch({
                                 </p>
                                 <p className="text-[11px] text-slate-500 truncate">
                                   <span className="font-mono">#{emp.employeeId}</span> ·{' '}
-                                  {emp.branchName} · {emp.designation}
+                                  {emp.branchName}
+                                  {emp.departmentName ? ` · ${emp.departmentName}` : ''} ·{' '}
+                                  {emp.designation}
                                 </p>
                               </div>
                             </div>
@@ -188,6 +212,41 @@ export function AdminGlobalSearch({
                               }`}
                             >
                               {emp.status}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {results.salarySlips.length > 0 && (
+                    <div className="p-3">
+                      <p className="px-2 pb-1.5 text-[11px] font-semibold text-slate-400">
+                        Salary Slips ({results.salarySlips.length})
+                      </p>
+                      <div className="space-y-0.5">
+                        {results.salarySlips.map((slip) => (
+                          <button
+                            key={slip.slipId}
+                            type="button"
+                            onClick={() => jumpTo('salary')}
+                            className="w-full px-2.5 py-2 rounded-lg hover:bg-slate-50 flex items-center justify-between gap-3 text-left cursor-pointer transition-colors"
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <ReceiptIndianRupee className="w-4 h-4 text-[#B8923A] shrink-0" />
+                              <div className="min-w-0">
+                                <p className="text-xs font-semibold text-[#0F1F3D] truncate">
+                                  {slip.employeeName} · {formatMonthLabel(slip.monthKey)}
+                                </p>
+                                <p className="text-[11px] text-slate-500 truncate">
+                                  <span className="font-mono">#{slip.employeeId}</span> ·{' '}
+                                  {slip.branchName}
+                                  {slip.departmentName ? ` · ${slip.departmentName}` : ''}
+                                </p>
+                              </div>
+                            </div>
+                            <span className="text-[11px] font-mono font-semibold text-emerald-700 shrink-0 tabular-nums">
+                              {formatINRFromPaise(slip.netPayablePaise)}
                             </span>
                           </button>
                         ))}

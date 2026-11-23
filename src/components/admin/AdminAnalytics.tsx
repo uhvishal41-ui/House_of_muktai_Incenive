@@ -5,10 +5,13 @@ import {
   BarChart3,
   Building2,
   Calculator,
+  Crown,
   Download,
   FileSpreadsheet,
   FileText,
+  RefreshCw,
   Target,
+  Trophy,
   Users,
 } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
@@ -24,6 +27,11 @@ import {
   YAxis,
 } from 'recharts';
 import {
+  computeDepartmentLeaderboardsAndRanks,
+  isMonthVisibleToEmployees,
+  OFFICIAL_DEPARTMENTS,
+} from '../../lib/departmentLeaderboardEngine';
+import {
   formatINRFromPaise,
   formatMonthLabel,
   formatQty,
@@ -31,6 +39,7 @@ import {
 } from '../../lib/format';
 import { normalizeRecordPeriod } from '../../lib/incentiveEngine';
 import { downloadManagementBranchSummaryPdf } from '../../lib/pdfGenerator';
+import { recomputeAndSaveDepartmentRankings } from '../../services/departmentVisibilityService';
 import { downloadManagementExcelReport } from '../../services/operationsService';
 import { BranchTargetManager } from './BranchTargetManager';
 import type {
@@ -39,6 +48,7 @@ import type {
   IncentiveAdjustment,
   MonthlySummary,
   PayoutRecord,
+  PortalVisibilitySettings,
   PublishedIncentive,
   SalesTarget,
 } from '../../types/incentive';
@@ -51,6 +61,7 @@ interface Props {
   payoutRecords: PayoutRecord[];
   adjustments: IncentiveAdjustment[];
   salesTargets: SalesTarget[];
+  visibilitySettings?: PortalVisibilitySettings;
   onRefresh: () => Promise<void>;
 }
 
@@ -59,6 +70,7 @@ type ChartMetric = 'saleAmt' | 'incentive';
 type AnalyticsSectionKey =
   | 'overview'
   | 'leaderboard'
+  | 'dept_leaders'
   | 'efficiency'
   | 'target_planner'
   | 'branch_progress'
@@ -72,6 +84,7 @@ export function AdminAnalytics({
   payoutRecords,
   adjustments,
   salesTargets,
+  visibilitySettings,
   onRefresh,
 }: Props) {
   const prefersReduced = useReducedMotion();
@@ -82,6 +95,7 @@ export function AdminAnalytics({
   const [chartMetric, setChartMetric] = useState<ChartMetric>('saleAmt');
   const [leaderSort, setLeaderSort] = useState<LeaderboardSort>('saleAmt');
   const [exportingXlsx, setExportingXlsx] = useState(false);
+  const [refreshingDeptBoards, setRefreshingDeptBoards] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   const publishedDailyMonthlyMonthKeys = useMemo(() => {
@@ -539,6 +553,52 @@ export function AdminAnalytics({
 
   const shortTargetMonth = formatMonthLabel(targetMonth);
 
+  // Live 5-Department Cross-Branch Top-3 Sales Leaderboards preview for selectedMonth
+  const deptLeaderboardPreview = useMemo(() => {
+    if (!selectedMonth) return { leaderboards: [], employeeRanks: [] };
+    return computeDepartmentLeaderboardsAndRanks({
+      monthKey: selectedMonth,
+      employees,
+      incentives,
+      employeeVisible: isMonthVisibleToEmployees(selectedMonth, visibilitySettings),
+      updatedByEmail: 'admin',
+      now: '',
+    });
+  }, [selectedMonth, employees, incentives, visibilitySettings]);
+
+  const deptAssignedActiveCount = useMemo(
+    () => employees.filter((e) => e.status === 'ACTIVE' && Boolean(e.departmentId)).length,
+    [employees],
+  );
+
+  const handlePublishDepartmentRankings = async () => {
+    if (!selectedMonth) return;
+    setRefreshingDeptBoards(true);
+    setFeedback(null);
+    try {
+      const res = await recomputeAndSaveDepartmentRankings({
+        monthKeys: [selectedMonth],
+        employees,
+        incentives,
+        visibilitySettings,
+      });
+      setFeedback({
+        type: 'ok',
+        text: `Published 5-Department Top-3 Sales Leaderboards for ${formatMonthLabel(selectedMonth)} (${res.leaderboardsWritten} dept boards, ${res.employeeRanksWritten} personal employee ranks synced to staff mobile app).`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text:
+          err instanceof Error
+            ? err.message
+            : 'Unable to publish department sales leaderboards.',
+      });
+    } finally {
+      setRefreshingDeptBoards(false);
+    }
+  };
+
   const sectionNavButtons: Array<{
     key: AnalyticsSectionKey;
     label: string;
@@ -556,6 +616,12 @@ export function AdminAnalytics({
       label: 'Top Performers',
       sublabel: `Top ${leaderboard.length} leaderboard`,
       icon: Award,
+    },
+    {
+      key: 'dept_leaders',
+      label: 'Dept. Leaders',
+      sublabel: `${OFFICIAL_DEPARTMENTS.length} depts · Top 3 Sale`,
+      icon: Trophy,
     },
     {
       key: 'efficiency',
@@ -645,7 +711,7 @@ export function AdminAnalytics({
       {/* Professional Animated Hub Switcher — Instant 1-Click Access Without Long Scrolling */}
       <nav
         aria-label="Analytics and Targets sections"
-        className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2.5"
+        className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-7 gap-2.5"
       >
         {sectionNavButtons.map((btn) => {
           const Icon = btn.icon;
@@ -1172,6 +1238,144 @@ export function AdminAnalytics({
           </table>
         </div>
           </motion.section>
+        )}
+
+        {/* Cross-Branch 5-Department Top-3 Sales Leaderboards (Privacy-Safe Staff View Preview) */}
+        {activeSection === 'dept_leaders' && (
+          <motion.div
+            key="analytics-dept-leaders"
+            initial={prefersReduced ? false : { opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={prefersReduced ? undefined : { opacity: 0, y: -6 }}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+            className="space-y-4"
+          >
+            <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-[#0F1F3D] flex items-center gap-2">
+                  <Trophy className="w-4 h-4 text-[#B8923A]" />
+                  <span>
+                    5-Department Cross-Branch Top-3 Sales Leaders ·{' '}
+                    {selectedMonth ? formatMonthLabel(selectedMonth) : 'No Month'}
+                  </span>
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Across all {branches.length} branches · {deptAssignedActiveCount} active staff
+                  mapped to departments · Mobile app displays ONLY Photo, Name, Branch & Sale Amount
+                  (zero incentive figures).
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={refreshingDeptBoards || !selectedMonth}
+                onClick={handlePublishDepartmentRankings}
+                className="h-9 px-4 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 text-[#DFC27D] ${refreshingDeptBoards ? 'animate-spin' : ''}`} />
+                {refreshingDeptBoards ? 'Syncing Staff App...' : 'Sync Rankings to Staff App'}
+              </button>
+            </div>
+
+            {deptAssignedActiveCount === 0 ? (
+              <div className="bg-white border border-amber-200 rounded-xl p-8 text-center space-y-2">
+                <p className="text-sm font-semibold text-[#0F1F3D]">
+                  No employees assigned to the 5 departments yet
+                </p>
+                <p className="text-xs text-slate-500 max-w-md mx-auto">
+                  Go to <strong>Employees → Bulk Dept. Upload</strong> (or Edit an employee) to
+                  assign staff to Saree, Ladies Wear, Kids Wear, Mens Wear, or Non Apparels.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {deptLeaderboardPreview.leaderboards.map((board) => (
+                  <div
+                    key={board.leaderboardId}
+                    className="bg-white border border-slate-200 rounded-xl overflow-hidden flex flex-col"
+                  >
+                    <div className="px-4 py-3 bg-[#0F1F3D] text-white flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <h3 className="text-xs font-bold tracking-tight truncate">
+                          {board.departmentName}
+                        </h3>
+                        <p className="text-[10px] text-[#DFC27D] font-mono">
+                          {board.totalParticipants} active staff across 12 branches
+                        </p>
+                      </div>
+                      <Crown className="w-4 h-4 text-[#DFC27D] shrink-0" />
+                    </div>
+
+                    <div className="p-3.5 flex-1 space-y-2.5">
+                      {board.top3.length === 0 ? (
+                        <div className="py-6 text-center text-xs text-slate-400">
+                          No sales recorded in {board.departmentName} for this month
+                        </div>
+                      ) : (
+                        board.top3.map((entry) => {
+                          const initials = entry.employeeName
+                            .split(/\s+/)
+                            .filter(Boolean)
+                            .map((s: string) => s[0])
+                            .join('')
+                            .slice(0, 2)
+                            .toUpperCase();
+                          return (
+                            <div
+                              key={`${board.departmentId}-rank-${entry.rank}-${entry.employeeName}`}
+                              className={`p-2.5 rounded-lg border flex items-center justify-between gap-3 ${
+                                entry.rank === 1
+                                  ? 'border-[#B8923A]/55 bg-[#B8923A]/[0.06]'
+                                  : 'border-slate-100 bg-slate-50/70'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <span
+                                  className={`w-6 h-6 rounded-md text-xs font-mono font-bold flex items-center justify-center shrink-0 ${
+                                    entry.rank === 1
+                                      ? 'bg-[#B8923A] text-white'
+                                      : entry.rank === 2
+                                        ? 'bg-[#0F1F3D] text-white'
+                                        : 'bg-slate-200 text-slate-700'
+                                  }`}
+                                >
+                                  #{entry.rank}
+                                </span>
+                                <div className="w-9 h-9 rounded-full bg-[#0F1F3D] text-[#DFC27D] text-xs font-bold flex items-center justify-center overflow-hidden border border-[#B8923A]/40 shrink-0">
+                                  {entry.photoDataUrl ? (
+                                    <img
+                                      src={entry.photoDataUrl}
+                                      alt={entry.employeeName}
+                                      className="w-full h-full object-cover"
+                                    />
+                                  ) : (
+                                    <span>{initials}</span>
+                                  )}
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="text-xs font-semibold text-slate-900 truncate">
+                                    {entry.employeeName}
+                                  </p>
+                                  <p className="text-[11px] font-medium text-slate-500 truncate">
+                                    {entry.branchName}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="text-right shrink-0">
+                                <p className="text-xs font-mono font-bold text-[#0F1F3D] tabular-nums">
+                                  {formatINRFromPaise(entry.saleAmtPaise)}
+                                </p>
+                                <p className="text-[10px] text-slate-400">Sale Amt</p>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </motion.div>
         )}
 
         {/* Branch-Wise & Employee Growth Targets / Branch Progress / Employee Progress */}

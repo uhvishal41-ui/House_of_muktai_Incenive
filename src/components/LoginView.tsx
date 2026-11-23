@@ -1,9 +1,13 @@
 import React, { useState } from 'react';
-import { ArrowRight, Building2, Eye, EyeOff, KeyRound, MapPin, ShieldCheck } from 'lucide-react';
+import { ArrowRight, Building2, Eye, EyeOff, MapPin, ShieldCheck } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { useAuth } from '../context/AuthContext';
 import { COMPANY_BRAND } from '../lib/companyBrand';
 import { BrandLogo } from './common/BrandLogo';
+import {
+  AutoMixGoogleButton,
+  ContinuousAnimatedBrandName,
+} from './common/PlayfulAnimatedBrand';
 
 export function LoginView() {
   const {
@@ -83,9 +87,10 @@ export function LoginView() {
         <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-4">
           <div className="flex items-center gap-2.5 shrink-0">
             <BrandLogo size="sm" />
-            <span className="text-base font-bold tracking-tight text-[#0F1F3D] whitespace-nowrap">
-              {COMPANY_BRAND.brandName}
-            </span>
+            <ContinuousAnimatedBrandName
+              tone="dark"
+              className="text-base whitespace-nowrap"
+            />
           </div>
           <div className="text-xs text-slate-500 hidden sm:flex items-center gap-2 whitespace-nowrap">
             <span className="font-semibold text-[#0F1F3D]">{COMPANY_BRAND.legalName}</span>
@@ -110,10 +115,11 @@ export function LoginView() {
               <div className="flex items-center gap-3.5">
                 <BrandLogo size="lg" className="border-[#B8923A]/40 shadow-sm" />
                 <div className="min-w-0">
-                  <p className="text-lg font-bold tracking-tight text-white">
-                    {COMPANY_BRAND.brandName}
-                  </p>
-                  <p className="text-[11px] font-semibold tracking-wide text-[#DFC27D] mt-0.5 leading-snug">
+                  <ContinuousAnimatedBrandName
+                    tone="light"
+                    className="text-xl sm:text-2xl leading-tight"
+                  />
+                  <p className="text-[11px] font-semibold tracking-wide text-[#DFC27D] mt-1 leading-snug">
                     {COMPANY_BRAND.legalName}
                   </p>
                 </div>
@@ -212,16 +218,14 @@ export function LoginView() {
 
             {portalMode === 'admin' ? (
               <div className="space-y-4">
-                <button
-                  type="button"
-                  disabled={busy}
+                <AutoMixGoogleButton
                   onClick={handleAdminGoogleLogin}
-                  className="w-full h-12 px-4 rounded-xl bg-[#0F1F3D] hover:bg-[#162B50] active:scale-[0.99] text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer shadow-xs"
-                >
-                  <KeyRound className="w-4 h-4 text-[#DFC27D]" />
-                  <span>{busy ? 'Authenticating...' : 'Continue with Google'}</span>
-                  <ArrowRight className="w-4 h-4" />
-                </button>
+                  disabled={busy}
+                  busy={busy}
+                  label="Continue with Google"
+                  busyLabel="Authenticating..."
+                  variant="primary"
+                />
                 <div className="flex items-center gap-2 text-[11px] text-slate-500 pt-1">
                   <ShieldCheck className="w-3.5 h-3.5 text-[#B8923A] shrink-0" />
                   <span>Protected by role-based access rules &amp; immutable audit logs</span>
@@ -279,14 +283,14 @@ export function LoginView() {
                     <ArrowRight className="w-4 h-4" />
                   </button>
 
-                  <button
-                    type="button"
-                    disabled={busy}
+                  <AutoMixGoogleButton
                     onClick={handleEmployeeGoogleLogin}
-                    className="w-full h-10 px-4 rounded-xl border border-slate-300 bg-slate-50/70 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors disabled:opacity-60 cursor-pointer"
-                  >
-                    Continue with Google
-                  </button>
+                    disabled={busy}
+                    busy={busy}
+                    label="Continue with Google"
+                    busyLabel="Signing in..."
+                    variant="secondary"
+                  />
                 </div>
               </form>
             )}

@@ -51,6 +51,8 @@ import {
   type FullFirestoreBackupSnapshot,
 } from '../../services/incentiveService';
 import { downloadManagementExcelReport } from '../../services/operationsService';
+import { DEFAULT_PORTAL_VISIBILITY } from '../../services/departmentVisibilityService';
+import { MonthVisibilityControlCard } from './MonthVisibilityControlCard';
 import type {
   AuditLog,
   Branch,
@@ -62,6 +64,7 @@ import type {
   IncentiveVersion,
   MonthlySummary,
   PayoutRecord,
+  PortalVisibilitySettings,
   PublishedIncentive,
 } from '../../types/incentive';
 
@@ -75,6 +78,7 @@ interface Props {
   auditLogs: AuditLog[];
   payoutRecords?: PayoutRecord[];
   adjustments?: IncentiveAdjustment[];
+  visibilitySettings?: PortalVisibilitySettings;
   onRefresh: () => Promise<void>;
 }
 
@@ -90,6 +94,7 @@ export function HistoryAndReports({
   auditLogs,
   payoutRecords = [],
   adjustments = [],
+  visibilitySettings = DEFAULT_PORTAL_VISIBILITY,
   onRefresh,
 }: Props) {
   const [subTab, setSubTab] = useState<SubTab>('batches');
@@ -871,6 +876,17 @@ export function HistoryAndReports({
 
   return (
     <div className="space-y-6">
+      <div className="no-print">
+        <MonthVisibilityControlCard
+          visibilitySettings={visibilitySettings}
+          incentives={incentives}
+          availableMonths={availableMonths}
+          onSaved={async () => {
+            await onRefresh();
+          }}
+        />
+      </div>
+
       <div className="no-print flex flex-col lg:flex-row lg:items-center justify-between gap-3">
         <div className="inline-flex p-1 bg-slate-200/70 rounded-xl text-sm overflow-x-auto">
           {(

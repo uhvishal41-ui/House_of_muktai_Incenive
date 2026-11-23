@@ -60,21 +60,35 @@ import {
   subscribeOwnPayoutRecords,
   subscribeOwnRelevantSalesTargets,
 } from '../../services/operationsService';
+import {
+  DEFAULT_PORTAL_VISIBILITY,
+  subscribeOwnDepartmentLeaderboard,
+  subscribeOwnDepartmentRank,
+  subscribePortalVisibilitySettings,
+} from '../../services/departmentVisibilityService';
+import { subscribeOwnSalarySlips } from '../../services/salarySlipService';
+import { isMonthVisibleToEmployees } from '../../lib/departmentLeaderboardEngine';
 import type {
+  DepartmentLeaderboard,
+  EmployeeDepartmentRank,
   EmployeeNotification,
   EmployeeQuery,
   IncentiveAdjustment,
   MonthlySummary,
   PayoutRecord,
+  PortalVisibilitySettings,
   PublishedIncentive,
   QueryCategory,
+  SalarySlip,
   SalesTarget,
 } from '../../types/incentive';
 import { BrandLogo, CompanyFooter } from '../common/BrandLogo';
 import { AnimatedCounter, PageTransition, WorkspaceSkeleton } from '../common/MotionPrimitives';
 import { OfflineIndicator } from '../common/OfflineIndicator';
 import { PWAInstallButton } from '../common/PWAInstallButton';
+import { DepartmentLeaderboardCard } from './DepartmentLeaderboardCard';
 import { EmployeeSettingsTab } from './EmployeeSettingsTab';
+import { SalarySlipFullList, SalarySlipHomeCard } from './SalarySlipSection';
 
 const EmployeeReportsTab = lazy(() =>
   import('./EmployeeReportsTab').then((m) => ({ default: m.EmployeeReportsTab })),
@@ -82,6 +96,7 @@ const EmployeeReportsTab = lazy(() =>
 
 type StaffTab = 'home' | 'statements' | 'reports' | 'profile' | 'settings';
 type ProfileSubView = 'details' | 'queries';
+type StatementsSubView = 'incentives' | 'salary';
 
 interface StatementRowProps {
   rec: PublishedIncentive;
@@ -194,13 +209,21 @@ export function EmployeePortal() {
 
   const [activeTab, setActiveTab] = useState<StaffTab>('home');
   const [profileSubView, setProfileSubView] = useState<ProfileSubView>('details');
-  const [incentives, setIncentives] = useState<PublishedIncentive[]>([]);
-  const [summaries, setSummaries] = useState<MonthlySummary[]>([]);
+  const [statementsSubView, setStatementsSubView] = useState<StatementsSubView>('incentives');
+  const [rawIncentives, setRawIncentives] = useState<PublishedIncentive[]>([]);
+  const [rawSummaries, setRawSummaries] = useState<MonthlySummary[]>([]);
   const [notifications, setNotifications] = useState<EmployeeNotification[]>([]);
-  const [payoutRecords, setPayoutRecords] = useState<PayoutRecord[]>([]);
-  const [adjustments, setAdjustments] = useState<IncentiveAdjustment[]>([]);
-  const [salesTargets, setSalesTargets] = useState<SalesTarget[]>([]);
+  const [rawPayoutRecords, setRawPayoutRecords] = useState<PayoutRecord[]>([]);
+  const [rawAdjustments, setRawAdjustments] = useState<IncentiveAdjustment[]>([]);
+  const [rawSalesTargets, setRawSalesTargets] = useState<SalesTarget[]>([]);
+  const [rawSalarySlips, setRawSalarySlips] = useState<SalarySlip[]>([]);
   const [queries, setQueries] = useState<EmployeeQuery[]>([]);
+  const [visibilitySettings, setVisibilitySettings] = useState<PortalVisibilitySettings>(
+    DEFAULT_PORTAL_VISIBILITY,
+  );
+  const [visibilityLoaded, setVisibilityLoaded] = useState(false);
+  const [deptLeaderboard, setDeptLeaderboard] = useState<DepartmentLeaderboard | null>(null);
+  const [deptRank, setDeptRank] = useState<EmployeeDepartmentRank | null>(null);
   const [selectedMonth, setSelectedMonth] = useState('');
   const [selectedTargetMonth, setSelectedTargetMonth] = useState('');
   const [loading, setLoading] = useState(true);
@@ -241,18 +264,61 @@ export function EmployeePortal() {
 
   const requiresFirstLoginPasswordChange = Boolean(employeeProfile?.mustChangePassword);
 
-  // Real-time Firestore live subscriptions across ALL employee-scoped collections.
+  // 1. Real-time Admin Month Visibility listener (loaded first so queries match Firestore rules)
   useEffect(() => {
     if (!employeeLoginGate.allowed || requiresFirstLoginPasswordChange || !user?.uid) {
-      setIncentives([]);
-      setSummaries([]);
+      setVisibilitySettings(DEFAULT_PORTAL_VISIBILITY);
+      setVisibilityLoaded(false);
+      return;
+    }
+    const unsub = subscribePortalVisibilitySettings((settings) => {
+      setVisibilitySettings(settings);
+      setVisibilityLoaded(true);
+    });
+    return () => unsub();
+  }, [employeeLoginGate.allowed, requiresFirstLoginPasswordChange, user?.uid]);
+
+  // 2. Real-time Firestore live subscriptions across ALL employee-scoped collections (visibility-aware)
+  useEffect(() => {
+    if (!employeeLoginGate.allowed || requiresFirstLoginPasswordChange || !user?.uid) {
+      setRawIncentives([]);
+      setRawSummaries([]);
       setNotifications([]);
-      setPayoutRecords([]);
-      setAdjustments([]);
-      setSalesTargets([]);
+      setRawPayoutRecords([]);
+      setRawAdjustments([]);
+      setRawSalesTargets([]);
+      setRawSalarySlips([]);
       setQueries([]);
       setLoading(false);
       return;
+    }
+
+    if (!visibilityLoaded) {
+      setLoading(true);
+      return;
+    }
+
+    const uid = user.uid;
+    const empId = employeeProfile?.employeeId;
+    const onlyEmployeeVisible = visibilitySettings.mode === 'SELECTED';
+    const allMonthsTemporarilyHidden =
+      onlyEmployeeVisible && visibilitySettings.visibleMonths.length === 0;
+
+    if (allMonthsTemporarilyHidden) {
+      setRawIncentives([]);
+      setRawSummaries([]);
+      setRawPayoutRecords([]);
+      setRawAdjustments([]);
+      setRawSalesTargets([]);
+      setRawSalarySlips([]);
+      setLoading(false);
+      const unsubs = [
+        subscribeOwnNotifications(uid, (list) => setNotifications(list)),
+        subscribeOwnEmployeeQueries(uid, (list) => setQueries(list)),
+      ];
+      return () => {
+        for (const unsub of unsubs) unsub();
+      };
     }
 
     setLoading(true);
@@ -266,42 +332,59 @@ export function EmployeePortal() {
 
     const fallbackTimer = window.setTimeout(() => setLoading(false), 3500);
 
-    const uid = user.uid;
-    const empId = employeeProfile?.employeeId;
     const unsubs = [
-      subscribeOwnPublishedIncentives(uid, (records) => {
-        setIncentives(records);
-        gotIncentives = true;
-        markReadyIfCoreLoaded();
-      }),
-      subscribeOwnMonthlySummaries(uid, (list) => {
-        setSummaries(list);
-        gotSummaries = true;
-        markReadyIfCoreLoaded();
-      }),
+      subscribeOwnPublishedIncentives(
+        uid,
+        (records) => {
+          setRawIncentives(records);
+          gotIncentives = true;
+          markReadyIfCoreLoaded();
+        },
+        onlyEmployeeVisible,
+      ),
+      subscribeOwnMonthlySummaries(
+        uid,
+        (list) => {
+          setRawSummaries(list);
+          gotSummaries = true;
+          markReadyIfCoreLoaded();
+        },
+        onlyEmployeeVisible,
+      ),
       subscribeOwnNotifications(uid, (list) => {
         setNotifications(list);
       }),
       subscribeOwnPayoutRecords(
         uid,
         (list) => {
-          setPayoutRecords(list);
+          setRawPayoutRecords(list);
         },
         empId,
+        onlyEmployeeVisible,
       ),
       subscribeOwnActiveAdjustments(
         uid,
         (list) => {
-          setAdjustments(list);
+          setRawAdjustments(list);
         },
         empId,
+        onlyEmployeeVisible,
       ),
       subscribeOwnRelevantSalesTargets(
         uid,
         (list) => {
-          setSalesTargets(list);
+          setRawSalesTargets(list);
         },
         empId,
+        onlyEmployeeVisible,
+      ),
+      subscribeOwnSalarySlips(
+        uid,
+        (list) => {
+          setRawSalarySlips(list);
+        },
+        empId,
+        onlyEmployeeVisible,
       ),
       subscribeOwnEmployeeQueries(uid, (list) => {
         setQueries(list);
@@ -319,6 +402,78 @@ export function EmployeePortal() {
     requiresFirstLoginPasswordChange,
     user?.uid,
     employeeProfile?.employeeId,
+    visibilityLoaded,
+    visibilitySettings.mode,
+    visibilitySettings.visibleMonths.join(','),
+  ]);
+
+  // Defensive client-side visibility filter synchronized 1:1 with Firestore Rules
+  const incentives = useMemo(
+    () =>
+      rawIncentives.filter((r) =>
+        r.periodStart && r.periodEnd
+          ? getOverlappingMonthKeys(r).some((m) => isMonthVisibleToEmployees(m, visibilitySettings))
+          : isMonthVisibleToEmployees(r.monthKey, visibilitySettings),
+      ),
+    [rawIncentives, visibilitySettings],
+  );
+  const summaries = useMemo(
+    () => rawSummaries.filter((s) => isMonthVisibleToEmployees(s.monthKey, visibilitySettings)),
+    [rawSummaries, visibilitySettings],
+  );
+  const payoutRecords = useMemo(
+    () => rawPayoutRecords.filter((p) => isMonthVisibleToEmployees(p.monthKey, visibilitySettings)),
+    [rawPayoutRecords, visibilitySettings],
+  );
+  const adjustments = useMemo(
+    () => rawAdjustments.filter((a) => isMonthVisibleToEmployees(a.monthKey, visibilitySettings)),
+    [rawAdjustments, visibilitySettings],
+  );
+  const salesTargets = useMemo(
+    () => rawSalesTargets.filter((t) => isMonthVisibleToEmployees(t.monthKey, visibilitySettings)),
+    [rawSalesTargets, visibilitySettings],
+  );
+  const salarySlips = useMemo(
+    () => rawSalarySlips.filter((s) => isMonthVisibleToEmployees(s.monthKey, visibilitySettings)),
+    [rawSalarySlips, visibilitySettings],
+  );
+
+  // 3. Privacy-hardened single-doc listeners for OWN department Top-3 Leaderboard & OWN personal rank
+  useEffect(() => {
+    if (
+      !employeeLoginGate.allowed ||
+      requiresFirstLoginPasswordChange ||
+      !employeeProfile ||
+      !selectedMonth ||
+      !isMonthVisibleToEmployees(selectedMonth, visibilitySettings)
+    ) {
+      setDeptLeaderboard(null);
+      setDeptRank(null);
+      return;
+    }
+
+    const unsubLb = subscribeOwnDepartmentLeaderboard(
+      selectedMonth,
+      employeeProfile.departmentId,
+      (lb) => setDeptLeaderboard(lb),
+    );
+    const unsubRank = subscribeOwnDepartmentRank(
+      selectedMonth,
+      employeeProfile.employeeId,
+      (rk) => setDeptRank(rk),
+    );
+
+    return () => {
+      unsubLb();
+      unsubRank();
+    };
+  }, [
+    employeeLoginGate.allowed,
+    requiresFirstLoginPasswordChange,
+    employeeProfile?.employeeId,
+    employeeProfile?.departmentId,
+    selectedMonth,
+    visibilitySettings,
   ]);
 
   useEffect(() => {
@@ -347,8 +502,9 @@ export function EmployeePortal() {
   const availableMonths = useMemo(() => {
     const set = new Set<string>(publishedMonthKeys);
     for (const s of activeSummaries) set.add(s.monthKey);
+    for (const sl of salarySlips) set.add(sl.monthKey);
     return Array.from(set).sort((a, b) => b.localeCompare(a));
-  }, [activeSummaries, publishedMonthKeys]);
+  }, [activeSummaries, publishedMonthKeys, salarySlips]);
 
   // Auto-focus latest published month whenever availableMonths changes
   useEffect(() => {
@@ -392,6 +548,11 @@ export function EmployeePortal() {
   const selectedMonthPayout = useMemo(
     () => payoutRecords.find((p) => p.monthKey === selectedMonth) || null,
     [payoutRecords, selectedMonth],
+  );
+
+  const selectedMonthSalarySlip = useMemo(
+    () => salarySlips.find((s) => s.monthKey === selectedMonth) || null,
+    [salarySlips, selectedMonth],
   );
 
   // All months that have a Personal or Branch target for this employee
@@ -1123,8 +1284,16 @@ export function EmployeePortal() {
         {/* Executive Employee Identity Card */}
         <section className="bg-white border border-slate-200/90 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-2xs">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-11 h-11 rounded-xl bg-[#0F1F3D] border border-[#B8923A]/40 text-[#DFC27D] font-bold text-sm flex items-center justify-center shrink-0 shadow-2xs">
-              {initials}
+            <div className="w-11 h-11 rounded-xl bg-[#0F1F3D] border border-[#B8923A]/40 text-[#DFC27D] font-bold text-sm flex items-center justify-center overflow-hidden shrink-0 shadow-2xs">
+              {employeeProfile?.photoDataUrl ? (
+                <img
+                  src={employeeProfile.photoDataUrl}
+                  alt={employeeProfile.fullName}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                initials
+              )}
             </div>
             <div className="min-w-0">
               <h1 className="text-base sm:text-lg font-bold text-[#0F1F3D] truncate leading-tight">
@@ -1135,6 +1304,12 @@ export function EmployeePortal() {
                   #{employeeProfile!.employeeId}
                 </span>{' '}
                 · {employeeProfile!.branchName}
+                {employeeProfile?.departmentName ? (
+                  <span className="font-semibold text-[#9A7625]">
+                    {' '}
+                    · {employeeProfile.departmentName}
+                  </span>
+                ) : null}
                 <span className="hidden sm:inline"> · {employeeProfile!.designation}</span>
               </p>
               {unreadCount > 0 && (
@@ -1185,6 +1360,24 @@ export function EmployeePortal() {
             {/* =============================================================== */}
             {activeTab === 'home' && (
               <PageTransition key="tab-home" className="space-y-4 sm:space-y-5">
+                {visibilitySettings.mode === 'SELECTED' && (
+                  <div className="px-3.5 py-2.5 rounded-xl bg-[#0F1F3D]/[0.05] border border-[#0F1F3D]/15 text-xs text-[#0F1F3D] flex items-center justify-between gap-2">
+                    <span className="font-medium">
+                      {visibilitySettings.visibleMonths.length === 0
+                        ? isMr
+                          ? 'सध्या Admin कडून कोणताही महिना प्रदर्शनासाठी खुला केलेला नाही.'
+                          : 'No incentive period is currently open for staff viewing.'
+                        : isMr
+                          ? `Admin ने निवडलेला कालावधी: ${visibilitySettings.visibleMonths
+                              .map((m) => formatMonthLabel(m))
+                              .join(', ')}`
+                          : `Visible period: ${visibilitySettings.visibleMonths
+                              .map((m) => formatMonthLabel(m))
+                              .join(', ')}`}
+                    </span>
+                  </div>
+                )}
+
                 {/* Executive Top Summary Strip: All-Time Published + Previous Month */}
                 <div className="grid grid-cols-2 gap-3 sm:gap-4">
                   <div className="bg-white border border-slate-200/90 rounded-2xl p-3.5 sm:p-4 shadow-2xs">
@@ -1616,6 +1809,28 @@ export function EmployeePortal() {
                     </section>
                   </div>
 
+                  {/* 5-Department Cross-Branch Top-3 Sales Leaderboard + Own Personal Rank */}
+                  <DepartmentLeaderboardCard
+                    monthKey={selectedMonth}
+                    departmentId={employeeProfile?.departmentId}
+                    departmentName={employeeProfile?.departmentName}
+                    currentEmployeeId={employeeProfile!.employeeId}
+                    leaderboard={deptLeaderboard}
+                    personalRank={deptRank}
+                    isMr={isMr}
+                  />
+
+                  {/* Monthly Salary Slip Quick Card (visible when Accounts publishes salary slip) */}
+                  <SalarySlipHomeCard
+                    slip={selectedMonthSalarySlip}
+                    monthKey={selectedMonth}
+                    isMr={isMr}
+                    onViewAllSlips={() => {
+                      setStatementsSubView('salary');
+                      setActiveTab('statements');
+                    }}
+                  />
+
                   {/* Latest Published Statement Card */}
                   <section className="lg:col-span-12 bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
                     <div className="px-4 sm:px-5 py-3.5 border-b border-slate-100 flex items-center justify-between gap-2">
@@ -1714,114 +1929,155 @@ export function EmployeePortal() {
             {/* =============================================================== */}
             {activeTab === 'statements' && (
               <PageTransition key="tab-statements" className="space-y-4 sm:space-y-5">
-                <section className="bg-white border border-slate-200/90 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-                  <div>
-                    <h2 className="text-sm sm:text-base font-semibold text-[#0F1F3D]">
-                      {t.statementsHeader}
-                    </h2>
-                    <p className="text-[11px] text-slate-500 mt-0.5">{t.statementsSub}</p>
-                  </div>
-                  <div className="grid grid-cols-2 sm:inline-flex items-center gap-1.5 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80 shrink-0">
-                    <select
-                      aria-label="Select statement month"
-                      value={selectedMonth}
-                      disabled={availableMonths.length === 0}
-                      onChange={(e) => setSelectedMonth(e.target.value)}
-                      className="h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-800 disabled:opacity-60"
-                    >
-                      {availableMonths.length === 0 ? (
-                        <option value="">{isMr ? 'डेटा नाही' : 'No Months'}</option>
+                {/* Clean Segmented Toggle: Incentive Statements vs Monthly Salary Slips */}
+                <div className="inline-flex p-1 rounded-xl bg-white border border-slate-200/90 shadow-2xs">
+                  <button
+                    type="button"
+                    onClick={() => setStatementsSubView('incentives')}
+                    className={`min-h-[38px] px-3.5 rounded-lg text-xs font-semibold cursor-pointer transition-colors ${
+                      statementsSubView === 'incentives'
+                        ? 'bg-[#0F1F3D] text-white'
+                        : 'text-slate-600 hover:text-[#0F1F3D]'
+                    }`}
+                  >
+                    {isMr ? 'इन्सेंटिव्ह स्लिप' : 'Incentive Statements'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStatementsSubView('salary')}
+                    className={`min-h-[38px] px-3.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                      statementsSubView === 'salary'
+                        ? 'bg-[#0F1F3D] text-white'
+                        : 'text-slate-600 hover:text-[#0F1F3D]'
+                    }`}
+                  >
+                    <span>{isMr ? 'पगार स्लिप (Salary)' : 'Salary Slips'}</span>
+                    {salarySlips.length > 0 && (
+                      <span
+                        className={`font-mono text-[11px] ${
+                          statementsSubView === 'salary' ? 'text-[#DFC27D]' : 'text-[#9A7625]'
+                        }`}
+                      >
+                        ({salarySlips.length})
+                      </span>
+                    )}
+                  </button>
+                </div>
+
+                {statementsSubView === 'salary' ? (
+                  <SalarySlipFullList slips={salarySlips} isMr={isMr} />
+                ) : (
+                  <>
+                    <section className="bg-white border border-slate-200/90 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+                      <div>
+                        <h2 className="text-sm sm:text-base font-semibold text-[#0F1F3D]">
+                          {t.statementsHeader}
+                        </h2>
+                        <p className="text-[11px] text-slate-500 mt-0.5">{t.statementsSub}</p>
+                      </div>
+                      <div className="grid grid-cols-2 sm:inline-flex items-center gap-1.5 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80 shrink-0">
+                        <select
+                          aria-label="Select statement month"
+                          value={selectedMonth}
+                          disabled={availableMonths.length === 0}
+                          onChange={(e) => setSelectedMonth(e.target.value)}
+                          className="h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-800 disabled:opacity-60"
+                        >
+                          {availableMonths.length === 0 ? (
+                            <option value="">{isMr ? 'डेटा नाही' : 'No Months'}</option>
+                          ) : (
+                            availableMonths.map((m) => (
+                              <option key={m} value={m}>
+                                {formatMonthLabel(m)}
+                              </option>
+                            ))
+                          )}
+                        </select>
+                        <button
+                          type="button"
+                          disabled={!selectedMonthAgg || selectedMonthAgg.sourceType === 'NO_DATA'}
+                          onClick={handleDownloadMonthlyPdf}
+                          className="h-9 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-40 transition-colors"
+                        >
+                          <FileDown className="w-3.5 h-3.5 text-[#DFC27D]" />
+                          <span>{isMr ? 'PDF स्लिप' : 'PDF Slip'}</span>
+                        </button>
+                      </div>
+                    </section>
+
+                    {/* Monthly Incentive Statements */}
+                    {monthMonthlyRecords.length > 0 && (
+                      <section className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
+                        <div className="px-4 sm:px-5 py-3 border-b border-slate-200/80 bg-[#F8FAFC]">
+                          <h3 className="text-sm font-semibold text-[#0F1F3D]">
+                            {t.monthlySectionTitle}
+                          </h3>
+                        </div>
+                        <div className="divide-y divide-slate-100">
+                          {monthMonthlyRecords.map((rec) => (
+                            <StatementRecordCard
+                              key={rec.recordId}
+                              rec={rec}
+                              t={t}
+                              onDownloadPdf={handleDownloadRecordPdf}
+                            />
+                          ))}
+                        </div>
+                      </section>
+                    )}
+
+                    {/* Custom Period Incentive Statements */}
+                    {monthCustomRecords.length > 0 && (
+                      <section className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
+                        <div className="px-4 sm:px-5 py-3 border-b border-slate-200/80 bg-[#F8FAFC]">
+                          <h3 className="text-sm font-semibold text-[#0F1F3D]">
+                            {t.customSectionTitle}
+                          </h3>
+                        </div>
+                        <div className="divide-y divide-slate-100">
+                          {monthCustomRecords.map((rec) => (
+                            <StatementRecordCard
+                              key={rec.recordId}
+                              rec={rec}
+                              t={t}
+                              onDownloadPdf={handleDownloadRecordPdf}
+                            />
+                          ))}
+                        </div>
+                      </section>
+                    )}
+
+                    {/* Daily Incentive Breakdown */}
+                    <section className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
+                      <div className="px-4 sm:px-5 py-3 border-b border-slate-200/80 bg-[#F8FAFC]">
+                        <h3 className="text-sm font-semibold text-[#0F1F3D]">
+                          {selectedMonth
+                            ? `${t.dailySectionTitle} · ${formatMonthLabel(selectedMonth)}`
+                            : t.dailySectionTitle}
+                        </h3>
+                      </div>
+
+                      {monthDailyRecords.length === 0 ? (
+                        <div className="p-7 text-center text-sm text-slate-500">
+                          {selectedMonth
+                            ? `${t.noDailyRecords} ${formatMonthLabel(selectedMonth)}.`
+                            : t.noPublishedYet}
+                        </div>
                       ) : (
-                        availableMonths.map((m) => (
-                          <option key={m} value={m}>
-                            {formatMonthLabel(m)}
-                          </option>
-                        ))
+                        <div className="divide-y divide-slate-100">
+                          {monthDailyRecords.map((rec) => (
+                            <StatementRecordCard
+                              key={rec.recordId}
+                              rec={rec}
+                              t={t}
+                              onDownloadPdf={handleDownloadRecordPdf}
+                            />
+                          ))}
+                        </div>
                       )}
-                    </select>
-                    <button
-                      type="button"
-                      disabled={!selectedMonthAgg || selectedMonthAgg.sourceType === 'NO_DATA'}
-                      onClick={handleDownloadMonthlyPdf}
-                      className="h-9 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-40 transition-colors"
-                    >
-                      <FileDown className="w-3.5 h-3.5 text-[#DFC27D]" />
-                      <span>{isMr ? 'PDF स्लिप' : 'PDF Slip'}</span>
-                    </button>
-                  </div>
-                </section>
-
-                {/* Monthly Incentive Statements */}
-                {monthMonthlyRecords.length > 0 && (
-                  <section className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
-                    <div className="px-4 sm:px-5 py-3 border-b border-slate-200/80 bg-[#F8FAFC]">
-                      <h3 className="text-sm font-semibold text-[#0F1F3D]">
-                        {t.monthlySectionTitle}
-                      </h3>
-                    </div>
-                    <div className="divide-y divide-slate-100">
-                      {monthMonthlyRecords.map((rec) => (
-                        <StatementRecordCard
-                          key={rec.recordId}
-                          rec={rec}
-                          t={t}
-                          onDownloadPdf={handleDownloadRecordPdf}
-                        />
-                      ))}
-                    </div>
-                  </section>
+                    </section>
+                  </>
                 )}
-
-                {/* Custom Period Incentive Statements */}
-                {monthCustomRecords.length > 0 && (
-                  <section className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
-                    <div className="px-4 sm:px-5 py-3 border-b border-slate-200/80 bg-[#F8FAFC]">
-                      <h3 className="text-sm font-semibold text-[#0F1F3D]">
-                        {t.customSectionTitle}
-                      </h3>
-                    </div>
-                    <div className="divide-y divide-slate-100">
-                      {monthCustomRecords.map((rec) => (
-                        <StatementRecordCard
-                          key={rec.recordId}
-                          rec={rec}
-                          t={t}
-                          onDownloadPdf={handleDownloadRecordPdf}
-                        />
-                      ))}
-                    </div>
-                  </section>
-                )}
-
-                {/* Daily Incentive Breakdown */}
-                <section className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
-                  <div className="px-4 sm:px-5 py-3 border-b border-slate-200/80 bg-[#F8FAFC]">
-                    <h3 className="text-sm font-semibold text-[#0F1F3D]">
-                      {selectedMonth
-                        ? `${t.dailySectionTitle} · ${formatMonthLabel(selectedMonth)}`
-                        : t.dailySectionTitle}
-                    </h3>
-                  </div>
-
-                  {monthDailyRecords.length === 0 ? (
-                    <div className="p-7 text-center text-sm text-slate-500">
-                      {selectedMonth
-                        ? `${t.noDailyRecords} ${formatMonthLabel(selectedMonth)}.`
-                        : t.noPublishedYet}
-                    </div>
-                  ) : (
-                    <div className="divide-y divide-slate-100">
-                      {monthDailyRecords.map((rec) => (
-                        <StatementRecordCard
-                          key={rec.recordId}
-                          rec={rec}
-                          t={t}
-                          onDownloadPdf={handleDownloadRecordPdf}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </section>
               </PageTransition>
             )}
 

@@ -91,8 +91,7 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
-          type: 'module',
+          enabled: false,
         },
       }),
       // Copies src/assets into dist/ so root-relative URLs like
@@ -116,9 +115,31 @@ export default defineConfig(() => {
       },
     ],
     resolve: {
+      dedupe: ['react', 'react-dom', 'react-is'],
       alias: {
         '@': path.resolve(import.meta.dirname, '.'),
       },
+    },
+    optimizeDeps: {
+      holdUntilCrawlEnd: true,
+      include: [
+        'react',
+        'react-dom',
+        'react-dom/client',
+        'react/jsx-runtime',
+        'react/jsx-dev-runtime',
+        'react-is',
+        'lucide-react',
+        'motion/react',
+        'recharts',
+        'firebase/app',
+        'firebase/auth',
+        'firebase/firestore',
+        'jspdf',
+        'exceljs',
+        'pptxgenjs',
+        'zod',
+      ],
     },
     build: {
       chunkSizeWarningLimit: 700,
