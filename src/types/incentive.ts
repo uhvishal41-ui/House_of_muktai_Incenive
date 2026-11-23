@@ -12,6 +12,24 @@ export type DepartmentId =
   | 'MENS_WEAR'
   | 'NON_APPARELS';
 
+export type AdminAuthType = 'GOOGLE' | 'PASSWORD';
+
+export interface AdminAccountRecord {
+  uid: string;
+  username?: string;
+  email: string;
+  displayName: string;
+  role: 'SUPER_ADMIN';
+  authType?: AdminAuthType;
+  branchId?: string;
+  active: boolean;
+  mustChangePassword?: boolean;
+  passwordUpdatedAt?: string;
+  createdByEmail?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
 export interface ActiveAuthUidRecord {
   authUid: string;
   employeeId: string;

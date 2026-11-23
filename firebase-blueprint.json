@@ -2,16 +2,22 @@
   "entities": {
     "AdminUser": {
       "title": "AdminUser",
-      "description": "Authorized Super Admin account record (Phase 2: SUPER_ADMIN only)",
+      "description": "Main Owner-managed Admin account record (Password username or verified Google Super Admin)",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "maxLength": 40, "pattern": "^[A-Z0-9_\\-]+$" },
         "email": { "type": "string", "format": "email", "maxLength": 180 },
         "displayName": { "type": "string", "maxLength": 120 },
         "role": { "type": "string", "enum": ["SUPER_ADMIN"] },
+        "authType": { "type": "string", "enum": ["GOOGLE", "PASSWORD"] },
         "branchId": { "type": "string", "maxLength": 64 },
         "active": { "type": "boolean" },
-        "createdAt": { "type": "string", "format": "date-time", "maxLength": 40 }
+        "mustChangePassword": { "type": "boolean" },
+        "passwordUpdatedAt": { "type": "string", "format": "date-time", "maxLength": 40 },
+        "createdByEmail": { "type": "string", "maxLength": 180 },
+        "createdAt": { "type": "string", "format": "date-time", "maxLength": 40 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 40 }
       },
       "required": ["uid", "email", "displayName", "role", "active", "createdAt"]
     },

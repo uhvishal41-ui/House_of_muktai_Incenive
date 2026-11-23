@@ -12,7 +12,8 @@ export type AdminNavTab =
   | 'branches'
   | 'employees'
   | 'import'
-  | 'history';
+  | 'history'
+  | 'owner-access';
 
 interface Props {
   open: boolean;

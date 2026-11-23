@@ -3,8 +3,10 @@ import {
   BarChart3,
   Building2,
   Check,
+  Crown,
   FileSpreadsheet,
   History,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -62,6 +64,7 @@ import { BrandLogo, CompanyFooter } from '../common/BrandLogo';
 import { PageTransition, WorkspaceSkeleton } from '../common/MotionPrimitives';
 import { OfflineIndicator } from '../common/OfflineIndicator';
 import { PWAInstallButton } from '../common/PWAInstallButton';
+import { AdminChangePasswordModal } from './AdminChangePasswordModal';
 import { AdminGlobalSearch, type AdminNavTab } from './AdminGlobalSearch';
 import { AdminNotificationCenter } from './AdminNotificationCenter';
 import { AdminOverview } from './AdminOverview';
@@ -86,6 +89,9 @@ const ExcelImportWorkflow = lazy(() =>
 const HistoryAndReports = lazy(() =>
   import('./HistoryAndReports').then((m) => ({ default: m.HistoryAndReports })),
 );
+const OwnerAdminAccessManager = lazy(() =>
+  import('./OwnerAdminAccessManager').then((m) => ({ default: m.OwnerAdminAccessManager })),
+);
 const SalarySlipsManager = lazy(() =>
   import('./SalarySlipsManager').then((m) => ({ default: m.SalarySlipsManager })),
 );
@@ -106,11 +112,12 @@ const NAV_ITEMS: Array<{
 ];
 
 export function AdminShell() {
-  const { user, logout } = useAuth();
+  const { user, isMainOwner, adminAccount, logout } = useAuth();
   const [activeTab, setActiveTab] = useState<AdminNavTab>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [trainingDeckOpen, setTrainingDeckOpen] = useState(false);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
 
   const [branches, setBranches] = useState<Branch[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -239,7 +246,15 @@ export function AdminShell() {
     refreshAll();
   }, [refreshAll]);
 
-  const currentNavLabel = NAV_ITEMS.find((n) => n.id === activeTab)?.label || 'Dashboard';
+  // Strict Owner gate: non-Owner Admins can NEVER land on 'owner-access'
+  const safeActiveTab: AdminNavTab =
+    !isMainOwner && activeTab === 'owner-access' ? 'overview' : activeTab;
+
+  const isPasswordAdmin = !isMainOwner && adminAccount?.authType === 'PASSWORD';
+  const currentNavLabel =
+    safeActiveTab === 'owner-access'
+      ? 'Owner · Admin Access'
+      : NAV_ITEMS.find((n) => n.id === safeActiveTab)?.label || 'Dashboard';
   const pendingApprovalCount = batches.filter(
     (b) =>
       b.status === 'VALIDATED' ||
@@ -248,7 +263,17 @@ export function AdminShell() {
       b.status === 'PROCESSING',
   ).length;
   const openQueriesCount = employeeQueries.filter((q) => q.status !== 'RESOLVED').length;
-  const adminInitials = (user?.email || 'SA').slice(0, 2).toUpperCase();
+  const actorLabel = isMainOwner
+    ? 'Main Owner'
+    : adminAccount?.displayName || 'Admin';
+  const actorSubLabel = isMainOwner
+    ? user?.email || ''
+    : adminAccount?.username || user?.email || '';
+  const adminInitials = (
+    isMainOwner ? 'MO' : adminAccount?.username || user?.email || 'AD'
+  )
+    .slice(0, 2)
+    .toUpperCase();
 
   return (
     <div className="min-h-screen bg-[#F5F7FA] flex">
@@ -270,7 +295,7 @@ export function AdminShell() {
         <nav className="flex-1 p-3 space-y-1 overflow-y-auto" aria-label="Admin Navigation">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
-            const active = activeTab === item.id;
+            const active = safeActiveTab === item.id;
             const countBadge =
               item.id === 'payouts'
                 ? openQueriesCount
@@ -308,6 +333,31 @@ export function AdminShell() {
               </button>
             );
           })}
+
+          {/* STRICTLY VISIBLE ONLY TO REGISTERED MAIN OWNER GMAIL */}
+          {isMainOwner && (
+            <div className="pt-3 mt-3 border-t border-white/10 space-y-1">
+              <p className="px-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-[#DFC27D]/80">
+                Main Owner Controls
+              </p>
+              <button
+                type="button"
+                onClick={() => setActiveTab('owner-access')}
+                className={`w-full h-10 px-3 rounded-xl text-sm font-medium inline-flex items-center gap-3 transition-all whitespace-nowrap cursor-pointer ${
+                  safeActiveTab === 'owner-access'
+                    ? 'bg-[#B8923A] text-[#0F1F3D] font-bold shadow-xs'
+                    : 'bg-[#B8923A]/15 text-[#DFC27D] hover:bg-[#B8923A]/25 border border-[#B8923A]/30'
+                }`}
+              >
+                <Crown
+                  className={`w-4 h-4 shrink-0 ${
+                    safeActiveTab === 'owner-access' ? 'text-[#0F1F3D]' : 'text-[#DFC27D]'
+                  }`}
+                />
+                <span className="truncate">Owner · Admin Access</span>
+              </button>
+            </div>
+          )}
         </nav>
 
         <div className="p-4 border-t border-white/10 bg-[#0B172E] space-y-2.5">
@@ -319,13 +369,31 @@ export function AdminShell() {
             <Presentation className="w-3.5 h-3.5 shrink-0" />
             <span className="truncate">Training PPT (हिंदी)</span>
           </button>
+
+          {isPasswordAdmin && (
+            <button
+              type="button"
+              onClick={() => setChangePasswordOpen(true)}
+              className="w-full h-9 px-3 rounded-lg border border-white/20 bg-white/10 hover:bg-white/15 text-xs font-semibold text-white inline-flex items-center justify-center gap-2 cursor-pointer transition-colors"
+            >
+              <KeyRound className="w-3.5 h-3.5 text-[#DFC27D] shrink-0" />
+              <span className="truncate">Change Password</span>
+            </button>
+          )}
+
           <div className="flex items-center gap-2.5 px-1 pt-1">
-            <div className="w-8 h-8 rounded-lg bg-[#1E3A5F] border border-[#B8923A]/40 text-[#DFC27D] text-xs font-bold flex items-center justify-center shrink-0">
-              {adminInitials}
+            <div
+              className={`w-8 h-8 rounded-lg text-xs font-bold flex items-center justify-center shrink-0 ${
+                isMainOwner
+                  ? 'bg-[#B8923A]/25 border border-[#DFC27D]/60 text-[#DFC27D]'
+                  : 'bg-[#1E3A5F] border border-[#B8923A]/40 text-[#DFC27D]'
+              }`}
+            >
+              {isMainOwner ? <Crown className="w-4 h-4" /> : adminInitials}
             </div>
             <div className="min-w-0">
-              <p className="text-xs font-semibold text-white truncate">Super Admin</p>
-              <p className="text-[11px] text-slate-400 truncate">{user?.email}</p>
+              <p className="text-xs font-semibold text-white truncate">{actorLabel}</p>
+              <p className="text-[11px] text-slate-400 truncate font-mono">{actorSubLabel}</p>
             </div>
           </div>
           <button
@@ -383,7 +451,7 @@ export function AdminShell() {
               <nav className="flex-1 p-3.5 space-y-1 overflow-y-auto">
                 {NAV_ITEMS.map((item) => {
                   const Icon = item.icon;
-                  const active = activeTab === item.id;
+                  const active = safeActiveTab === item.id;
                   return (
                     <button
                       key={item.id}
@@ -407,6 +475,29 @@ export function AdminShell() {
                     </button>
                   );
                 })}
+
+                {isMainOwner && (
+                  <div className="pt-3 mt-3 border-t border-white/10 space-y-1">
+                    <p className="px-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-[#DFC27D]/80">
+                      Main Owner Controls
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTab('owner-access');
+                        setMobileMenuOpen(false);
+                      }}
+                      className={`w-full h-11 px-3 rounded-xl text-sm font-semibold inline-flex items-center gap-3 cursor-pointer transition-colors ${
+                        safeActiveTab === 'owner-access'
+                          ? 'bg-[#B8923A] text-[#0F1F3D]'
+                          : 'bg-[#B8923A]/15 text-[#DFC27D] border border-[#B8923A]/30'
+                      }`}
+                    >
+                      <Crown className="w-4 h-4 shrink-0" />
+                      <span>Owner · Admin Access</span>
+                    </button>
+                  </div>
+                )}
               </nav>
               <div className="p-4 border-t border-white/10 bg-[#0B172E] space-y-2.5">
                 <button
@@ -420,8 +511,21 @@ export function AdminShell() {
                   <Presentation className="w-4 h-4" />
                   Training PPT (हिंदी)
                 </button>
+                {isPasswordAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileMenuOpen(false);
+                      setChangePasswordOpen(true);
+                    }}
+                    className="w-full h-10 px-3 rounded-lg border border-white/20 bg-white/10 text-sm font-semibold text-white inline-flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <KeyRound className="w-4 h-4 text-[#DFC27D]" />
+                    Change Password
+                  </button>
+                )}
                 <p className="text-[11px] text-slate-400 leading-snug">
-                  {COMPANY_BRAND.legalName} · Baramati, Pune - 413102
+                  {actorLabel} · <span className="font-mono">{actorSubLabel}</span>
                 </p>
                 <button
                   type="button"
@@ -451,7 +555,7 @@ export function AdminShell() {
             </button>
             <div className="flex items-center gap-2 text-sm min-w-0">
               <span className="text-slate-400 hidden sm:inline whitespace-nowrap">
-                Admin Panel
+                {isMainOwner ? 'Main Owner Panel' : 'Admin Panel'}
               </span>
               <span className="text-slate-300 hidden sm:inline">/</span>
               <h1 className="font-semibold text-[#0F1F3D] truncate">{currentNavLabel}</h1>
@@ -459,6 +563,19 @@ export function AdminShell() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {/* Password Admin Quick Change Password Button */}
+            {isPasswordAdmin && (
+              <button
+                type="button"
+                onClick={() => setChangePasswordOpen(true)}
+                className="h-8 px-2.5 sm:px-3 rounded-lg bg-[#FDF8EC] hover:bg-[#FAF0D7] border border-[#B8923A]/40 text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                title="Change your Admin login password anytime"
+              >
+                <KeyRound className="w-3.5 h-3.5 text-[#9A7625]" />
+                <span className="hidden md:inline">Change Password</span>
+              </button>
+            )}
+
             {/* Global Search Trigger */}
             <button
               type="button"
@@ -517,6 +634,26 @@ export function AdminShell() {
         </header>
 
         <main className="flex-1 p-4 sm:p-6 max-w-7xl w-full mx-auto">
+          {isPasswordAdmin && adminAccount?.mustChangePassword && (
+            <div className="mb-4 px-4 py-3 rounded-xl bg-[#FDF8EC] border border-[#B8923A]/45 text-[#0F1F3D] text-xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
+              <div className="flex items-center gap-2.5">
+                <KeyRound className="w-4 h-4 text-[#9A7625] shrink-0" />
+                <span>
+                  You are currently using the initial Admin password for{' '}
+                  <strong className="font-mono">{adminAccount.username}</strong>. Set your own
+                  private password now (you can also change it anytime later).
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setChangePasswordOpen(true)}
+                className="h-8 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white font-semibold shrink-0 cursor-pointer self-start sm:self-auto"
+              >
+                Change Password Now
+              </button>
+            </div>
+          )}
+
           {syncWarning && (
             <div className="mb-4 px-4 py-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center justify-between gap-3">
               <span className="truncate">{syncWarning}</span>
@@ -538,8 +675,8 @@ export function AdminShell() {
             <WorkspaceSkeleton />
           ) : (
             <AnimatePresence mode="wait">
-              <PageTransition key={activeTab}>
-                {activeTab === 'overview' && (
+              <PageTransition key={safeActiveTab}>
+                {safeActiveTab === 'overview' && (
                   <AdminOverview
                     branches={branches}
                     employees={employees}
@@ -550,7 +687,7 @@ export function AdminShell() {
                     onNavigate={(tab) => setActiveTab(tab)}
                   />
                 )}
-                {activeTab === 'analytics' && (
+                {safeActiveTab === 'analytics' && (
                   <Suspense fallback={<WorkspaceSkeleton />}>
                     <AdminAnalytics
                       branches={branches}
@@ -565,7 +702,7 @@ export function AdminShell() {
                     />
                   </Suspense>
                 )}
-                {activeTab === 'payouts' && (
+                {safeActiveTab === 'payouts' && (
                   <Suspense fallback={<WorkspaceSkeleton />}>
                     <AdminPayoutsAndQueries
                       branches={branches}
@@ -579,7 +716,7 @@ export function AdminShell() {
                     />
                   </Suspense>
                 )}
-                {activeTab === 'salary' && (
+                {safeActiveTab === 'salary' && (
                   <Suspense fallback={<WorkspaceSkeleton />}>
                     <SalarySlipsManager
                       branches={branches}
@@ -591,7 +728,7 @@ export function AdminShell() {
                     />
                   </Suspense>
                 )}
-                {activeTab === 'branches' && (
+                {safeActiveTab === 'branches' && (
                   <Suspense fallback={<WorkspaceSkeleton />}>
                     <BranchMaster
                       branches={branches}
@@ -600,7 +737,7 @@ export function AdminShell() {
                     />
                   </Suspense>
                 )}
-                {activeTab === 'employees' && (
+                {safeActiveTab === 'employees' && (
                   <Suspense fallback={<WorkspaceSkeleton />}>
                     <EmployeeMaster
                       branches={branches}
@@ -611,7 +748,7 @@ export function AdminShell() {
                     />
                   </Suspense>
                 )}
-                {activeTab === 'import' && (
+                {safeActiveTab === 'import' && (
                   <Suspense fallback={<WorkspaceSkeleton />}>
                     <ExcelImportWorkflow
                       branches={branches}
@@ -621,7 +758,7 @@ export function AdminShell() {
                     />
                   </Suspense>
                 )}
-                {activeTab === 'history' && (
+                {safeActiveTab === 'history' && (
                   <Suspense fallback={<WorkspaceSkeleton />}>
                     <HistoryAndReports
                       branches={branches}
@@ -636,6 +773,11 @@ export function AdminShell() {
                       visibilitySettings={visibilitySettings}
                       onRefresh={refreshAll}
                     />
+                  </Suspense>
+                )}
+                {isMainOwner && safeActiveTab === 'owner-access' && (
+                  <Suspense fallback={<WorkspaceSkeleton />}>
+                    <OwnerAdminAccessManager onRefreshShell={refreshAll} />
                   </Suspense>
                 )}
               </PageTransition>
@@ -658,6 +800,12 @@ export function AdminShell() {
         open={trainingDeckOpen}
         onClose={() => setTrainingDeckOpen(false)}
       />
+      {isPasswordAdmin && (
+        <AdminChangePasswordModal
+          open={changePasswordOpen}
+          onClose={() => setChangePasswordOpen(false)}
+        />
+      )}
       <OfflineIndicator />
     </div>
   );

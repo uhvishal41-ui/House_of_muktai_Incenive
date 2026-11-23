@@ -3202,6 +3202,110 @@ test('52. Salary Slip & Employee Master use Employee ID and cleanly support Non-
   assert.equal(salaryParsed.validRows[0].grossEarningsPaise, 7_500_000);
 });
 
+// =========================================================================
+// TEST 53: Main Owner Gmail Exclusivity + Password Admin Governance & Self-Service Password Change
+// =========================================================================
+test('53. Main Owner Gmail exclusivity, Password Admin role resolution/suspension, firestore.rules gates, and AdminShell Owner isolation', async () => {
+  const { isMainOwnerIdentity, resolveRoleConsistent } = await import(
+    '../server/authMiddleware.ts'
+  );
+
+  // 1. Main Owner check: strictly verified registered Gmail ONLY
+  assert.equal(isMainOwnerIdentity({ email: 'uhvishal41@gmail.com', emailVerified: true }), true);
+  assert.equal(isMainOwnerIdentity({ email: 'UHVISHAL41@GMAIL.COM', emailVerified: true }), true);
+  assert.equal(isMainOwnerIdentity({ email: 'uhvishal41@gmail.com', emailVerified: false }), false);
+  assert.equal(isMainOwnerIdentity({ email: 'otherowner@gmail.com', emailVerified: true }), false);
+  assert.equal(
+    isMainOwnerIdentity({ email: 'homadmin@admin.homfash.internal', emailVerified: false }),
+    false,
+  );
+
+  // 2. Role resolution for Main Owner, Active Password Admin, Suspended Password Admin, and Spoofed accounts
+  assert.equal(
+    resolveRoleConsistent({ email: 'uhvishal41@gmail.com', emailVerified: true, adminDoc: null }),
+    'SUPER_ADMIN',
+  );
+  assert.equal(
+    resolveRoleConsistent({ email: 'uhvishal41@gmail.com', emailVerified: false, adminDoc: null }),
+    'EMPLOYEE',
+  );
+
+  // Active Owner-provisioned Password Admin -> SUPER_ADMIN (operational roles)
+  assert.equal(
+    resolveRoleConsistent({
+      email: 'homadmin@admin.homfash.internal',
+      emailVerified: false,
+      adminDoc: {
+        role: 'SUPER_ADMIN',
+        authType: 'PASSWORD',
+        active: true,
+      },
+    }),
+    'SUPER_ADMIN',
+  );
+
+  // Suspended Password Admin -> immediately revoked to EMPLOYEE
+  assert.equal(
+    resolveRoleConsistent({
+      email: 'homadmin@admin.homfash.internal',
+      emailVerified: false,
+      adminDoc: {
+        role: 'SUPER_ADMIN',
+        authType: 'PASSWORD',
+        active: false,
+      },
+    }),
+    'EMPLOYEE',
+  );
+
+  // Spoofed unverified non-admin domain cannot bypass using authType: 'PASSWORD'
+  assert.equal(
+    resolveRoleConsistent({
+      email: 'attacker@gmail.com',
+      emailVerified: false,
+      adminDoc: {
+        role: 'SUPER_ADMIN',
+        authType: 'PASSWORD',
+        active: true,
+      },
+    }),
+    'EMPLOYEE',
+  );
+
+  // 3. Firestore Security Rules strictly lock /admins governance to isMainOwner()
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
+  assert.match(rulesNoComments, /function isMainOwner\(\)/);
+  assert.match(rulesNoComments, /function isActivePasswordAdmin\(\)/);
+  assert.match(rulesNoComments, /isMainOwner\(\)\s*\|\|\s*isActivePasswordAdmin\(\)/);
+
+  const adminsBlock = rulesNoComments.match(/match \/admins\/\{adminUid\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(adminsBlock, '/admins/{adminUid} rules block must exist');
+  assert.match(adminsBlock[0], /allow list: if isMainOwner\(\);/);
+  assert.match(adminsBlock[0], /allow create: if isValidId\(adminUid\) && isMainOwner\(\)/);
+  assert.match(adminsBlock[0], /allow delete: if isValidId\(adminUid\) && isMainOwner\(\);/);
+  assert.match(
+    adminsBlock[0],
+    /\[\s*'mustChangePassword',\s*'passwordUpdatedAt',\s*'updatedAt'\s*\]/,
+  );
+
+  // 4. UI Gate check: AdminShell & OwnerAdminAccessManager strictly gate Owner controls behind isMainOwner
+  const shellText = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/admin/AdminShell.tsx'),
+    'utf-8',
+  );
+  assert.ok(shellText.includes("!isMainOwner && activeTab === 'owner-access' ? 'overview'"));
+  assert.ok(shellText.includes("{isMainOwner && safeActiveTab === 'owner-access'"));
+  assert.ok(shellText.includes('AdminChangePasswordModal'));
+
+  const ownerPanelText = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/admin/OwnerAdminAccessManager.tsx'),
+    'utf-8',
+  );
+  assert.ok(ownerPanelText.includes('if (!isMainOwner)'));
+});
+
+
 
 
 

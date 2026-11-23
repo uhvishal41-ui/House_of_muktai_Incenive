@@ -9,19 +9,22 @@ import {
   updatePassword,
   type User,
 } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 import {
+  adminUsernameToAuthEmail,
   auth,
   BOOTSTRAPPED_ADMIN_EMAIL,
   db,
   googleProvider,
+  isAdminAuthEmail,
   loginIdToAuthEmail,
 } from '../lib/firebase';
+import { markOwnAdminPasswordChanged } from '../services/adminAccessService';
 import {
   fetchOwnEmployeeProfile,
   subscribeOwnEmployeeProfile,
 } from '../services/incentiveService';
-import type { Employee } from '../types/incentive';
+import type { AdminAccountRecord, Employee } from '../types/incentive';
 import { canEmployeeLogin, type EmployeeLoginGateResult } from '../lib/incentiveEngine';
 
 export type PortalMode = 'admin' | 'staff';
@@ -29,16 +32,25 @@ export type PortalMode = 'admin' | 'staff';
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
+  /** Strictly true ONLY when signed in with the verified registered Main Owner Gmail */
+  isMainOwner: boolean;
+  /** True for Main Owner OR any Active Owner-provisioned Admin (operational Admin Panel access) */
   isSuperAdmin: boolean;
+  /** Live `/admins/{uid}` record for Password/delegated Admins (null for Main Owner) */
+  adminAccount: AdminAccountRecord | null;
+  /** Set if a suspended/revoked Password Admin attempts to sign in */
+  adminAccessBlockedReason: string | null;
   isDedicatedStaffApp: boolean;
   employeeProfile: Employee | null;
   employeeLoginGate: EmployeeLoginGateResult;
   portalMode: PortalMode;
   setPortalMode: (mode: PortalMode) => void;
   signInAdminWithGoogle: () => Promise<void>;
+  signInAdminWithCredentials: (username: string, password: string) => Promise<void>;
   signInEmployeeWithLoginId: (loginId: string, password: string) => Promise<void>;
   signInEmployeeWithGoogle: () => Promise<void>;
   changeOwnPassword: (newPassword: string, fallbackCurrentPassword?: string) => Promise<void>;
+  changeAdminOwnPassword: (currentPassword: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshEmployeeProfile: () => Promise<void>;
 }
@@ -67,33 +79,107 @@ function detectInitialPortalMode(): PortalMode {
     const host = window.location.hostname.toLowerCase();
     if (host.startsWith('admin.')) return 'admin';
   }
-  return 'admin';
+  return 'staff';
+}
+
+function isVerifiedMainOwnerUser(currentUser: User): boolean {
+  return (
+    currentUser.emailVerified === true &&
+    currentUser.email?.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase()
+  );
 }
 
 /**
- * Consistent Super Admin check matching firestore.rules `isSuperAdmin()` and Express `authMiddleware`:
- * - Verified bootstrapped primary Super Admin (`uhvishal41@gmail.com`)
- * - OR active `/admins/{uid}` document with `role === 'SUPER_ADMIN'` and `emailVerified === true`
+ * Resolves exact Admin governance tier matching `firestore.rules` & Express `authMiddleware`:
+ * 1. Main Owner: Verified registered Owner Gmail (`uhvishal41@gmail.com`) -> isMainOwner=true, isSuperAdmin=true
+ * 2. Active Password Admin: `@admin.homfash.internal` + `/admins/{uid}` active=true & authType='PASSWORD' -> isMainOwner=false, isSuperAdmin=true
+ * 3. Active Verified Google Admin: verified email + `/admins/{uid}` active=true -> isMainOwner=false, isSuperAdmin=true
  */
-async function resolveIsSuperAdmin(currentUser: User): Promise<boolean> {
-  if (!currentUser.emailVerified) return false;
-  if (currentUser.email?.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase()) {
-    return true;
+async function resolveAdminAccess(currentUser: User): Promise<{
+  isMainOwner: boolean;
+  isSuperAdmin: boolean;
+  adminAccount: AdminAccountRecord | null;
+  blockedReason: string | null;
+}> {
+  if (isVerifiedMainOwnerUser(currentUser)) {
+    return {
+      isMainOwner: true,
+      isSuperAdmin: true,
+      adminAccount: null,
+      blockedReason: null,
+    };
   }
+
+  const isPasswordAdminDomain = isAdminAuthEmail(currentUser.email);
+  if (!isPasswordAdminDomain && !currentUser.emailVerified) {
+    return {
+      isMainOwner: false,
+      isSuperAdmin: false,
+      adminAccount: null,
+      blockedReason: null,
+    };
+  }
+
   try {
     const snap = await getDoc(doc(db, 'admins', currentUser.uid));
-    if (!snap.exists()) return false;
-    const data = snap.data() as { role?: string; active?: boolean };
-    return data.role === 'SUPER_ADMIN' && data.active === true;
+    if (!snap.exists()) {
+      return {
+        isMainOwner: false,
+        isSuperAdmin: false,
+        adminAccount: null,
+        blockedReason: isPasswordAdminDomain
+          ? 'This Admin account is not authorized or has been removed by the Main Owner.'
+          : null,
+      };
+    }
+    const data = snap.data() as AdminAccountRecord;
+    const isPasswordAuthorized =
+      isPasswordAdminDomain &&
+      data.role === 'SUPER_ADMIN' &&
+      data.active === true &&
+      data.authType === 'PASSWORD';
+    const isGoogleAuthorized =
+      !isPasswordAdminDomain &&
+      currentUser.emailVerified === true &&
+      data.role === 'SUPER_ADMIN' &&
+      data.active === true;
+
+    if (isPasswordAuthorized || isGoogleAuthorized) {
+      return {
+        isMainOwner: false,
+        isSuperAdmin: true,
+        adminAccount: data,
+        blockedReason: null,
+      };
+    }
+
+    return {
+      isMainOwner: false,
+      isSuperAdmin: false,
+      adminAccount: null,
+      blockedReason: isPasswordAdminDomain
+        ? 'This Admin account has been suspended by the Main Owner.'
+        : null,
+    };
   } catch {
-    return false;
+    return {
+      isMainOwner: false,
+      isSuperAdmin: false,
+      adminAccount: null,
+      blockedReason: isPasswordAdminDomain
+        ? 'Unable to verify Admin authorization. Please contact the Main Owner.'
+        : null,
+    };
   }
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isMainOwner, setIsMainOwner] = useState(false);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  const [adminAccount, setAdminAccount] = useState<AdminAccountRecord | null>(null);
+  const [adminAccessBlockedReason, setAdminAccessBlockedReason] = useState<string | null>(null);
   const [isDedicatedStaffApp] = useState<boolean>(detectDedicatedStaffApp);
   const [employeeProfile, setEmployeeProfile] = useState<Employee | null>(null);
   const [portalMode, setPortalMode] = useState<PortalMode>(detectInitialPortalMode);
@@ -134,22 +220,63 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLoading(true);
       setUser(nextUser);
       if (nextUser) {
-        const adminAuthorized = await resolveIsSuperAdmin(nextUser);
-        setIsSuperAdmin(adminAuthorized);
-        if (!adminAuthorized) {
+        const access = await resolveAdminAccess(nextUser);
+        setIsMainOwner(access.isMainOwner);
+        setIsSuperAdmin(access.isSuperAdmin);
+        setAdminAccount(access.adminAccount);
+        setAdminAccessBlockedReason(access.blockedReason);
+
+        if (access.blockedReason) {
+          // Immediately revoke suspended/removed Admin sessions
+          setEmployeeProfile(null);
+          await signOut(auth).catch(() => undefined);
+        } else if (!access.isSuperAdmin) {
           await loadProfile(nextUser);
           setPortalMode('staff');
         } else {
           setEmployeeProfile(null);
         }
       } else {
+        setIsMainOwner(false);
         setIsSuperAdmin(false);
+        setAdminAccount(null);
         setEmployeeProfile(null);
       }
       setLoading(false);
     });
     return () => unsub();
   }, []);
+
+  // Real-time revocation listener for non-Owner Admins:
+  // If Main Owner suspends or deletes an Admin account while they are logged in, revoke immediately.
+  useEffect(() => {
+    if (!user || !isSuperAdmin || isMainOwner) return;
+    const unsub = onSnapshot(
+      doc(db, 'admins', user.uid),
+      (snap) => {
+        if (!snap.exists()) {
+          setAdminAccessBlockedReason('Your Admin access was removed by the Main Owner.');
+          setIsSuperAdmin(false);
+          setAdminAccount(null);
+          void signOut(auth).catch(() => undefined);
+          return;
+        }
+        const live = snap.data() as AdminAccountRecord;
+        if (!live.active || live.role !== 'SUPER_ADMIN') {
+          setAdminAccessBlockedReason('Your Admin account was suspended by the Main Owner.');
+          setIsSuperAdmin(false);
+          setAdminAccount(null);
+          void signOut(auth).catch(() => undefined);
+          return;
+        }
+        setAdminAccount(live);
+      },
+      () => {
+        // Ignore transient snapshot errors
+      },
+    );
+    return () => unsub();
+  }, [user, isSuperAdmin, isMainOwner]);
 
   // Live Firestore real-time subscription to the employee's own master record
   // so Admin status changes (ACTIVE/INACTIVE), branch transfers, or password flags sync immediately.
@@ -163,14 +290,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [user, activeEmployeeId]);
 
   const signInAdminWithGoogle = async () => {
+    setAdminAccessBlockedReason(null);
     await signInWithPopup(auth, googleProvider);
   };
 
+  const signInAdminWithCredentials = async (username: string, password: string) => {
+    setAdminAccessBlockedReason(null);
+    const trimmed = username.trim();
+    if (!trimmed || !password) {
+      throw new Error('Enter both Admin Username and Password.');
+    }
+    const authEmail = adminUsernameToAuthEmail(trimmed);
+    const cred = await signInWithEmailAndPassword(auth, authEmail, password);
+    const access = await resolveAdminAccess(cred.user);
+    if (!access.isSuperAdmin) {
+      await signOut(auth).catch(() => undefined);
+      throw new Error(
+        access.blockedReason ||
+          'This Admin account is suspended or not active. Contact the Main Owner.',
+      );
+    }
+  };
+
   const signInEmployeeWithGoogle = async () => {
+    setAdminAccessBlockedReason(null);
     await signInWithPopup(auth, googleProvider);
   };
 
   const signInEmployeeWithLoginId = async (loginId: string, password: string) => {
+    setAdminAccessBlockedReason(null);
     const trimmed = loginId.trim();
     const authEmail = loginIdToAuthEmail(trimmed);
     try {
@@ -178,7 +326,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
       const cleanUpper = trimmed.toUpperCase().replace(/[^A-Z0-9_-]/g, '');
-      // Convenience fallback: if staff typed bare Salesman No (e.g. "459"), also try "HOM459"
+      // Convenience fallback: if staff typed bare Employee ID (e.g. "459"), also try "HOM459"
       if (
         (code === 'auth/invalid-credential' || code === 'auth/user-not-found') &&
         cleanUpper &&
@@ -211,9 +359,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const changeAdminOwnPassword = async (currentPassword: string, newPassword: string) => {
+    const currentUser = auth.currentUser;
+    if (!currentUser || !currentUser.email) {
+      throw new Error('Admin session expired. Please sign in again.');
+    }
+    if (!isAdminAuthEmail(currentUser.email)) {
+      throw new Error('Password changes apply to Username/Password Admin accounts.');
+    }
+    if (!currentPassword) {
+      throw new Error('Enter your current password to verify your identity.');
+    }
+    if (newPassword.length < 8) {
+      throw new Error('New password must be at least 8 characters long.');
+    }
+    if (newPassword === currentPassword) {
+      throw new Error('New password must be different from your current password.');
+    }
+
+    const cred = EmailAuthProvider.credential(currentUser.email, currentPassword);
+    await reauthenticateWithCredential(currentUser, cred);
+    await updatePassword(currentUser, newPassword);
+    const updatedAt = await markOwnAdminPasswordChanged();
+    setAdminAccount((prev) =>
+      prev
+        ? { ...prev, mustChangePassword: false, passwordUpdatedAt: updatedAt, updatedAt }
+        : prev,
+    );
+  };
+
   const logout = async () => {
+    setAdminAccessBlockedReason(null);
     await signOut(auth);
+    setIsMainOwner(false);
     setIsSuperAdmin(false);
+    setAdminAccount(null);
     setEmployeeProfile(null);
   };
 
@@ -228,16 +408,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       value={{
         user,
         loading,
+        isMainOwner,
         isSuperAdmin,
+        adminAccount,
+        adminAccessBlockedReason,
         isDedicatedStaffApp,
         employeeProfile,
         employeeLoginGate,
         portalMode,
         setPortalMode,
         signInAdminWithGoogle,
+        signInAdminWithCredentials,
         signInEmployeeWithLoginId,
         signInEmployeeWithGoogle,
         changeOwnPassword,
+        changeAdminOwnPassword,
         logout,
         refreshEmployeeProfile,
       }}

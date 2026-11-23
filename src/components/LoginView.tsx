@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ArrowRight, Building2, Eye, EyeOff, MapPin, ShieldCheck } from 'lucide-react';
+import { ArrowRight, Crown, Eye, EyeOff, KeyRound, ShieldCheck } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { useAuth } from '../context/AuthContext';
 import { COMPANY_BRAND } from '../lib/companyBrand';
@@ -13,25 +13,65 @@ export function LoginView() {
   const {
     portalMode,
     setPortalMode,
+    adminAccessBlockedReason,
     signInAdminWithGoogle,
+    signInAdminWithCredentials,
     signInEmployeeWithLoginId,
-    signInEmployeeWithGoogle,
   } = useAuth();
+
+  const [adminUsername, setAdminUsername] = useState('');
+  const [adminPassword, setAdminPassword] = useState('');
+  const [showAdminPassword, setShowAdminPassword] = useState(false);
 
   const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleAdminGoogleLogin = async () => {
+  const visibleError = error || adminAccessBlockedReason;
+
+  const handleMainOwnerGoogleLogin = async () => {
     setError(null);
     setBusy(true);
     try {
       await signInAdminWithGoogle();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Unable to complete Super Admin sign-in.';
+      const msg = err instanceof Error ? err.message : 'Unable to complete Main Owner Google sign-in.';
       setError(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleAdminPasswordLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminUsername.trim() || !adminPassword) {
+      setError('Enter both Admin Username and Password.');
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    try {
+      await signInAdminWithCredentials(adminUsername, adminPassword);
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code || '';
+      if (code === 'auth/operation-not-allowed') {
+        setError(
+          'Email/Password sign-in is not yet enabled in Firebase Console. Enable Authentication -> Sign-in method -> Email/Password.',
+        );
+      } else if (
+        code === 'auth/invalid-credential' ||
+        code === 'auth/user-not-found' ||
+        code === 'auth/wrong-password'
+      ) {
+        setError(
+          'Invalid Admin Username or Password. If not activated yet, Main Owner can activate it under Owner · Admin Access.',
+        );
+      } else {
+        setError(err instanceof Error ? err.message : 'Admin sign-in failed. Please try again.');
+      }
     } finally {
       setBusy(false);
     }
@@ -51,7 +91,7 @@ export function LoginView() {
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/operation-not-allowed') {
         setError(
-          'Email/Password sign-in is not yet enabled in Firebase Console. Enable Authentication -> Sign-in method -> Email/Password, or use Google Sign-In if linked by Admin.',
+          'Email/Password sign-in is not yet enabled in Firebase Console. Enable Authentication -> Sign-in method -> Email/Password.',
         );
       } else if (
         code === 'auth/invalid-credential' ||
@@ -62,18 +102,6 @@ export function LoginView() {
       } else {
         setError(err instanceof Error ? err.message : 'Sign-in failed. Please try again.');
       }
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleEmployeeGoogleLogin = async () => {
-    setError(null);
-    setBusy(true);
-    try {
-      await signInEmployeeWithGoogle();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Google Sign-In failed.');
     } finally {
       setBusy(false);
     }
@@ -108,10 +136,10 @@ export function LoginView() {
           className="w-full max-w-4xl grid grid-cols-1 lg:grid-cols-12 items-stretch bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-xs"
         >
           {/* Left Executive Corporate Navy Panel */}
-          <div className="lg:col-span-5 bg-[#0F1F3D] text-white p-6 lg:p-8 flex flex-col justify-between relative overflow-hidden">
+          <div className="lg:col-span-5 bg-[#0F1F3D] text-white p-6 lg:p-8 flex flex-col justify-center relative overflow-hidden">
             <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-[#B8923A] via-[#DFC27D] to-[#B8923A]" />
 
-            <div className="space-y-5">
+            <div className="space-y-4">
               <div className="flex items-center gap-3.5">
                 <BrandLogo size="lg" className="border-[#B8923A]/40 shadow-sm" />
                 <div className="min-w-0">
@@ -125,36 +153,17 @@ export function LoginView() {
                 </div>
               </div>
 
-              <h1
-                className="text-xl lg:text-2xl font-semibold tracking-tight leading-snug text-white"
-                style={{ textWrap: 'balance' }}
-              >
-                Employee Incentive Management System
+              <h1 className="text-[11px] sm:text-xs lg:text-[12.5px] font-semibold tracking-tight leading-snug text-white whitespace-nowrap">
+                Employee Incentive &amp; Payroll Management System
               </h1>
-
-              <p className="text-xs text-slate-300 leading-relaxed">
-                Centralized 12-branch retail incentive ledger, ERP Excel approval pipeline, and
-                real-time employee payout statements.
-              </p>
-            </div>
-
-            <div className="mt-6 pt-5 border-t border-white/10 space-y-2.5 text-[11px] text-slate-300">
-              <div className="flex items-center gap-1.5 font-semibold text-white">
-                <Building2 className="w-3.5 h-3.5 text-[#DFC27D] shrink-0" />
-                <span>Registered Office</span>
-              </div>
-              <div className="flex items-start gap-1.5 leading-relaxed">
-                <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-                <span>{COMPANY_BRAND.fullAddress}</span>
-              </div>
             </div>
           </div>
 
           {/* Right Auth Form Panel */}
           <div className="lg:col-span-7 p-6 lg:p-8 flex flex-col justify-center bg-white">
-            <div className="mb-6">
+            <div className="mb-5">
               <div
-                className="inline-flex p-1 bg-slate-100 border border-slate-200/80 rounded-xl mb-5"
+                className="inline-flex p-1 bg-slate-100 border border-slate-200/80 rounded-xl mb-4"
                 role="tablist"
               >
                 <button
@@ -171,7 +180,7 @@ export function LoginView() {
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  Admin Panel
+                  Admin / Owner Panel
                 </button>
                 <button
                   type="button"
@@ -192,43 +201,121 @@ export function LoginView() {
               </div>
 
               <h2 className="text-lg font-semibold text-[#0F1F3D]">
-                {portalMode === 'admin' ? 'Super Admin Sign In' : 'Employee Sign In'}
+                {portalMode === 'admin' ? 'Admin & Main Owner Sign In' : 'Employee Sign In'}
               </h2>
               <p className="text-xs text-slate-500 mt-1">
                 {portalMode === 'admin'
-                  ? 'Authorized management access with verified Google identity.'
+                  ? 'Admin signs in with Username & Password · Main Owner signs in with Registered Gmail.'
                   : 'Sign in with your Employee ID / Login ID and personal password.'}
               </p>
             </div>
 
             <AnimatePresence>
-              {error && (
+              {visibleError && (
                 <motion.div
                   role="alert"
                   initial={{ opacity: 0, y: -4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -4 }}
                   transition={{ duration: 0.16 }}
-                  className="mb-5 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 leading-snug"
+                  className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 leading-snug"
                 >
-                  {error}
+                  {visibleError}
                 </motion.div>
               )}
             </AnimatePresence>
 
             {portalMode === 'admin' ? (
               <div className="space-y-4">
-                <AutoMixGoogleButton
-                  onClick={handleAdminGoogleLogin}
-                  disabled={busy}
-                  busy={busy}
-                  label="Continue with Google"
-                  busyLabel="Authenticating..."
-                  variant="primary"
-                />
-                <div className="flex items-center gap-2 text-[11px] text-slate-500 pt-1">
-                  <ShieldCheck className="w-3.5 h-3.5 text-[#B8923A] shrink-0" />
-                  <span>Protected by role-based access rules &amp; immutable audit logs</span>
+                {/* Admin Username + Password Sign-In */}
+                <form onSubmit={handleAdminPasswordLogin} className="space-y-3">
+                  <div className="flex items-center gap-1.5 text-[11px] font-semibold text-[#0F1F3D] uppercase tracking-wider">
+                    <KeyRound className="w-3.5 h-3.5 text-[#B8923A]" />
+                    <span>Admin Login (Username &amp; Password)</span>
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="adminUsername"
+                      className="block text-xs font-semibold text-slate-700 mb-1"
+                    >
+                      Admin Username
+                    </label>
+                    <input
+                      id="adminUsername"
+                      type="text"
+                      autoComplete="username"
+                      placeholder="e.g. HOMADMIN"
+                      value={adminUsername}
+                      onChange={(e) => setAdminUsername(e.target.value.toUpperCase())}
+                      className="w-full h-11 px-3.5 rounded-xl border border-slate-300 bg-white text-sm text-slate-900 font-mono placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="adminPassword"
+                      className="block text-xs font-semibold text-slate-700 mb-1"
+                    >
+                      Admin Password
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="adminPassword"
+                        type={showAdminPassword ? 'text' : 'password'}
+                        autoComplete="current-password"
+                        placeholder="Enter admin password"
+                        value={adminPassword}
+                        onChange={(e) => setAdminPassword(e.target.value)}
+                        className="w-full h-11 pl-3.5 pr-11 rounded-xl border border-slate-300 bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowAdminPassword((prev) => !prev)}
+                        aria-label={showAdminPassword ? 'Hide password' : 'Show password'}
+                        className="absolute right-1 top-0.5 h-10 w-10 inline-flex items-center justify-center text-slate-500 hover:text-[#0F1F3D] rounded-lg cursor-pointer"
+                      >
+                        {showAdminPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={busy}
+                    className="w-full h-11 px-4 rounded-xl bg-[#0F1F3D] hover:bg-[#162B50] active:scale-[0.99] text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer"
+                  >
+                    <span>{busy ? 'Signing in...' : 'Sign In as Admin'}</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
+                </form>
+
+                {/* Divider for Main Owner Exclusive Access */}
+                <div className="relative py-1">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-slate-200" />
+                  </div>
+                  <div className="relative flex justify-center">
+                    <span className="bg-white px-3 text-[11px] font-semibold text-[#9A7625] inline-flex items-center gap-1.5">
+                      <Crown className="w-3.5 h-3.5" />
+                      <span>Main Owner Access (Registered Gmail Only)</span>
+                    </span>
+                  </div>
+                </div>
+
+                <div className="space-y-2.5">
+                  <AutoMixGoogleButton
+                    onClick={handleMainOwnerGoogleLogin}
+                    disabled={busy}
+                    busy={busy}
+                    label="Main Owner Sign In with Google"
+                    busyLabel="Authenticating Main Owner..."
+                    variant="secondary"
+                  />
+                  <div className="flex items-center gap-2 text-[11px] text-slate-500">
+                    <ShieldCheck className="w-3.5 h-3.5 text-[#B8923A] shrink-0" />
+                    <span>
+                      Owner-only controls appear strictly when signed in with the registered Main
+                      Owner Gmail.
+                    </span>
+                  </div>
                 </div>
               </div>
             ) : (
@@ -273,7 +360,7 @@ export function LoginView() {
                   </div>
                 </div>
 
-                <div className="pt-1 space-y-2.5">
+                <div className="pt-1">
                   <button
                     type="submit"
                     disabled={busy}
@@ -282,15 +369,6 @@ export function LoginView() {
                     <span>{busy ? 'Signing in...' : 'Sign In'}</span>
                     <ArrowRight className="w-4 h-4" />
                   </button>
-
-                  <AutoMixGoogleButton
-                    onClick={handleEmployeeGoogleLogin}
-                    disabled={busy}
-                    busy={busy}
-                    label="Continue with Google"
-                    busyLabel="Signing in..."
-                    variant="secondary"
-                  />
                 </div>
               </form>
             )}

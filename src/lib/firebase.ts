@@ -82,9 +82,26 @@ async function testConnection() {
 testConnection();
 
 export const INTERNAL_AUTH_DOMAIN = 'auth.homfash.internal';
+export const ADMIN_AUTH_DOMAIN = 'admin.homfash.internal';
 export const BOOTSTRAPPED_ADMIN_EMAIL = 'uhvishal41@gmail.com';
+export const MAIN_OWNER_EMAIL = BOOTSTRAPPED_ADMIN_EMAIL;
+export const DEFAULT_ADMIN_USERNAME = 'HOMADMIN';
+export const DEFAULT_ADMIN_INITIAL_PASSWORD = 'MuktaiAdmin@2026';
 
 export function loginIdToAuthEmail(loginId: string): string {
   const normalized = loginId.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
   return `${normalized}@${INTERNAL_AUTH_DOMAIN}`;
+}
+
+export function normalizeAdminUsername(username: string): string {
+  return username.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 40);
+}
+
+export function adminUsernameToAuthEmail(username: string): string {
+  const normalized = normalizeAdminUsername(username).toLowerCase();
+  return `${normalized}@${ADMIN_AUTH_DOMAIN}`;
+}
+
+export function isAdminAuthEmail(email?: string | null): boolean {
+  return Boolean(email && email.trim().toLowerCase().endsWith(`@${ADMIN_AUTH_DOMAIN}`));
 }

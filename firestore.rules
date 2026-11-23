@@ -23,17 +23,33 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // STRICT SUPER ADMIN ONLY (Phase 2: Only SUPER_ADMIN & EMPLOYEE exist; BRANCH_MANAGER disabled)
-    function isSuperAdmin() {
+    // MAIN OWNER ONLY: Strictly the registered Owner Gmail with verified Google identity
+    function isMainOwner() {
       return isSignedIn()
         && request.auth.token.email_verified == true
-        && (
-          request.auth.token.email == 'uhvishal41@gmail.com'
-          || (
-            exists(/databases/$(database)/documents/admins/$(request.auth.uid))
-            && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'SUPER_ADMIN'
-            && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true
-          )
+        && request.auth.token.email == 'uhvishal41@gmail.com';
+    }
+
+    // Active Username+Password Admin provisioned strictly by Main Owner in /admins/{uid}
+    function isActivePasswordAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'SUPER_ADMIN'
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.authType == 'PASSWORD'
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.email == request.auth.token.email;
+    }
+
+    // Operational Admin Gate: Main Owner OR Active Admin (Password or verified Google)
+    function isSuperAdmin() {
+      return isMainOwner()
+        || isActivePasswordAdmin()
+        || (
+          isSignedIn()
+          && request.auth.token.email_verified == true
+          && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+          && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'SUPER_ADMIN'
+          && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true
         );
     }
 
@@ -117,14 +133,24 @@ service cloud.firestore {
     // Validation Blueprints (Anti-Update-Gap)
     function isValidAdminUser(data) {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'active', 'createdAt'])
-        && data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'branchId', 'active', 'createdAt'])
+        && data.keys().hasOnly([
+          'uid', 'username', 'email', 'displayName', 'role', 'authType',
+          'branchId', 'active', 'mustChangePassword', 'passwordUpdatedAt',
+          'createdByEmail', 'createdAt', 'updatedAt'
+        ])
         && isValidId(data.uid)
+        && (!('username' in data) || (data.username is string && data.username.size() >= 3 && data.username.size() <= 40 && data.username.matches('^[A-Z0-9_\\-]+$')))
         && isNonEmptyString(data.email, 180)
         && isNonEmptyString(data.displayName, 120)
         && data.role == 'SUPER_ADMIN'
+        && (!('authType' in data) || data.authType == 'GOOGLE' || data.authType == 'PASSWORD')
         && isOptionalString(data, 'branchId', 64)
         && data.active is bool
-        && isNonEmptyString(data.createdAt, 40);
+        && isOptionalBool(data, 'mustChangePassword')
+        && isOptionalString(data, 'passwordUpdatedAt', 40)
+        && isOptionalString(data, 'createdByEmail', 180)
+        && isNonEmptyString(data.createdAt, 40)
+        && isOptionalString(data, 'updatedAt', 40);
     }
 
     function isValidActiveAuthUid(data) {
@@ -859,19 +885,41 @@ service cloud.firestore {
         || !existsAfter(/databases/$(database)/documents/active_auth_uids/$(oldData.authUid));
     }
 
-    // 1. Admins registry (Super Admin writes; verified user may get own doc for consistent auth check)
+    // 1. Admins registry (MAIN OWNER ONLY manages admins; user may get own doc; active Password Admin may update own password timestamp)
     match /admins/{adminUid} {
       allow get: if isValidId(adminUid) && (
-        isSuperAdmin()
+        isMainOwner()
         || (isSignedIn() && request.auth.token.email_verified == true && request.auth.uid == adminUid)
+        || (isSignedIn() && request.auth.uid == adminUid)
       );
-      allow list: if isSuperAdmin();
-      allow create: if isValidId(adminUid) && isSuperAdmin() && isValidAdminUser(incoming()) && incoming().uid == adminUid;
-      allow update: if isValidId(adminUid) && isSuperAdmin() && isValidAdminUser(incoming())
+      allow list: if isMainOwner();
+      allow create: if isValidId(adminUid) && isMainOwner() && isValidAdminUser(incoming()) && incoming().uid == adminUid;
+      allow update: if isValidId(adminUid) && isSignedIn() && isValidAdminUser(incoming())
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'role', 'branchId', 'active']);
-      allow delete: if isValidId(adminUid) && isSuperAdmin();
+        && (
+          (
+            isMainOwner()
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'username', 'role', 'authType', 'branchId',
+              'active', 'mustChangePassword', 'passwordUpdatedAt', 'updatedAt'
+            ])
+          )
+          || (
+            request.auth.uid == adminUid
+            && existing().active == true
+            && existing().role == 'SUPER_ADMIN'
+            && existing().authType == 'PASSWORD'
+            && incoming().email == existing().email
+            && incoming().role == existing().role
+            && incoming().active == existing().active
+            && incoming().authType == existing().authType
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'mustChangePassword', 'passwordUpdatedAt', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(adminUid) && isMainOwner();
     }
 
     // 1b. Active Employee Auth UID Registry (Issue 1: Instant Firestore access revocation & department binding)

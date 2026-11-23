@@ -19,6 +19,7 @@ export interface AuthenticatedRequest extends Request {
 export interface AdminRegistryDoc {
   role: string;
   active: boolean;
+  authType?: string;
 }
 
 export type AdminLookupFn = (params: {
@@ -29,6 +30,7 @@ export type AdminLookupFn = (params: {
 }) => Promise<AdminRegistryDoc | null>;
 
 const BOOTSTRAPPED_ADMIN_EMAIL = 'uhvishal41@gmail.com';
+const ADMIN_AUTH_DOMAIN_SUFFIX = '@admin.homfash.internal';
 const ADMIN_CACHE_TTL_MS = 60_000;
 const adminLookupCache = new Map<string, { expiresAt: number; doc: AdminRegistryDoc | null }>();
 
@@ -99,12 +101,14 @@ export async function lookupAdminDocViaRest(params: {
       fields?: {
         role?: { stringValue?: string };
         active?: { booleanValue?: boolean };
+        authType?: { stringValue?: string };
       };
     };
 
     const role = json.fields?.role?.stringValue || '';
     const active = json.fields?.active?.booleanValue === true;
-    const doc = { role, active };
+    const authType = json.fields?.authType?.stringValue || '';
+    const doc = { role, active, ...(authType ? { authType } : {}) };
     adminLookupCache.set(params.uid, { expiresAt: Date.now() + ADMIN_CACHE_TTL_MS, doc });
     return doc;
   } catch {
@@ -116,21 +120,39 @@ export function clearAdminLookupCache(): void {
   adminLookupCache.clear();
 }
 
+export function isMainOwnerIdentity(params: { email: string; emailVerified: boolean }): boolean {
+  return (
+    params.emailVerified === true &&
+    params.email.trim().toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase()
+  );
+}
+
 /**
- * Consistent Super Admin Role Resolution (Issues 2 & 3):
- * - Matches firestore.rules isSuperAdmin() & Frontend AuthContext identically.
- * - Only SUPER_ADMIN or EMPLOYEE exist in Phase 2 (BRANCH_MANAGER disabled).
+ * Consistent Admin Role Resolution:
+ * - Main Owner: Verified registered Owner Gmail (`uhvishal41@gmail.com`)
+ * - Active Password Admin: Owner-provisioned `/admins/{uid}` with `authType === 'PASSWORD'`, `active === true`, `role === 'SUPER_ADMIN'`, and `@admin.homfash.internal` auth email
+ * - Active Verified Google Admin: Verified Google email listed in `/admins/{uid}` with `active === true` and `role === 'SUPER_ADMIN'`
  */
 export function resolveRoleConsistent(params: {
   email: string;
   emailVerified: boolean;
   adminDoc?: AdminRegistryDoc | null;
 }): UserRole {
+  const lowerEmail = params.email.trim().toLowerCase();
+  if (isMainOwnerIdentity({ email: lowerEmail, emailVerified: params.emailVerified })) {
+    return 'SUPER_ADMIN';
+  }
+  if (
+    lowerEmail.endsWith(ADMIN_AUTH_DOMAIN_SUFFIX) &&
+    params.adminDoc &&
+    params.adminDoc.active === true &&
+    params.adminDoc.role === 'SUPER_ADMIN' &&
+    params.adminDoc.authType === 'PASSWORD'
+  ) {
+    return 'SUPER_ADMIN';
+  }
   if (!params.emailVerified) {
     return 'EMPLOYEE';
-  }
-  if (params.email.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase()) {
-    return 'SUPER_ADMIN';
   }
   if (params.adminDoc && params.adminDoc.active === true && params.adminDoc.role === 'SUPER_ADMIN') {
     return 'SUPER_ADMIN';
@@ -173,10 +195,10 @@ export function createFirebaseAuthMiddleware(adminLookup: AdminLookupFn = lookup
       }
 
       let adminDoc: AdminRegistryDoc | null = null;
-      const isBootstrapped =
-        emailVerified && email.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase();
+      const isBootstrapped = isMainOwnerIdentity({ email, emailVerified });
+      const isPasswordAdminEmail = email.trim().toLowerCase().endsWith(ADMIN_AUTH_DOMAIN_SUFFIX);
 
-      if (!isBootstrapped && emailVerified) {
+      if (!isBootstrapped && (emailVerified || isPasswordAdminEmail)) {
         adminDoc = await adminLookup({ uid, idToken: token, projectId, databaseId });
       }
 
