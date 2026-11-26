@@ -26,10 +26,11 @@ import {
   getSecondaryProvisioningAuth,
   handleFirestoreError,
   loginIdToAuthEmail,
+  MAIN_OWNER_EMAIL,
   OperationType,
 } from '../lib/firebase';
 import { COMPANY_BRAND, DEFAULT_EMPLOYEE_PASSWORD } from '../lib/companyBrand';
-import { formatShortDate, generateRecordId, sanitizeId } from '../lib/format';
+import { formatINRFromPaise, formatShortDate, generateRecordId, sanitizeId } from '../lib/format';
 import {
   applyPublishedCorrection,
   buildMonthlySummaryDocument,
@@ -38,10 +39,17 @@ import {
   getDeterministicNotificationId,
   getDeterministicVersionId,
   getIncentiveRecordKey,
+  planBranchTransferConsolidation,
   resolveCanonicalBranchName,
 } from '../lib/incentiveEngine';
 import { getDepartmentById, isMonthVisibleToEmployees } from '../lib/departmentLeaderboardEngine';
 import { buildBirthdayProfileFromEmployee, parseDobToIso } from '../lib/birthdayEngine';
+import {
+  buildActiveAuthUidRecord,
+  buildCleanProvisionedEmployeeDoc,
+  sanitizeEmployeeCustomFields,
+} from '../lib/employeeRecordHelpers';
+import { generateNextAvailableLoginId } from '../lib/loginProvisionHelper';
 import { maskBankAccountNumber } from '../lib/salarySlipEngine';
 import {
   fetchPortalVisibilitySettings,
@@ -323,12 +331,15 @@ export async function syncOfficial12Branches(options?: {
             unit.push({
               kind: 'set',
               ref: doc(db, 'active_auth_uids', emp.authUid),
-              data: {
+              data: buildActiveAuthUidRecord({
                 authUid: emp.authUid,
                 employeeId: emp.employeeId,
-                active: true,
+                departmentId: emp.departmentId,
+                branchId: target.branchId,
+                branchName: target.branchName,
+                isBranchManager: emp.isBranchManager,
                 updatedAt: now,
-              },
+              }) as unknown as Record<string, unknown>,
             });
           } else {
             unit.push({ kind: 'delete', ref: doc(db, 'active_auth_uids', emp.authUid) });
@@ -558,91 +569,204 @@ function describeProvisionError(err: unknown): { code: string; reason: string } 
   };
 }
 
-function buildCleanProvisionedEmployeeDoc(
-  emp: Employee,
-  uid: string,
-  now: string,
-): Employee {
-  const cleanLoginId = sanitizeId(emp.loginId || `HOM${emp.employeeId}`).slice(0, 40);
-  const safeLoginId = cleanLoginId.length >= 3 ? cleanLoginId : `HOM${sanitizeId(emp.employeeId)}`.slice(0, 40);
-  const resolvedDept = getDepartmentById(emp.departmentId);
+async function recoverExistingAuthUidFromFirestore(employeeId: string): Promise<string> {
+  const targetId = employeeId.trim();
+  if (!targetId) return '';
+  const sources = ['active_auth_uids', 'salary_slips', 'published_incentives', 'monthly_summaries'];
+  for (const colName of sources) {
+    try {
+      const snap = await getDocs(
+        query(collection(db, colName), where('employeeId', '==', targetId)),
+      );
+      for (const d of snap.docs) {
+        const data = d.data() as { authUid?: string };
+        const uid = typeof data.authUid === 'string' ? data.authUid.trim() : '';
+        if (uid) return uid;
+      }
+    } catch {
+      // Ignore transient query errors on secondary fallback collections
+    }
+  }
+  return '';
+}
+
+async function resolveAndProvisionSingleLogin(params: {
+  emp: Employee;
+  usedLoginIds: Set<string>;
+  now: string;
+}): Promise<{
+  ok: boolean;
+  status: string;
+  uid?: string;
+  finalLoginId: string;
+  reissuedFromLoginId?: string;
+  message: string;
+}> {
+  const { emp, usedLoginIds, now } = params;
+  const originalLoginId = sanitizeId(emp.loginId || `HOM${emp.employeeId}`).slice(0, 40);
+
+  let prov: Awaited<ReturnType<typeof provisionEmployeeCredentials>>;
+  try {
+    prov = await provisionEmployeeCredentials(originalLoginId, DEFAULT_EMPLOYEE_PASSWORD);
+  } catch (firstErr: unknown) {
+    const desc = describeProvisionError(firstErr);
+    if (desc.code === 'auth/too-many-requests') {
+      await sleepMs(4000);
+      prov = await provisionEmployeeCredentials(originalLoginId, DEFAULT_EMPLOYEE_PASSWORD);
+    } else {
+      throw firstErr;
+    }
+  }
+
+  if (prov.status === 'AUTH_PROVIDER_DISABLED') {
+    return {
+      ok: false,
+      status: prov.status,
+      finalLoginId: originalLoginId,
+      message: prov.message,
+    };
+  }
+
+  let resolvedUid = prov.uid;
+  let finalLoginId = originalLoginId;
+  let finalStatus: string = prov.status;
+  let reissuedFromLoginId: string | undefined;
+
+  if (prov.status === 'ALREADY_EXISTS') {
+    // 1. First check if this employee already has a valid authUid recorded in Firestore
+    const recoveredUid = await recoverExistingAuthUidFromFirestore(emp.employeeId);
+    if (recoveredUid) {
+      resolvedUid = recoveredUid;
+      finalStatus = 'RECOVERED_EXISTING';
+    } else {
+      // 2. Auto-reissue a clean collision-free Login ID (e.g. HOM0065A) so activation never gets stuck
+      const triedSet = new Set<string>(usedLoginIds);
+      triedSet.add(originalLoginId.toUpperCase());
+
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const candidateLoginId = generateNextAvailableLoginId(originalLoginId, triedSet);
+        triedSet.add(candidateLoginId.toUpperCase());
+        const altProv = await provisionEmployeeCredentials(
+          candidateLoginId,
+          DEFAULT_EMPLOYEE_PASSWORD,
+        );
+        if (altProv.status === 'AUTH_PROVIDER_DISABLED') {
+          return {
+            ok: false,
+            status: altProv.status,
+            finalLoginId: originalLoginId,
+            message: altProv.message,
+          };
+        }
+        if ((altProv.status === 'CREATED' || altProv.status === 'RECOVERED_EXISTING') && altProv.uid) {
+          resolvedUid = altProv.uid;
+          finalLoginId = candidateLoginId;
+          finalStatus = 'REISSUED_LOGIN_ID';
+          reissuedFromLoginId = originalLoginId;
+          usedLoginIds.add(candidateLoginId.toUpperCase());
+          break;
+        }
+        if (altProv.status !== 'ALREADY_EXISTS') {
+          return {
+            ok: false,
+            status: altProv.status,
+            finalLoginId: originalLoginId,
+            message: altProv.message,
+          };
+        }
+      }
+    }
+  }
+
+  if (!resolvedUid) {
+    return {
+      ok: false,
+      status: 'ALREADY_EXISTS',
+      finalLoginId: originalLoginId,
+      message: prov.message,
+    };
+  }
+
+  const empWithFinalLogin: Employee =
+    finalLoginId !== emp.loginId
+      ? {
+          ...emp,
+          loginId: finalLoginId,
+          authEmail: loginIdToAuthEmail(finalLoginId),
+        }
+      : emp;
+
+  const wb = writeBatch(db);
+  const updatedEmp = buildCleanProvisionedEmployeeDoc(
+    empWithFinalLogin,
+    resolvedUid,
+    now,
+    loginIdToAuthEmail,
+  );
+  wb.set(doc(db, 'employees', updatedEmp.employeeId), updatedEmp);
+  if (updatedEmp.status === 'ACTIVE') {
+    const activeEntry = buildActiveAuthUidRecord({
+      authUid: resolvedUid,
+      employeeId: updatedEmp.employeeId,
+      departmentId: updatedEmp.departmentId,
+      branchId: updatedEmp.branchId,
+      branchName: updatedEmp.branchName,
+      isBranchManager: updatedEmp.isBranchManager,
+      updatedAt: now,
+    });
+    wb.set(doc(db, 'active_auth_uids', resolvedUid), activeEntry);
+  } else {
+    wb.delete(doc(db, 'active_auth_uids', resolvedUid));
+  }
+  const priorUid = String(emp.authUid || '').trim();
+  if (priorUid && priorUid !== resolvedUid && /^[a-zA-Z0-9_-]{1,128}$/.test(priorUid)) {
+    wb.delete(doc(db, 'active_auth_uids', priorUid));
+  }
+  await wb.commit();
+  await syncEmployeeAuthUidToExistingRecords(updatedEmp.employeeId, resolvedUid);
+
+  if (reissuedFromLoginId) {
+    await recordAuditLog({
+      action: 'EMPLOYEE_LOGIN_REISSUED',
+      targetType: 'employee_auth',
+      targetId: updatedEmp.employeeId,
+      summary: `Resolved auth/email-already-in-use for ${updatedEmp.fullName}: updated Login ID from ${reissuedFromLoginId} to ${finalLoginId} with default password ${DEFAULT_EMPLOYEE_PASSWORD}.`,
+    });
+  }
+
   return {
-    employeeId: sanitizeId(emp.employeeId).slice(0, 64),
-    loginId: safeLoginId,
-    authEmail: loginIdToAuthEmail(safeLoginId),
-    authUid: uid,
-    fullName: (emp.fullName || `Employee ${emp.employeeId}`).trim().slice(0, 120),
-    branchId: emp.branchId,
-    branchName: (emp.branchName || emp.branchId).trim().slice(0, 120),
-    ...(resolvedDept
-      ? { departmentId: resolvedDept.id, departmentName: resolvedDept.name }
-      : emp.departmentName?.trim()
-        ? { departmentId: '' as const, departmentName: emp.departmentName.trim().slice(0, 80) }
-        : {}),
-    ...(emp.photoDataUrl?.trim()
-      ? { photoDataUrl: emp.photoDataUrl.trim().slice(0, 45000) }
-      : {}),
-    designation: (emp.designation || 'Employee').trim().slice(0, 80),
-    ...(emp.dateOfBirth?.trim() ? { dateOfBirth: emp.dateOfBirth.trim().slice(0, 20) } : {}),
-    ...(emp.dateOfJoining?.trim() ? { dateOfJoining: emp.dateOfJoining.trim().slice(0, 20) } : {}),
-    ...(emp.panNumber?.trim() ? { panNumber: emp.panNumber.trim().toUpperCase().slice(0, 20) } : {}),
-    ...(emp.uanNumber?.trim() ? { uanNumber: emp.uanNumber.trim().slice(0, 24) } : {}),
-    ...(emp.pfNumber?.trim() ? { pfNumber: emp.pfNumber.trim().slice(0, 32) } : {}),
-    ...(emp.esicNumber?.trim() ? { esicNumber: emp.esicNumber.trim().slice(0, 32) } : {}),
-    ...(emp.bankName?.trim() ? { bankName: emp.bankName.trim().slice(0, 80) } : {}),
-    ...(emp.bankAccountMasked?.trim()
-      ? { bankAccountMasked: maskBankAccountNumber(emp.bankAccountMasked) }
-      : {}),
-    ...(emp.bankIfsc?.trim() ? { bankIfsc: emp.bankIfsc.trim().toUpperCase().slice(0, 20) } : {}),
-    role: 'EMPLOYEE',
-    status: emp.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE',
-    mustChangePassword: true,
-    credentialsProvisioned: true,
-    createdAt: emp.createdAt || now,
-    updatedAt: now,
-    ...(emp.linkedGoogleEmail?.trim()
-      ? { linkedGoogleEmail: emp.linkedGoogleEmail.trim().toLowerCase().slice(0, 180) }
-      : {}),
-    ...(emp.phone?.trim() ? { phone: emp.phone.trim().slice(0, 24) } : {}),
-    ...(emp.address?.trim() ? { address: emp.address.trim().slice(0, 240) } : {}),
-    ...(emp.emergencyContact?.trim()
-      ? { emergencyContact: emp.emergencyContact.trim().slice(0, 120) }
-      : {}),
+    ok: true,
+    status: finalStatus,
+    uid: resolvedUid,
+    finalLoginId,
+    reissuedFromLoginId,
+    message: reissuedFromLoginId
+      ? `Activated ${updatedEmp.fullName} with updated Login ID ${finalLoginId} (previous ${reissuedFromLoginId} was already in use; default password ${DEFAULT_EMPLOYEE_PASSWORD}).`
+      : `Activated ${updatedEmp.fullName} (${updatedEmp.loginId}) with default password ${DEFAULT_EMPLOYEE_PASSWORD}.`,
   };
 }
 
 export async function provisionSingleEmployeeDefaultLogin(
   emp: Employee,
-): Promise<{ ok: boolean; status: string; message: string }> {
+  allEmployees: Employee[] = [],
+): Promise<{ ok: boolean; status: string; message: string; updatedLoginId?: string }> {
   const now = new Date().toISOString();
-  const cleanLoginId = sanitizeId(emp.loginId || `HOM${emp.employeeId}`).slice(0, 40);
-  const prov = await provisionEmployeeCredentials(cleanLoginId, DEFAULT_EMPLOYEE_PASSWORD);
-  if (prov.status === 'AUTH_PROVIDER_DISABLED') {
-    return { ok: false, status: prov.status, message: prov.message };
-  }
-  if ((prov.status === 'CREATED' || prov.status === 'RECOVERED_EXISTING') && prov.uid) {
-    const wb = writeBatch(db);
-    const updatedEmp = buildCleanProvisionedEmployeeDoc(emp, prov.uid, now);
-    wb.set(doc(db, 'employees', updatedEmp.employeeId), updatedEmp);
-    if (updatedEmp.status === 'ACTIVE') {
-      const activeEntry: ActiveAuthUidRecord = {
-        authUid: prov.uid,
-        employeeId: updatedEmp.employeeId,
-        departmentId: updatedEmp.departmentId || '',
-        active: true,
-        updatedAt: now,
-      };
-      wb.set(doc(db, 'active_auth_uids', prov.uid), activeEntry);
-    }
-    await wb.commit();
-    await syncEmployeeAuthUidToExistingRecords(updatedEmp.employeeId, prov.uid);
-    return {
-      ok: true,
-      status: prov.status,
-      message: `Activated ${updatedEmp.fullName} (${updatedEmp.loginId}) with default password ${DEFAULT_EMPLOYEE_PASSWORD}.`,
-    };
-  }
-  return { ok: false, status: prov.status, message: prov.message };
+  const usedLoginIds = new Set<string>(
+    allEmployees.map((e) => (e.loginId || '').trim().toUpperCase()).filter(Boolean),
+  );
+  if (emp.loginId) usedLoginIds.add(emp.loginId.trim().toUpperCase());
+
+  const res = await resolveAndProvisionSingleLogin({
+    emp,
+    usedLoginIds,
+    now,
+  });
+  return {
+    ok: res.ok,
+    status: res.status,
+    message: res.message,
+    updatedLoginId: res.reissuedFromLoginId ? res.finalLoginId : undefined,
+  };
 }
 
 export async function provisionAllPendingEmployeeLogins(
@@ -673,13 +797,18 @@ export async function provisionAllPendingEmployeeLogins(
   }
 
   let provisionedCount = 0;
+  let reissuedCount = 0;
   let alreadyExistedCount = 0;
   let failedCount = 0;
   let rateLimitedCount = 0;
   let providerDisabled = false;
   let rateLimited = false;
   const failedItems: ProvisionFailureItem[] = [];
+  const reissuedSummary: string[] = [];
   const now = new Date().toISOString();
+  const usedLoginIds = new Set<string>(
+    employees.map((e) => (e.loginId || '').trim().toUpperCase()).filter(Boolean),
+  );
 
   for (let idx = 0; idx < pending.length; idx += 1) {
     const emp = pending[idx];
@@ -696,46 +825,25 @@ export async function provisionAllPendingEmployeeLogins(
       await sleepMs(350);
     }
 
-    const cleanLoginId = sanitizeId(emp.loginId || `HOM${emp.employeeId}`).slice(0, 40);
-
     try {
-      let prov: Awaited<ReturnType<typeof provisionEmployeeCredentials>>;
-      try {
-        prov = await provisionEmployeeCredentials(cleanLoginId, DEFAULT_EMPLOYEE_PASSWORD);
-      } catch (firstErr: unknown) {
-        const desc = describeProvisionError(firstErr);
-        if (desc.code === 'auth/too-many-requests') {
-          // Single calm backoff retry before pausing cleanly
-          await sleepMs(4000);
-          prov = await provisionEmployeeCredentials(cleanLoginId, DEFAULT_EMPLOYEE_PASSWORD);
-        } else {
-          throw firstErr;
-        }
-      }
+      const res = await resolveAndProvisionSingleLogin({
+        emp,
+        usedLoginIds,
+        now,
+      });
 
-      if (prov.status === 'AUTH_PROVIDER_DISABLED') {
+      if (res.status === 'AUTH_PROVIDER_DISABLED') {
         providerDisabled = true;
         break;
       }
 
-      if ((prov.status === 'CREATED' || prov.status === 'RECOVERED_EXISTING') && prov.uid) {
-        const wb = writeBatch(db);
-        const updatedEmp = buildCleanProvisionedEmployeeDoc(emp, prov.uid, now);
-        wb.set(doc(db, 'employees', updatedEmp.employeeId), updatedEmp);
-        if (updatedEmp.status === 'ACTIVE') {
-          const activeEntry: ActiveAuthUidRecord = {
-            authUid: prov.uid,
-            employeeId: updatedEmp.employeeId,
-            departmentId: updatedEmp.departmentId || '',
-            active: true,
-            updatedAt: now,
-          };
-          wb.set(doc(db, 'active_auth_uids', prov.uid), activeEntry);
-        }
-        await wb.commit();
-        await syncEmployeeAuthUidToExistingRecords(updatedEmp.employeeId, prov.uid);
+      if (res.ok) {
         provisionedCount += 1;
-      } else if (prov.status === 'ALREADY_EXISTS') {
+        if (res.reissuedFromLoginId) {
+          reissuedCount += 1;
+          reissuedSummary.push(`${emp.fullName}: ${res.reissuedFromLoginId} -> ${res.finalLoginId}`);
+        }
+      } else if (res.status === 'ALREADY_EXISTS') {
         alreadyExistedCount += 1;
         failedItems.push({
           employeeId: emp.employeeId,
@@ -743,7 +851,7 @@ export async function provisionAllPendingEmployeeLogins(
           fullName: emp.fullName,
           branchName: emp.branchName,
           errorCode: 'auth/email-already-in-use',
-          reason: prov.message,
+          reason: res.message,
         });
       } else {
         failedCount += 1;
@@ -752,8 +860,8 @@ export async function provisionAllPendingEmployeeLogins(
           loginId: emp.loginId,
           fullName: emp.fullName,
           branchName: emp.branchName,
-          errorCode: prov.status,
-          reason: prov.message,
+          errorCode: res.status,
+          reason: res.message,
         });
       }
     } catch (err: unknown) {
@@ -803,6 +911,8 @@ export async function provisionAllPendingEmployeeLogins(
       targetType: 'employee_auth',
       targetId: `BULK_${Date.now()}`,
       summary: `Provisioned default first-login credentials (mandatory password change enabled) for ${provisionedCount} employee(s) out of ${pending.length} pending.${
+        reissuedCount > 0 ? ` Auto-reissued ${reissuedCount} conflicting Login ID(s).` : ''
+      }${
         rateLimited ? ` Paused at Firebase rate limit (${rateLimitedCount} remaining to retry after cooldown).` : ''
       }`,
     });
@@ -837,6 +947,11 @@ export async function provisionAllPendingEmployeeLogins(
     };
   }
 
+  const reissueNote =
+    reissuedCount > 0
+      ? ` Auto-resolved ${reissuedCount} duplicate Login ID(s): ${reissuedSummary.slice(0, 4).join(', ')}${reissuedSummary.length > 4 ? '…' : ''}.`
+      : '';
+
   return {
     totalPending: pending.length,
     provisionedCount,
@@ -846,8 +961,8 @@ export async function provisionAllPendingEmployeeLogins(
     providerDisabled: false,
     rateLimited: false,
     failedItems,
-    message: `Activated ${provisionedCount} employee login(s) with default password ${DEFAULT_EMPLOYEE_PASSWORD} (mandatory password change on first login).${
-      alreadyExistedCount > 0 ? ` ${alreadyExistedCount} already customized.` : ''
+    message: `Activated ${provisionedCount} employee login(s) with default password ${DEFAULT_EMPLOYEE_PASSWORD} (mandatory password change on first login).${reissueNote}${
+      alreadyExistedCount > 0 ? ` ${alreadyExistedCount} could not be auto-resolved.` : ''
     }${failedCount > 0 ? ` ${failedCount} failed (see detailed list below).` : ''}`,
   };
 }
@@ -914,6 +1029,7 @@ async function syncEmployeeAuthUidToExistingRecords(
 
 export async function saveEmployee(input: {
   employeeId: string;
+  saleId?: string;
   loginId: string;
   fullName: string;
   branchId: string;
@@ -922,6 +1038,8 @@ export async function saveEmployee(input: {
   departmentName?: string;
   photoDataUrl?: string;
   designation: string;
+  gender?: string;
+  category?: string;
   dateOfBirth?: string;
   dateOfJoining?: string;
   panNumber?: string;
@@ -934,8 +1052,10 @@ export async function saveEmployee(input: {
   phone?: string;
   address?: string;
   emergencyContact?: string;
+  customFields?: Record<string, string>;
   linkedGoogleEmail?: string;
   role?: 'EMPLOYEE';
+  isBranchManager?: boolean;
   status: 'ACTIVE' | 'INACTIVE';
   mustChangePassword: boolean;
   initialPassword?: string;
@@ -945,6 +1065,35 @@ export async function saveEmployee(input: {
   const employeeId = sanitizeId(input.employeeId).slice(0, 64);
   const loginId = sanitizeId(input.loginId).slice(0, 40);
   const authEmail = loginIdToAuthEmail(loginId);
+
+  const rawSaleId =
+    input.saleId !== undefined ? input.saleId : (input.existing?.saleId || '');
+  const resolvedSaleId = rawSaleId.trim()
+    ? sanitizeId(rawSaleId.trim()).toUpperCase().slice(0, 40)
+    : '';
+  const resolvedGender = (
+    input.gender !== undefined ? input.gender : (input.existing?.gender || '')
+  )
+    .trim()
+    .slice(0, 20);
+  const resolvedCategory = (
+    input.category !== undefined ? input.category : (input.existing?.category || '')
+  )
+    .trim()
+    .slice(0, 40);
+
+  if (resolvedSaleId) {
+    const dupSnap = await getDocs(
+      query(collection(db, 'employees'), where('saleId', '==', resolvedSaleId)),
+    );
+    const conflict = dupSnap.docs.find((d) => d.id.toUpperCase() !== employeeId.toUpperCase());
+    if (conflict) {
+      const other = conflict.data() as Employee;
+      throw new Error(
+        `Sale ID "${resolvedSaleId}" is already assigned to ${other.fullName} (${other.employeeId}) in branch ${other.branchName}. Every Sales employee must have a unique Sale ID.`,
+      );
+    }
+  }
 
   const previousAuthUid = input.existing?.authUid || '';
   let authUid = previousAuthUid;
@@ -1029,10 +1178,34 @@ export async function saveEmployee(input: {
     .trim()
     .toUpperCase()
     .slice(0, 20);
+  const resolvedPhone = (
+    input.phone !== undefined ? input.phone : input.existing?.phone || ''
+  )
+    .trim()
+    .slice(0, 24);
+  const resolvedAddress = (
+    input.address !== undefined ? input.address : input.existing?.address || ''
+  )
+    .trim()
+    .slice(0, 240);
+  const resolvedEmergencyContact = (
+    input.emergencyContact !== undefined
+      ? input.emergencyContact
+      : input.existing?.emergencyContact || ''
+  )
+    .trim()
+    .slice(0, 120);
+
+  const rawCustomFields =
+    input.customFields !== undefined
+      ? input.customFields
+      : input.existing?.customFields || {};
+  const resolvedCustomFields = sanitizeEmployeeCustomFields(rawCustomFields);
 
   // Phase 2 enforces EMPLOYEE role only (BRANCH_MANAGER disabled)
   const record: Employee = {
     employeeId,
+    ...(resolvedSaleId ? { saleId: resolvedSaleId } : {}),
     loginId,
     authEmail,
     fullName: input.fullName.trim().slice(0, 120),
@@ -1045,6 +1218,8 @@ export async function saveEmployee(input: {
         : {}),
     ...(resolvedPhoto ? { photoDataUrl: resolvedPhoto } : {}),
     designation: input.designation.trim().slice(0, 80),
+    ...(resolvedGender ? { gender: resolvedGender } : {}),
+    ...(resolvedCategory ? { category: resolvedCategory } : {}),
     ...(resolvedDob ? { dateOfBirth: resolvedDob } : {}),
     ...(resolvedDoj ? { dateOfJoining: resolvedDoj } : {}),
     ...(resolvedPan ? { panNumber: resolvedPan } : {}),
@@ -1055,6 +1230,11 @@ export async function saveEmployee(input: {
     ...(resolvedBankAcc ? { bankAccountMasked: resolvedBankAcc } : {}),
     ...(resolvedBankIfsc ? { bankIfsc: resolvedBankIfsc } : {}),
     role: 'EMPLOYEE',
+    ...(input.isBranchManager !== undefined
+      ? { isBranchManager: Boolean(input.isBranchManager) }
+      : input.existing?.isBranchManager
+        ? { isBranchManager: true }
+        : {}),
     status: input.status,
     mustChangePassword: input.mustChangePassword,
     credentialsProvisioned,
@@ -1064,10 +1244,11 @@ export async function saveEmployee(input: {
     ...(input.linkedGoogleEmail?.trim()
       ? { linkedGoogleEmail: input.linkedGoogleEmail.trim().toLowerCase().slice(0, 180) }
       : {}),
-    ...(input.phone?.trim() ? { phone: input.phone.trim().slice(0, 24) } : {}),
-    ...(input.address?.trim() ? { address: input.address.trim().slice(0, 240) } : {}),
-    ...(input.emergencyContact?.trim()
-      ? { emergencyContact: input.emergencyContact.trim().slice(0, 120) }
+    ...(resolvedPhone ? { phone: resolvedPhone } : {}),
+    ...(resolvedAddress ? { address: resolvedAddress } : {}),
+    ...(resolvedEmergencyContact ? { emergencyContact: resolvedEmergencyContact } : {}),
+    ...(Object.keys(resolvedCustomFields).length > 0
+      ? { customFields: resolvedCustomFields }
       : {}),
   };
 
@@ -1082,13 +1263,15 @@ export async function saveEmployee(input: {
 
     if (authUid) {
       if (record.status === 'ACTIVE') {
-        const activeEntry: ActiveAuthUidRecord = {
+        const activeEntry = buildActiveAuthUidRecord({
           authUid,
           employeeId,
-          ...(resolvedDept ? { departmentId: resolvedDept.id } : { departmentId: '' }),
-          active: true,
+          departmentId: resolvedDept ? resolvedDept.id : '',
+          branchId: record.branchId,
+          branchName: record.branchName,
+          isBranchManager: record.isBranchManager,
           updatedAt: now,
-        };
+        });
         wb.set(doc(db, 'active_auth_uids', authUid), activeEntry);
       } else {
         wb.delete(doc(db, 'active_auth_uids', authUid));
@@ -1179,13 +1362,15 @@ export async function updateEmployeeStatus(params: {
 
     if (params.employee.authUid) {
       if (params.targetStatus === 'ACTIVE') {
-        const activeEntry: ActiveAuthUidRecord = {
+        const activeEntry = buildActiveAuthUidRecord({
           authUid: params.employee.authUid,
           employeeId: params.employee.employeeId,
-          ...(params.employee.departmentId ? { departmentId: params.employee.departmentId } : { departmentId: '' }),
-          active: true,
+          departmentId: params.employee.departmentId,
+          branchId: params.employee.branchId,
+          branchName: params.employee.branchName,
+          isBranchManager: params.employee.isBranchManager,
           updatedAt: now,
-        };
+        });
         wb.set(doc(db, 'active_auth_uids', params.employee.authUid), activeEntry);
       } else {
         wb.delete(doc(db, 'active_auth_uids', params.employee.authUid));
@@ -1282,7 +1467,16 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
       activeRegistryMap.set(d.id, d.data() as ActiveAuthUidRecord);
     }
     const empById = new Map<string, Employee>();
-    const expectedActiveUids = new Map<string, { employeeId: string; departmentId: DepartmentId | '' }>();
+    const expectedActiveUids = new Map<
+      string,
+      {
+        employeeId: string;
+        departmentId: DepartmentId | '';
+        branchId: string;
+        branchName: string;
+        isBranchManager: boolean;
+      }
+    >();
     let unlinkedEmployeesCount = 0;
 
     for (const emp of employees) {
@@ -1292,6 +1486,9 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
           expectedActiveUids.set(emp.authUid, {
             employeeId: emp.employeeId,
             departmentId: emp.departmentId || '',
+            branchId: emp.branchId,
+            branchName: emp.branchName,
+            isBranchManager: Boolean(emp.isBranchManager),
           });
         }
       } else {
@@ -1317,24 +1514,28 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
     let salarySlipsUpdated = 0;
     let departmentRanksUpdated = 0;
 
-    // 1. Add missing or out-of-sync active_auth_uids entries (including departmentId) for ACTIVE employees
+    // 1. Add missing or out-of-sync active_auth_uids entries (including departmentId, branchId & isBranchManager) for ACTIVE employees
     for (const [authUid, info] of expectedActiveUids.entries()) {
       const existingReg = activeRegistryMap.get(authUid);
       if (
         !existingReg ||
         existingReg.employeeId !== info.employeeId ||
-        (existingReg.departmentId || '') !== info.departmentId
+        (existingReg.departmentId || '') !== info.departmentId ||
+        (existingReg.branchId || '') !== info.branchId ||
+        Boolean(existingReg.isBranchManager) !== info.isBranchManager
       ) {
         ops.push({
           kind: 'set',
           ref: doc(db, 'active_auth_uids', authUid),
-          data: {
+          data: buildActiveAuthUidRecord({
             authUid,
             employeeId: info.employeeId,
             departmentId: info.departmentId,
-            active: true,
+            branchId: info.branchId,
+            branchName: info.branchName,
+            isBranchManager: info.isBranchManager,
             updatedAt: now,
-          },
+          }) as unknown as Record<string, unknown>,
         });
         activeRegistryAdded += 1;
       }
@@ -1485,29 +1686,229 @@ export async function backfillAuthUidAndActiveRegistry(): Promise<LegacyAuthBack
   }
 }
 
+export interface BranchTransferConsolidationResult {
+  migratedRecordsCount: number;
+  migratedIncentivePaise: number;
+  affectedMonthKeys: string[];
+}
+
 /**
  * Super Admin ONLY: Explicitly approves a branch transfer detected during Excel import.
  * Excel import NEVER silently overwrites an employee's branch.
+ * When `consolidatePreviousBranchIncentives` is enabled (default true), any active PUBLISHED
+ * incentives recorded under the employee's previous branch (in the affected month(s)) are
+ * carried forward into the new current branch, rebuilding monthly summaries & payout branch
+ * attribution so Current Branch Total = Previous Branch Incentive + New Branch Incentive.
  */
 export async function approveEmployeeBranchTransfer(params: {
   employee: Employee;
   newBranchId: string;
   newBranchName: string;
   reason?: string;
-}): Promise<void> {
+  targetMonthKeys?: string[];
+  consolidatePreviousBranchIncentives?: boolean;
+  allEmployees?: Employee[];
+}): Promise<BranchTransferConsolidationResult> {
+  const actor = auth.currentUser;
+  const actorEmail = (actor?.email || 'admin').slice(0, 180);
   const now = new Date().toISOString();
+  const cleanBranchName = params.newBranchName.trim().slice(0, 120);
+  const shouldConsolidate = params.consolidatePreviousBranchIncentives !== false;
+
   try {
-    await updateDoc(doc(db, 'employees', params.employee.employeeId), {
-      branchId: params.newBranchId,
-      branchName: params.newBranchName.trim().slice(0, 120),
-      updatedAt: now,
-    });
+    const [empIncSnap, empPayoutSnap, visibilitySettings] = await Promise.all([
+      getDocs(
+        query(
+          collection(db, 'published_incentives'),
+          where('employeeId', '==', params.employee.employeeId),
+        ),
+      ),
+      getDocs(
+        query(
+          collection(db, 'payout_records'),
+          where('employeeId', '==', params.employee.employeeId),
+        ),
+      ),
+      fetchPortalVisibilitySettings(),
+    ]);
+
+    const employeeIncentives = empIncSnap.docs.map((d) => d.data() as PublishedIncentive);
+
+    const plan = shouldConsolidate
+      ? planBranchTransferConsolidation({
+          employee: params.employee,
+          newBranchId: params.newBranchId,
+          newBranchName: cleanBranchName,
+          publishedIncentives: employeeIncentives,
+          targetMonthKeys: params.targetMonthKeys,
+          now,
+        })
+      : {
+          recordsToMigrate: [],
+          affectedMonthKeys: [],
+          migratedIncentivePaise: 0,
+          migratedSaleAmtPaise: 0,
+          migratedSaleQty: 0,
+          updatedMonthlySummaries: [],
+        };
+
+    // Build atomic write list: employee doc + active_auth_uids + birthday profile must land together first
+    type BatchOp =
+      | { kind: 'update'; ref: ReturnType<typeof doc>; data: Record<string, unknown> }
+      | { kind: 'set'; ref: ReturnType<typeof doc>; data: Record<string, unknown> };
+
+    const coreOps: BatchOp[] = [
+      {
+        kind: 'update',
+        ref: doc(db, 'employees', params.employee.employeeId),
+        data: {
+          branchId: params.newBranchId,
+          branchName: cleanBranchName,
+          updatedAt: now,
+        },
+      },
+    ];
+
+    if (params.employee.authUid && params.employee.authUid.trim() !== '' && params.employee.status === 'ACTIVE') {
+      const activeEntry = buildActiveAuthUidRecord({
+        authUid: params.employee.authUid,
+        employeeId: params.employee.employeeId,
+        departmentId: params.employee.departmentId,
+        branchId: params.newBranchId,
+        branchName: cleanBranchName,
+        isBranchManager: params.employee.isBranchManager,
+        updatedAt: now,
+      });
+      coreOps.push({
+        kind: 'set',
+        ref: doc(db, 'active_auth_uids', params.employee.authUid),
+        data: activeEntry as unknown as Record<string, unknown>,
+      });
+    }
+
+    const updatedBirthday = buildBirthdayProfileFromEmployee(
+      { ...params.employee, branchId: params.newBranchId, branchName: cleanBranchName },
+      now,
+    );
+    if (updatedBirthday) {
+      coreOps.push({
+        kind: 'set',
+        ref: doc(db, 'birthday_profiles', params.employee.employeeId),
+        data: updatedBirthday as unknown as Record<string, unknown>,
+      });
+    }
+
+    const secondaryOps: BatchOp[] = [];
+
+    // Re-attribute previous-branch active published incentives to the new current branch
+    for (const rec of plan.recordsToMigrate) {
+      secondaryOps.push({
+        kind: 'update',
+        ref: doc(db, 'published_incentives', rec.recordId),
+        data: {
+          branchId: params.newBranchId,
+          branchName: cleanBranchName,
+        },
+      });
+    }
+
+    // Upsert recalculated monthly summaries under the new current branch
+    for (const summary of plan.updatedMonthlySummaries) {
+      const summaryDoc: MonthlySummary = {
+        ...summary,
+        employeeVisible: isMonthVisibleToEmployees(summary.monthKey, visibilitySettings),
+      };
+      secondaryOps.push({
+        kind: 'set',
+        ref: doc(db, 'monthly_summaries', summaryDoc.summaryId),
+        data: summaryDoc as unknown as Record<string, unknown>,
+      });
+    }
+
+    // Re-attribute existing payout_records for affected month(s) to the new current branch
+    const affectedMonthSet = new Set(plan.affectedMonthKeys);
+    for (const pDoc of empPayoutSnap.docs) {
+      const payoutData = pDoc.data() as { monthKey?: string; branchId?: string };
+      if (
+        payoutData.monthKey &&
+        affectedMonthSet.has(payoutData.monthKey) &&
+        payoutData.branchId !== params.newBranchId
+      ) {
+        secondaryOps.push({
+          kind: 'update',
+          ref: pDoc.ref,
+          data: {
+            branchId: params.newBranchId,
+            branchName: cleanBranchName,
+            updatedByEmail: actorEmail,
+            updatedAt: now,
+          },
+        });
+      }
+    }
+
+    // Commit core employee + active registry + birthday profile together first
+    const coreBatch = writeBatch(db);
+    for (const op of coreOps) {
+      if (op.kind === 'update') {
+        coreBatch.update(op.ref, op.data);
+      } else {
+        coreBatch.set(op.ref, op.data);
+      }
+    }
+    await coreBatch.commit();
+
+    // Commit migrated incentive / summary / payout docs in chunks of 380
+    for (let i = 0; i < secondaryOps.length; i += 380) {
+      const wb = writeBatch(db);
+      for (const op of secondaryOps.slice(i, i + 380)) {
+        if (op.kind === 'update') {
+          wb.update(op.ref, op.data);
+        } else {
+          wb.set(op.ref, op.data);
+        }
+      }
+      await wb.commit();
+    }
+
+    // Non-blocking refresh of cross-branch department leaderboards for affected months
+    if (plan.affectedMonthKeys.length > 0 && params.allEmployees && params.allEmployees.length > 0) {
+      try {
+        const updatedEmpList = params.allEmployees.map((e) =>
+          e.employeeId === params.employee.employeeId
+            ? { ...e, branchId: params.newBranchId, branchName: cleanBranchName }
+            : e,
+        );
+        const allPublishedSnap = await getDocs(collection(db, 'published_incentives'));
+        const allPublished = allPublishedSnap.docs.map((d) => d.data() as PublishedIncentive);
+        await recomputeAndSaveDepartmentRankings({
+          monthKeys: plan.affectedMonthKeys,
+          employees: updatedEmpList,
+          incentives: allPublished,
+          visibilitySettings,
+        });
+      } catch (rankErr) {
+        console.warn('Department leaderboard refresh skipped after branch transfer:', rankErr);
+      }
+    }
+
+    const carryNote =
+      plan.recordsToMigrate.length > 0
+        ? ` Carried forward ${plan.recordsToMigrate.length} previous-branch incentive record(s) totaling ${formatINRFromPaise(plan.migratedIncentivePaise)} across ${plan.affectedMonthKeys.join(', ')} into ${cleanBranchName}.`
+        : '';
+
     await recordAuditLog({
       action: 'EMPLOYEE_BRANCH_TRANSFERRED',
       targetType: 'employee',
       targetId: params.employee.employeeId,
-      summary: `Super Admin approved branch transfer for ${params.employee.employeeId} (${params.employee.fullName}): ${params.employee.branchName} -> ${params.newBranchName}.${params.reason ? ` Note: ${params.reason}` : ''}`,
+      summary: `Approved branch transfer for ${params.employee.employeeId} (${params.employee.fullName}): ${params.employee.branchName} -> ${cleanBranchName}.${carryNote}${params.reason ? ` Note: ${params.reason}` : ''}`,
     });
+
+    return {
+      migratedRecordsCount: plan.recordsToMigrate.length,
+      migratedIncentivePaise: plan.migratedIncentivePaise,
+      affectedMonthKeys: plan.affectedMonthKeys,
+    };
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `employees/${params.employee.employeeId}`);
   }
@@ -1515,22 +1916,46 @@ export async function approveEmployeeBranchTransfer(params: {
 
 export async function updateOwnEmployeeProfile(
   employeeId: string,
-  updates: { phone: string; address: string; emergencyContact: string; mustChangePassword?: boolean },
+  updates: {
+    phone?: string;
+    address?: string;
+    emergencyContact?: string;
+    mustChangePassword?: boolean;
+  },
 ): Promise<void> {
   const payload: Record<string, string | boolean> = {
-    phone: updates.phone.trim().slice(0, 24),
-    address: updates.address.trim().slice(0, 240),
-    emergencyContact: updates.emergencyContact.trim().slice(0, 120),
     updatedAt: new Date().toISOString(),
   };
+  if (typeof updates.phone === 'string') {
+    payload.phone = updates.phone.trim().slice(0, 24);
+  }
+  if (typeof updates.address === 'string') {
+    payload.address = updates.address.trim().slice(0, 240);
+  }
+  if (typeof updates.emergencyContact === 'string') {
+    payload.emergencyContact = updates.emergencyContact.trim().slice(0, 120);
+  }
   if (typeof updates.mustChangePassword === 'boolean') {
     payload.mustChangePassword = updates.mustChangePassword;
   }
 
   try {
     await updateDoc(doc(db, 'employees', employeeId), payload);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `employees/${employeeId}`);
+  } catch (firstError: unknown) {
+    const code = (firstError as { code?: string })?.code || '';
+    // Right after Firebase Auth updatePassword(), Firestore's active channel may still hold the pre-change token briefly.
+    // Force a fresh ID token and retry once cleanly before surfacing a permission error.
+    if (code === 'permission-denied' && auth.currentUser) {
+      try {
+        await auth.currentUser.getIdToken(true);
+        await sleepMs(350);
+        await updateDoc(doc(db, 'employees', employeeId), payload);
+        return;
+      } catch (retryError) {
+        handleFirestoreError(retryError, OperationType.UPDATE, `employees/${employeeId}`);
+      }
+    }
+    handleFirestoreError(firstError, OperationType.UPDATE, `employees/${employeeId}`);
   }
 }
 
@@ -1653,12 +2078,15 @@ export async function syncMastersFromErpRows(params: {
       data: Branch | Employee | ActiveAuthUidRecord;
     }> = [{ ref: doc(db, 'employees', employeeId), data: empDoc }];
     if (authUid && emp.initialStatus === 'ACTIVE') {
-      const activeEntry: ActiveAuthUidRecord = {
+      const activeEntry = buildActiveAuthUidRecord({
         authUid,
         employeeId,
-        active: true,
+        departmentId: '',
+        branchId: branch.branchId,
+        branchName: branch.branchName,
+        isBranchManager: false,
         updatedAt: now,
-      };
+      });
       empPair.push({ ref: doc(db, 'active_auth_uids', authUid), data: activeEntry });
     }
     opGroups.push(empPair);
@@ -1767,6 +2195,157 @@ export async function listAuditLogs(): Promise<AuditLog[]> {
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'audit_logs');
   }
+}
+
+export async function linkVerifiedSaleIdsToEmployees(params: {
+  links: Array<{ employeeId: string; saleId: string }>;
+  employees: Employee[];
+}): Promise<{ linkedCount: number; skippedCount: number; updatedEmployees: Employee[] }> {
+  const user = auth.currentUser;
+  if (!user) throw new Error('Super Admin authentication is required.');
+
+  const empById = new Map<string, Employee>();
+  const existingSaleOwner = new Map<string, string>();
+  for (const emp of params.employees) {
+    const idKey = emp.employeeId.trim().toUpperCase();
+    empById.set(idKey, emp);
+    if (emp.saleId && emp.saleId.trim()) {
+      existingSaleOwner.set(sanitizeId(emp.saleId).toUpperCase(), idKey);
+    }
+  }
+
+  const now = new Date().toISOString();
+  const appliedMap = new Map<string, string>();
+  let skippedCount = 0;
+
+  type BatchOp =
+    | { type: 'update'; ref: ReturnType<typeof doc>; data: Record<string, unknown> }
+    | { type: 'set'; ref: ReturnType<typeof doc>; data: ActiveAuthUidRecord }
+    | { type: 'delete'; ref: ReturnType<typeof doc> };
+
+  const units: BatchOp[][] = [];
+
+  for (const item of params.links) {
+    const empKey = item.employeeId.trim().toUpperCase();
+    const emp = empById.get(empKey);
+    const cleanSaleId = sanitizeId(item.saleId).toUpperCase().slice(0, 40);
+
+    if (!emp || !cleanSaleId || !/^[A-Z0-9_-]{1,40}$/.test(cleanSaleId)) {
+      skippedCount += 1;
+      continue;
+    }
+
+    const currentSaleId = emp.saleId ? sanitizeId(emp.saleId).toUpperCase() : '';
+    if (currentSaleId === cleanSaleId) {
+      skippedCount += 1;
+      continue;
+    }
+
+    const owner = existingSaleOwner.get(cleanSaleId);
+    if (owner && owner !== empKey) {
+      skippedCount += 1;
+      continue;
+    }
+
+    if (appliedMap.has(empKey)) {
+      skippedCount += 1;
+      continue;
+    }
+
+    existingSaleOwner.set(cleanSaleId, empKey);
+    appliedMap.set(empKey, cleanSaleId);
+
+    const unit: BatchOp[] = [
+      {
+        type: 'update',
+        ref: doc(db, 'employees', emp.employeeId),
+        data: {
+          saleId: cleanSaleId,
+          updatedAt: now,
+        },
+      },
+    ];
+
+    if (emp.authUid && emp.authUid.trim()) {
+      const uidRef = doc(db, 'active_auth_uids', emp.authUid);
+      if (emp.status === 'ACTIVE') {
+        unit.push({
+          type: 'set',
+          ref: uidRef,
+          data: buildActiveAuthUidRecord({
+            authUid: emp.authUid,
+            employeeId: emp.employeeId,
+            departmentId: emp.departmentId,
+            branchId: emp.branchId,
+            branchName: emp.branchName,
+            isBranchManager: emp.isBranchManager,
+            updatedAt: now,
+          }),
+        });
+      } else {
+        unit.push({
+          type: 'delete',
+          ref: uidRef,
+        });
+      }
+    }
+
+    units.push(unit);
+  }
+
+  if (units.length > 0) {
+    const MAX_OPS_PER_BATCH = 300;
+    try {
+      let currentBatch = writeBatch(db);
+      let currentOps = 0;
+
+      for (const unit of units) {
+        if (currentOps + unit.length > MAX_OPS_PER_BATCH && currentOps > 0) {
+          await currentBatch.commit();
+          currentBatch = writeBatch(db);
+          currentOps = 0;
+        }
+        for (const op of unit) {
+          if (op.type === 'update') {
+            currentBatch.update(op.ref, op.data);
+          } else if (op.type === 'set') {
+            currentBatch.set(op.ref, op.data);
+          } else {
+            currentBatch.delete(op.ref);
+          }
+          currentOps += 1;
+        }
+      }
+
+      if (currentOps > 0) {
+        await currentBatch.commit();
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'employees/link-sale-ids');
+    }
+
+    const sampleSummary = Array.from(appliedMap.entries())
+      .slice(0, 6)
+      .map(([empId, sId]) => `${empId}→${sId}`)
+      .join(', ');
+    await recordAuditLog({
+      action: 'LINK_VERIFIED_SALE_IDS',
+      targetType: 'employee',
+      targetId: `LINK_${appliedMap.size}`,
+      summary: `Linked verified Sales ID to ${appliedMap.size} Employee Master record(s): ${sampleSummary}${appliedMap.size > 6 ? ` (+${appliedMap.size - 6} more)` : ''}.`,
+    });
+  }
+
+  const updatedEmployees = params.employees.map((emp) => {
+    const linkedSaleId = appliedMap.get(emp.employeeId.trim().toUpperCase());
+    return linkedSaleId ? { ...emp, saleId: linkedSaleId, updatedAt: now } : emp;
+  });
+
+  return {
+    linkedCount: appliedMap.size,
+    skippedCount,
+    updatedEmployees,
+  };
 }
 
 // --- STAGING, APPROVAL, REJECTION & TRANSACTION-LOCKED IDEMPOTENT PUBLISHING WORKFLOW ---
@@ -2968,6 +3547,8 @@ export async function purgeMonthRecords(params: {
   deletedSummaries: number;
   deletedNotifications: number;
   deletedTargets: number;
+  deletedLeaderboards: number;
+  deletedRanks: number;
   voidedAdjustments: number;
 }> {
   const user = auth.currentUser;
@@ -2981,14 +3562,23 @@ export async function purgeMonthRecords(params: {
   const cleanReason = (params.reason || '').trim().slice(0, 240);
 
   try {
-    const [batchesSnap, incSnap, sumSnap, notifSnap, tgtSnap, adjSnap] = await Promise.all([
-      getDocs(collection(db, 'import_batches')),
-      getDocs(collection(db, 'published_incentives')),
-      getDocs(query(collection(db, 'monthly_summaries'), where('monthKey', '==', targetMonth))),
-      getDocs(collection(db, 'notifications')),
-      getDocs(query(collection(db, 'sales_targets'), where('monthKey', '==', targetMonth))),
-      getDocs(query(collection(db, 'incentive_adjustments'), where('monthKey', '==', targetMonth))),
-    ]);
+    const [batchesSnap, incSnap, sumSnap, notifSnap, tgtSnap, adjSnap, lbSnap, rankSnap] =
+      await Promise.all([
+        getDocs(collection(db, 'import_batches')),
+        getDocs(collection(db, 'published_incentives')),
+        getDocs(query(collection(db, 'monthly_summaries'), where('monthKey', '==', targetMonth))),
+        getDocs(collection(db, 'notifications')),
+        getDocs(query(collection(db, 'sales_targets'), where('monthKey', '==', targetMonth))),
+        getDocs(
+          query(collection(db, 'incentive_adjustments'), where('monthKey', '==', targetMonth)),
+        ),
+        getDocs(
+          query(collection(db, 'department_leaderboards'), where('monthKey', '==', targetMonth)),
+        ),
+        getDocs(
+          query(collection(db, 'employee_department_ranks'), where('monthKey', '==', targetMonth)),
+        ),
+      ]);
 
     const matchingBatchDocs = batchesSnap.docs.filter((d) => {
       const b = d.data() as ImportBatch;
@@ -3039,6 +3629,8 @@ export async function purgeMonthRecords(params: {
       ...sumSnap.docs.map((d) => d.ref),
       ...matchingNotifDocs.map((d) => d.ref),
       ...tgtSnap.docs.map((d) => d.ref),
+      ...lbSnap.docs.map((d) => d.ref),
+      ...rankSnap.docs.map((d) => d.ref),
     ];
 
     for (let i = 0; i < deleteRefs.length; i += 400) {
@@ -3067,7 +3659,7 @@ export async function purgeMonthRecords(params: {
       action: 'MONTH_DATA_PURGED',
       targetType: 'monthly_summary',
       targetId: targetMonth,
-      summary: `Purged all records for ${targetMonth}: ${matchingBatchDocs.length} batch(es), ${matchingRowRefs.length} row(s), ${matchingIncDocs.length} published record(s), ${sumSnap.size} summary(s), ${matchingNotifDocs.length} notification(s), ${tgtSnap.size} target(s) removed; ${activeAdjDocs.length} adjustment(s) voided.${
+      summary: `Purged all records for ${targetMonth}: ${matchingBatchDocs.length} batch(es), ${matchingRowRefs.length} row(s), ${matchingIncDocs.length} published record(s), ${sumSnap.size} summary(s), ${matchingNotifDocs.length} notification(s), ${tgtSnap.size} target(s), ${lbSnap.size} leaderboard(s), ${rankSnap.size} rank(s) removed; ${activeAdjDocs.length} adjustment(s) voided.${
         cleanReason ? ` Reason: ${cleanReason}` : ''
       }`,
     });
@@ -3079,6 +3671,8 @@ export async function purgeMonthRecords(params: {
       deletedSummaries: sumSnap.size,
       deletedNotifications: matchingNotifDocs.length,
       deletedTargets: tgtSnap.size,
+      deletedLeaderboards: lbSnap.size,
+      deletedRanks: rankSnap.size,
       voidedAdjustments: activeAdjDocs.length,
     };
   } catch (error) {
@@ -3095,7 +3689,30 @@ export async function fetchOwnEmployeeProfile(): Promise<Employee | null> {
       query(collection(db, 'employees'), where('authUid', '==', user.uid)),
     );
     if (!byUidSnap.empty) {
-      return byUidSnap.docs[0].data() as Employee;
+      const emp = byUidSnap.docs[0].data() as Employee;
+      // Ensure active_auth_uids/{uid} exists for ACTIVE employees (self-heals legacy or migrated accounts without admin intervention)
+      if (emp.status === 'ACTIVE') {
+        try {
+          const activeRef = doc(db, 'active_auth_uids', user.uid);
+          const activeSnap = await getDoc(activeRef);
+          if (!activeSnap.exists()) {
+            const now = new Date().toISOString();
+            const activeEntry = buildActiveAuthUidRecord({
+              authUid: user.uid,
+              employeeId: emp.employeeId,
+              departmentId: emp.departmentId,
+              branchId: emp.branchId,
+              branchName: emp.branchName,
+              isBranchManager: emp.isBranchManager,
+              updatedAt: now,
+            });
+            await setDoc(activeRef, activeEntry);
+          }
+        } catch {
+          // Non-blocking: profile still loads even if self-heal is skipped
+        }
+      }
+      return emp;
     }
     if (user.email && user.emailVerified) {
       const byGoogleSnap = await getDocs(
@@ -3112,13 +3729,15 @@ export async function fetchOwnEmployeeProfile(): Promise<Employee | null> {
               authUid: user.uid,
               updatedAt: now,
             });
-            const activeEntry: ActiveAuthUidRecord = {
+            const activeEntry = buildActiveAuthUidRecord({
               authUid: user.uid,
               employeeId: emp.employeeId,
-              ...(emp.departmentId ? { departmentId: emp.departmentId } : { departmentId: '' }),
-              active: true,
+              departmentId: emp.departmentId,
+              branchId: emp.branchId,
+              branchName: emp.branchName,
+              isBranchManager: emp.isBranchManager,
               updatedAt: now,
-            };
+            });
             wb.set(doc(db, 'active_auth_uids', user.uid), activeEntry);
             await wb.commit();
             return { ...emp, authUid: user.uid, updatedAt: now };
@@ -3302,7 +3921,7 @@ export async function markNotificationRead(notificationId: string): Promise<void
   }
 }
 
-// --- STRICTLY READ-ONLY FULL FIRESTORE BACKUP EXPORT (ALL 21 COLLECTIONS) ---
+// --- STRICTLY READ-ONLY FULL FIRESTORE BACKUP EXPORT (ALL 22 COLLECTIONS) ---
 export const BACKUP_COLLECTION_NAMES = [
   'admins',
   'active_auth_uids',
@@ -3325,6 +3944,7 @@ export const BACKUP_COLLECTION_NAMES = [
   'salary_slips',
   'birthday_profiles',
   'birthday_wishes',
+  'employee_loans',
 ] as const;
 
 export type BackupCollectionName = (typeof BACKUP_COLLECTION_NAMES)[number];
@@ -3357,7 +3977,7 @@ export interface FullFirestoreBackupSnapshot {
     payloadSha256: string;
     collections: BackupCollectionManifestEntry[];
   };
-  collections: Record<BackupCollectionName, BackupDocumentEntry[]>;
+  collections: Partial<Record<BackupCollectionName, BackupDocumentEntry[]>>;
 }
 
 async function computeSha256Hex(text: string): Promise<string> {
@@ -3369,8 +3989,9 @@ async function computeSha256Hex(text: string): Promise<string> {
 }
 
 /**
- * Super Admin ONLY, STRICTLY READ-ONLY export of all 15 Firestore collections.
- * Uses unscoped getDocs(collection(db, name)) so zero documents are skipped due to missing sort fields.
+ * Super Admin ONLY, STRICTLY READ-ONLY export of accessible Firestore collections.
+ * Main Owner exports all 21 collections (including `admins`); delegated Password Admins export
+ * the 20 operational collections without triggering a permission error on the owner-only `admins` collection.
  * Performs ZERO Firestore writes.
  */
 export async function exportFullFirestoreBackup(): Promise<{
@@ -3384,10 +4005,17 @@ export async function exportFullFirestoreBackup(): Promise<{
     throw new Error('Super Admin authentication is required to export Firestore backup.');
   }
 
+  const isMainOwnerActor = Boolean(
+    user.emailVerified && (user.email || '').trim().toLowerCase() === MAIN_OWNER_EMAIL.toLowerCase(),
+  );
+  const targetCollections: BackupCollectionName[] = isMainOwnerActor
+    ? [...BACKUP_COLLECTION_NAMES]
+    : BACKUP_COLLECTION_NAMES.filter((col) => col !== 'admins');
+
   const exportedAtUtc = new Date().toISOString();
 
   const fetchedEntries = await Promise.all(
-    BACKUP_COLLECTION_NAMES.map(async (colName) => {
+    targetCollections.map(async (colName) => {
       try {
         const snap = await getDocs(collection(db, colName));
         const docs: BackupDocumentEntry[] = snap.docs
@@ -3404,7 +4032,7 @@ export async function exportFullFirestoreBackup(): Promise<{
     }),
   );
 
-  const collections = {} as Record<BackupCollectionName, BackupDocumentEntry[]>;
+  const collections: Partial<Record<BackupCollectionName, BackupDocumentEntry[]>> = {};
   const collectionManifest: BackupCollectionManifestEntry[] = [];
   let totalDocuments = 0;
 
@@ -3432,7 +4060,7 @@ export async function exportFullFirestoreBackup(): Promise<{
       exportedAtUtc,
       exportedByEmail: user.email || 'unknown',
       readOnlyExport: true,
-      collectionCount: BACKUP_COLLECTION_NAMES.length,
+      collectionCount: targetCollections.length,
       totalDocuments,
       payloadSha256,
       collections: collectionManifest,
@@ -3445,7 +4073,7 @@ export async function exportFullFirestoreBackup(): Promise<{
   const parsedCheck = JSON.parse(serializedJson) as FullFirestoreBackupSnapshot;
   if (
     !parsedCheck?.manifest ||
-    parsedCheck.manifest.collectionCount !== BACKUP_COLLECTION_NAMES.length ||
+    parsedCheck.manifest.collectionCount !== targetCollections.length ||
     parsedCheck.manifest.totalDocuments !== totalDocuments
   ) {
     throw new Error('Backup JSON verification failed during readability check.');
@@ -3461,4 +4089,118 @@ export async function exportFullFirestoreBackup(): Promise<{
     fileSizeBytes,
   };
 }
+
+// --- MAIN OWNER ONLY: SAFE CLEAN RESET FOR FRESH START (e.g., OCT 2026 DUAL-ID MIGRATION) ---
+const RESET_TRANSACTIONAL_COLLECTIONS = [
+  'published_incentives',
+  'monthly_summaries',
+  'import_batches',
+  'import_batch_rows',
+  'incentive_versions',
+  'salary_slips',
+  'sales_targets',
+  'payout_records',
+  'incentive_adjustments',
+  'department_leaderboards',
+  'employee_department_ranks',
+  'employee_loans',
+  'notifications',
+  'employee_queries',
+  'birthday_profiles',
+  'birthday_wishes',
+] as const;
+
+const RESET_EMPLOYEE_MASTER_COLLECTIONS = [
+  'employees',
+  'active_auth_uids',
+] as const;
+
+export interface CleanResetResult {
+  deletedByCollection: Record<string, number>;
+  totalDeleted: number;
+  preservedCollections: string[];
+  executedAt: string;
+}
+
+/**
+ * Main Owner ONLY (`uhvishal41@gmail.com`):
+ * Safely wipes uploaded transactional records (and optionally old `employees` + `active_auth_uids`
+ * when preparing for a fresh Dual-ID Employee Master upload).
+ * ALWAYS preserves `branches` (12 official branches), `admins`, `portal_settings`, and immutable `audit_logs`.
+ * Note: UI automatically triggers a verified Full JSON Backup download BEFORE calling this function.
+ */
+export async function cleanResetUploadedRecords(params: {
+  includeEmployees: boolean;
+  reason: string;
+}): Promise<CleanResetResult> {
+  const user = auth.currentUser;
+  if (
+    !user ||
+    !user.emailVerified ||
+    (user.email || '').trim().toLowerCase() !== MAIN_OWNER_EMAIL.toLowerCase()
+  ) {
+    throw new Error(
+      `Only the verified Main Owner (${MAIN_OWNER_EMAIL}) can execute a Clean Reset.`,
+    );
+  }
+
+  const trimmedReason = params.reason.trim();
+  if (trimmedReason.length < 4) {
+    throw new Error('Please enter a short audit reason (minimum 4 characters) before resetting.');
+  }
+
+  const targetCollections: string[] = [
+    ...RESET_TRANSACTIONAL_COLLECTIONS,
+    ...(params.includeEmployees ? [...RESET_EMPLOYEE_MASTER_COLLECTIONS] : []),
+  ];
+
+  const deletedByCollection: Record<string, number> = {};
+  let totalDeleted = 0;
+
+  for (const colName of targetCollections) {
+    try {
+      const snap = await getDocs(collection(db, colName));
+      const docs = snap.docs;
+      deletedByCollection[colName] = docs.length;
+      for (let i = 0; i < docs.length; i += 400) {
+        const chunk = docs.slice(i, i + 400);
+        const wb = writeBatch(db);
+        for (const d of chunk) {
+          wb.delete(d.ref);
+        }
+        await wb.commit();
+      }
+      totalDeleted += docs.length;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, colName);
+    }
+  }
+
+  const executedAt = new Date().toISOString();
+  const preservedCollections = [
+    'branches',
+    'admins',
+    'portal_settings',
+    'audit_logs',
+    ...(params.includeEmployees ? [] : ['employees', 'active_auth_uids']),
+  ];
+
+  await recordAuditLog({
+    action: 'CLEAN_RESET_EXECUTED',
+    targetType: 'system_reset',
+    targetId: `RESET_${Date.now()}`,
+    summary: `Main Owner Clean Reset deleted ${totalDeleted} document(s) across ${targetCollections.length} collections (Employee Master ${params.includeEmployees ? 'CLEARED' : 'KEPT'}). Preserved: ${preservedCollections.join(', ')}. Reason: ${trimmedReason}`.slice(
+      0,
+      400,
+    ),
+  });
+
+  return {
+    deletedByCollection,
+    totalDeleted,
+    preservedCollections,
+    executedAt,
+  };
+}
+
 

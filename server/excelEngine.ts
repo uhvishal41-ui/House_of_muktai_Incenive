@@ -6,6 +6,7 @@ import { COMPANY_BRAND } from '../src/lib/companyBrand.ts';
 import {
   classifyImportPeriod,
   parseDmyToIsoStrict,
+  parseExcelDateCellToIso,
 } from '../src/lib/incentiveEngine.ts';
 import type {
   ExcelColumnMapping,
@@ -20,9 +21,14 @@ const SALE_AMT_COLUMN_REGEX = /\bsales?\s*(amt|amount)\b/i;
 const SALE_QTY_COLUMN_REGEX = /\bsales?\s*(qty|quantity)\b/i;
 
 const KNOWN_HEADER_SIGNALS = [
+  /^date$/i,
+  /incentive\s*date/i,
+  /business\s*date/i,
   /^name$/i,
   /sales\s*person\s*name/i,
   /salesman\s*no/i,
+  /sell[\s_-]*(id|code|no)/i,
+  /sale[\s_-]*(id|code|no)/i,
   /emp(loyee)?[\s_-]*(id|code|no)/i,
   /branch/i,
   /incentive/i,
@@ -184,14 +190,33 @@ function suggestColumnMapping(headers: string[]): ExcelColumnMapping {
     return '';
   };
 
-  const businessDate = findHeader([/business\s*date/i, /^date$/i, /txn\s*date/i, /day/i]);
-  const employeeId = findHeader([
-    /salesman\s*no/i,
-    /salesman\s*id/i,
+  const businessDate = findHeader([
+    /^date$/i,
+    /incentive\s*date/i,
+    /business\s*date/i,
+    /txn\s*date/i,
+    /entry\s*date/i,
+    /report\s*date/i,
+    /\bdate\b/i,
+  ]);
+  const empIdExplicit = findHeader([
     /emp(loyee)?[\s_-]*(id|code|no)/i,
     /staff[\s_-]*(id|code|no)/i,
     /login[\s_-]*id/i,
   ]);
+  const saleIdExplicit = findHeader(
+    [
+      /sell[\s_-]*(id|code|no)/i,
+      /sale[\s_-]*(id|code|no)/i,
+      /salesman\s*no/i,
+      /salesman\s*id/i,
+      /sales[\s_-]*(id|code|no)/i,
+    ],
+    [empIdExplicit].filter(Boolean),
+  );
+  const employeeId = empIdExplicit || saleIdExplicit;
+  const saleId = empIdExplicit && saleIdExplicit ? saleIdExplicit : '';
+
   const employeeName = findHeader([
     /sales\s*person\s*name/i,
     /salesman\s*name/i,
@@ -200,10 +225,10 @@ function suggestColumnMapping(headers: string[]): ExcelColumnMapping {
   ]);
   const branchCode = findHeader(
     [/^name$/i, /branch[\s_-]*(code|id|name)?/i, /store/i, /location/i],
-    [employeeName, employeeId].filter(Boolean),
+    [employeeName, employeeId, saleId].filter(Boolean),
   );
 
-  const used = [businessDate, employeeId, employeeName, branchCode].filter(Boolean);
+  const used = [businessDate, employeeId, saleId, employeeName, branchCode].filter(Boolean);
 
   // Exact incentive component matching (supports both new slab names and ERP headers)
   const comp1 = findHeader(
@@ -269,6 +294,7 @@ function suggestColumnMapping(headers: string[]): ExcelColumnMapping {
   return {
     businessDate,
     employeeId,
+    ...(saleId ? { saleId } : {}),
     employeeName,
     branchCode,
     component1: comp1 || remainingCandidates[0] || '',
@@ -377,20 +403,27 @@ export async function parseExcelBuffer(
     rawTotalRows += 1;
 
     const empIdCell = suggestedMapping.employeeId ? record[suggestedMapping.employeeId] : null;
+    const saleIdCell = suggestedMapping.saleId ? record[suggestedMapping.saleId] : null;
     const empNameCell = suggestedMapping.employeeName ? record[suggestedMapping.employeeName] : null;
     const branchCell = suggestedMapping.branchCode ? record[suggestedMapping.branchCode] : null;
 
     if (
       isSummaryRowMarker(branchCell) ||
       isSummaryRowMarker(empNameCell) ||
-      isSummaryRowMarker(empIdCell)
+      isSummaryRowMarker(empIdCell) ||
+      isSummaryRowMarker(saleIdCell)
     ) {
       skippedSummaryRows += 1;
       continue;
     }
 
+    const bothIdsBlankMarker = suggestedMapping.saleId
+      ? (isBlankMarker(empIdCell) && (saleIdCell === null || isBlankMarker(saleIdCell))) ||
+        (isBlankMarker(saleIdCell) && (empIdCell === null || isBlankMarker(empIdCell)))
+      : isBlankMarker(empIdCell);
+
     if (
-      isBlankMarker(empIdCell) ||
+      bothIdsBlankMarker ||
       isBlankMarker(empNameCell) ||
       isBlankMarker(branchCell)
     ) {
@@ -404,6 +437,36 @@ export async function parseExcelBuffer(
     });
   }
 
+  // If the workbook includes a Date column, derive period span directly from row Date values
+  let finalImportType = periodClassification.importType;
+  let finalPeriodStart = periodClassification.periodStart;
+  let finalPeriodEnd = periodClassification.periodEnd;
+  let finalDetectedFromDate = banner.detectedFromDate;
+  let finalDetectedToDate = banner.detectedToDate;
+  let finalDateValidationError = periodClassification.errorMessage;
+  let finalReportDateRangeText = banner.reportDateRangeText;
+
+  if (suggestedMapping.businessDate) {
+    const validRowDates: string[] = [];
+    for (const r of rows) {
+      const iso = parseExcelDateCellToIso(r.raw[suggestedMapping.businessDate]);
+      if (iso) validRowDates.push(iso);
+    }
+    if (validRowDates.length > 0) {
+      validRowDates.sort();
+      const minDate = validRowDates[0];
+      const maxDate = validRowDates[validRowDates.length - 1];
+      finalImportType = 'DAILY';
+      finalPeriodStart = minDate;
+      finalPeriodEnd = maxDate;
+      finalDetectedFromDate = minDate;
+      finalDetectedToDate = maxDate;
+      finalDateValidationError = null;
+      finalReportDateRangeText =
+        minDate === maxDate ? minDate : `${minDate} to ${maxDate}`;
+    }
+  }
+
   return {
     fileName,
     fileSha256,
@@ -411,13 +474,13 @@ export async function parseExcelBuffer(
     availableSheets,
     headerRowNumber,
     reportTitle: banner.reportTitle,
-    reportDateRangeText: banner.reportDateRangeText,
-    importType: periodClassification.importType,
-    periodStart: periodClassification.periodStart,
-    periodEnd: periodClassification.periodEnd,
-    detectedFromDate: banner.detectedFromDate,
-    detectedToDate: banner.detectedToDate,
-    dateValidationError: periodClassification.errorMessage,
+    reportDateRangeText: finalReportDateRangeText,
+    importType: finalImportType,
+    periodStart: finalPeriodStart,
+    periodEnd: finalPeriodEnd,
+    detectedFromDate: finalDetectedFromDate,
+    detectedToDate: finalDetectedToDate,
+    dateValidationError: finalDateValidationError,
     rawTotalRows,
     skippedBlankRows,
     skippedSummaryRows,
@@ -528,6 +591,116 @@ export async function buildSampleTemplateWorkbook(
       row.component3,
     ]);
   }
+
+  const arrayBuffer = await workbook.xlsx.writeBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
+export async function buildDateColumnTemplateWorkbook(
+  defaultDateIso: string,
+  sampleRows: Array<{
+    dateIso?: string;
+    branchName: string;
+    salesPersonName: string;
+    salesmanNo: string;
+    saleId?: string;
+    component1: number;
+    component2: number;
+    component3: number;
+    saleAmt1?: number;
+    saleQty1?: number;
+    saleAmt2?: number;
+    saleQty2?: number;
+    saleAmt3?: number;
+    saleQty3?: number;
+  }>,
+): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'House of Muktai Incentive System';
+  workbook.created = new Date();
+
+  const sheet = workbook.addWorksheet('Incentive Upload');
+
+  const headerRow = sheet.addRow([
+    'Date',
+    'Branch Name',
+    'Employee Name',
+    'Employee ID',
+    'Sales ID',
+    'Sale Amount',
+    'Sale Quantity',
+    'New Items Sale',
+    'Sale Amount',
+    'Sale Quantity',
+    'Old Items Sale',
+    'Sale Amount',
+    'Sale Quantity',
+    'Other Items Sale',
+  ]);
+  headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  headerRow.height = 24;
+  headerRow.eachCell((cell) => {
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF0F172A' },
+    };
+    cell.alignment = { vertical: 'middle', horizontal: 'center' };
+  });
+  // Highlight Date column header so staff know every row uploads by its Date cell
+  headerRow.getCell(1).fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF9F1239' },
+  };
+
+  sheet.columns = [
+    { width: 15 },
+    { width: 22 },
+    { width: 28 },
+    { width: 15 },
+    { width: 15 },
+    { width: 14 },
+    { width: 12 },
+    { width: 18 },
+    { width: 14 },
+    { width: 12 },
+    { width: 18 },
+    { width: 14 },
+    { width: 12 },
+    { width: 18 },
+  ];
+
+  for (const row of sampleRows) {
+    const empIdVal =
+      Number.isFinite(Number(row.salesmanNo)) && row.salesmanNo.trim() !== ''
+        ? Number(row.salesmanNo)
+        : row.salesmanNo;
+    const rawSaleId = (row.saleId ?? '').trim();
+    const saleIdVal =
+      rawSaleId !== '' && Number.isFinite(Number(rawSaleId))
+        ? Number(rawSaleId)
+        : rawSaleId;
+    const added = sheet.addRow([
+      row.dateIso || defaultDateIso,
+      row.branchName,
+      row.salesPersonName,
+      empIdVal,
+      saleIdVal,
+      row.saleAmt1 ?? 0,
+      row.saleQty1 ?? 0,
+      row.component1,
+      row.saleAmt2 ?? 0,
+      row.saleQty2 ?? 0,
+      row.component2,
+      row.saleAmt3 ?? 0,
+      row.saleQty3 ?? 0,
+      row.component3,
+    ]);
+    added.getCell(1).numFmt = '@';
+  }
+
+  sheet.views = [{ state: 'frozen', ySplit: 1 }];
 
   const arrayBuffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(arrayBuffer);

@@ -7,8 +7,10 @@ import type { Branch, Employee, ImportBatch, SalarySlip } from '../../types/ince
 export type AdminNavTab =
   | 'overview'
   | 'analytics'
+  | 'pro-suite'
   | 'payouts'
   | 'salary'
+  | 'branch-reports'
   | 'branches'
   | 'employees'
   | 'import'

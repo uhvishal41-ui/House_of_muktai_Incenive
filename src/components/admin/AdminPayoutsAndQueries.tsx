@@ -610,7 +610,7 @@ export function AdminPayoutsAndQueries({
                 <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
-                  placeholder="Search Salesman No or name..."
+                  placeholder="Search Employee ID or name..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   className="w-full h-9 pl-9 pr-3 rounded-lg border border-slate-300 bg-white text-xs text-slate-900"

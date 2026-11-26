@@ -11,10 +11,15 @@ import {
   type AuthenticatedRequest,
 } from '../server/authMiddleware.ts';
 import {
+  buildDateColumnTemplateWorkbook,
   buildManagementReportWorkbook,
   buildSampleTemplateWorkbook,
   parseExcelBuffer,
 } from '../server/excelEngine.ts';
+import {
+  isMonthVisibleToEmployees,
+  isSalarySlipMonthVisibleToEmployees,
+} from '../src/lib/departmentLeaderboardEngine.ts';
 import {
   aggregateEmployeeMonth,
   applyPublishedCorrection,
@@ -26,14 +31,49 @@ import {
   getDeterministicVersionId,
   getIncentiveRecordKey,
   getOverlappingMonthKeys,
+  parseExcelDateCellToIso,
   partitionEmployeeRecords,
+  planBranchTransferConsolidation,
   resolveCanonicalBranchName,
   validateImportBatch,
 } from '../src/lib/incentiveEngine.ts';
+import {
+  applyIncentiveAndLoanSyncToSalaryRows,
+  buildWhatsAppDeepLink,
+  buildWhatsAppSlipMessage,
+  computeActiveLoanEmiByEmployee,
+  computeAttendanceOtAttritionAnalytics,
+  computeBranchPnlAnalytics,
+  computeMonthlyNetIncentiveByEmployee,
+  computePerformanceStreaksAndRetention,
+  detectIncentiveImportAnomalies,
+  detectSalarySlipAnomalies,
+} from '../src/lib/proAnalyticsEngine.ts';
+import {
+  generateNextAvailableLoginId,
+  normalizeLoginIdCandidate,
+} from '../src/lib/loginProvisionHelper.ts';
+import {
+  buildBankNeftTransferDataset,
+  buildBranchExecutiveSummaryRows,
+  buildBranchIncentiveDataset,
+  buildDcrCashDisbursementDataset,
+  buildStatutoryComplianceDataset,
+} from '../src/lib/branchReportsEngine.ts';
+import {
+  buildSalarySlipCsvTemplate,
+  getSalarySlipEarningBreakdown,
+  parseSalaryCsvText,
+} from '../src/lib/salarySlipEngine.ts';
 import type {
   Branch,
   Employee,
+  EmployeeLoan,
+  IncentiveAdjustment,
+  MonthlySummary,
   PublishedIncentive,
+  SalarySlip,
+  SalesTarget,
   UserRole,
 } from '../src/types/incentive.ts';
 
@@ -1927,28 +1967,37 @@ test('31. firestore.rules supports Super Admin audited batch edit/update/delete 
   assert.match(rowsBlockMatch[0], /'component1Paise'/);
   assert.match(rowsBlockMatch[0], /'saleAmt1Paise'/);
 
-  // published_incentives, monthly_summaries & notifications permit Super Admin rollback delete
+  // published_incentives, monthly_summaries & notifications permit Super Admin rollback delete (when month is unlocked)
   const pubBlockMatch = rulesNoComments.match(/match \/published_incentives\/\{recordId\}\s*\{[\s\S]*?\n    \}/);
   assert.ok(pubBlockMatch, 'published_incentives match block must exist');
-  assert.match(pubBlockMatch[0], /allow delete: if isValidId\(recordId\) && isSuperAdmin\(\);/);
+  assert.match(
+    pubBlockMatch[0],
+    /allow delete: if isValidId\(recordId\) && isSuperAdmin\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/,
+  );
 
   const summaryBlockMatch = rulesNoComments.match(/match \/monthly_summaries\/\{summaryId\}\s*\{[\s\S]*?\n    \}/);
   assert.ok(summaryBlockMatch, 'monthly_summaries match block must exist');
   assert.match(summaryBlockMatch[0], /allow delete: if isValidId\(summaryId\) && isSuperAdmin\(\);/);
 
-  // Immutable audit logs, version history & employees MUST remain undeletable
+  // Immutable audit logs MUST remain undeletable; version history & employees allow delete ONLY for Main Owner Clean Reset
   const auditBlockMatch = rulesNoComments.match(/match \/audit_logs\/\{logId\}\s*\{[\s\S]*?\n    \}/);
   assert.ok(auditBlockMatch && /allow update, delete: if false;/.test(auditBlockMatch[0]));
   const verBlockMatch = rulesNoComments.match(/match \/incentive_versions\/\{versionId\}\s*\{[\s\S]*?\n    \}/);
-  assert.ok(verBlockMatch && /allow update, delete: if false;/.test(verBlockMatch[0]));
+  assert.ok(
+    verBlockMatch &&
+      /allow update: if false;/.test(verBlockMatch[0]) &&
+      /allow delete: if isValidId\(versionId\) && isMainOwner\(\);/.test(verBlockMatch[0]),
+  );
   const empBlockMatch = rulesNoComments.match(/match \/employees\/\{employeeId\}\s*\{[\s\S]*?\n    \}/);
-  assert.ok(empBlockMatch && /allow delete: if false;/.test(empBlockMatch[0]));
+  assert.ok(
+    empBlockMatch && /allow delete: if isValidId\(employeeId\) && isMainOwner\(\);/.test(empBlockMatch[0]),
+  );
 });
 
 // =========================================================================
-// TEST 32: Complete 21-Collection Backup Manifest & Domain Hygiene Invariants
+// TEST 32: Complete 22-Collection Backup Manifest & Domain Hygiene Invariants
 // =========================================================================
-test('32. BACKUP_COLLECTION_NAMES covers all 21 Firestore collections and operationsService uses houseofmuktai.co.in fallback', () => {
+test('32. BACKUP_COLLECTION_NAMES covers all 22 Firestore collections and operationsService uses houseofmuktai.co.in fallback', () => {
   const serviceText = fs.readFileSync(
     path.resolve(process.cwd(), 'src/services/incentiveService.ts'),
     'utf-8',
@@ -1958,7 +2007,7 @@ test('32. BACKUP_COLLECTION_NAMES covers all 21 Firestore collections and operat
   );
   assert.ok(backupArrayMatch, 'BACKUP_COLLECTION_NAMES export must exist');
 
-  const expected21Collections = [
+  const expected22Collections = [
     'admins',
     'active_auth_uids',
     'branches',
@@ -1980,16 +2029,17 @@ test('32. BACKUP_COLLECTION_NAMES covers all 21 Firestore collections and operat
     'salary_slips',
     'birthday_profiles',
     'birthday_wishes',
+    'employee_loans',
   ];
 
-  for (const col of expected21Collections) {
+  for (const col of expected22Collections) {
     assert.ok(
       backupArrayMatch[1].includes(`'${col}'`),
       `BACKUP_COLLECTION_NAMES must include '${col}'`,
     );
   }
   const quotedItems = backupArrayMatch[1].match(/'[^']+'/g) || [];
-  assert.equal(quotedItems.length, 21, 'BACKUP_COLLECTION_NAMES must contain all 21 collections');
+  assert.equal(quotedItems.length, 22, 'BACKUP_COLLECTION_NAMES must contain all 22 collections');
 
   const opsText = fs.readFileSync(
     path.resolve(process.cwd(), 'src/services/operationsService.ts'),
@@ -2423,7 +2473,8 @@ test('38. firestore.rules enforces month visibility across monthly collections a
   // 3. portal_settings/visibility readable by Active Employees, writable ONLY by Super Admin
   const settingsBlock = rulesNoComments.match(/match \/portal_settings\/\{settingId\}\s*\{[\s\S]*?\n    \}/);
   assert.ok(settingsBlock);
-  assert.match(settingsBlock[0], /allow get: if settingId == 'visibility' && \(isSuperAdmin\(\) \|\| isActiveEmployee\(\)\);/);
+  assert.match(settingsBlock[0], /settingId == 'visibility' && \(isSuperAdmin\(\) \|\| isActiveEmployee\(\)\)/);
+  assert.match(settingsBlock[0], /settingId == 'employee_columns' && isSuperAdmin\(\)/);
   assert.match(settingsBlock[0], /allow list: if isSuperAdmin\(\);/);
   assert.match(settingsBlock[0], /allow delete: if false;/);
 
@@ -2560,11 +2611,15 @@ test('41. firestore.rules enforces exact Salary Slip arithmetic & privacy isolat
   const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
   const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
 
-  // 1. isValidSalarySlip enforces exact earnings/deductions/net payable math
+  // 1. isValidSalarySlip + split earnings/deductions helpers enforce exact arithmetic
+  const earnMatch = rulesNoComments.match(/function isValidSalarySlipEarnings\(data\)\s*\{[\s\S]*?\n    \}/);
+  const dedMatch = rulesNoComments.match(/function isValidSalarySlipDeductions\(data\)\s*\{[\s\S]*?\n    \}/);
   const fnMatch = rulesNoComments.match(/function isValidSalarySlip\(data\)\s*\{[\s\S]*?\n    \}/);
+  assert.ok(earnMatch && earnMatch[0].includes('data.grossEarningsPaise == (sum1 + sum2)'));
+  assert.ok(dedMatch && dedMatch[0].includes('data.totalDeductionsPaise == dedSum'));
   assert.ok(fnMatch, 'isValidSalarySlip validator must exist in firestore.rules');
-  assert.ok(fnMatch[0].includes('data.grossEarningsPaise == ('));
-  assert.ok(fnMatch[0].includes('data.totalDeductionsPaise == ('));
+  assert.ok(fnMatch[0].includes('isValidSalarySlipEarnings(data)'));
+  assert.ok(fnMatch[0].includes('isValidSalarySlipDeductions(data)'));
   assert.ok(fnMatch[0].includes('data.netPayablePaise == (data.grossEarningsPaise - data.totalDeductionsPaise)'));
 
   // 2. match /salary_slips/{slipId} strictly isolates private staff reads & restricts writes to Super Admin
@@ -2572,15 +2627,18 @@ test('41. firestore.rules enforces exact Salary Slip arithmetic & privacy isolat
   assert.ok(slipBlock, 'salary_slips match block must exist');
   assert.match(
     slipBlock[0],
-    /isActiveEmployee\(\) && isEmployeeVisibleDoc\(existing\(\)\) && \(existing\(\)\.authUid == request\.auth\.uid \|\| existing\(\)\.employeeId == activeEmployeeId\(\)\)/,
+    /isActiveEmployee\(\) && isSalarySlipVisibleDoc\(existing\(\)\) && \(existing\(\)\.authUid == request\.auth\.uid \|\| existing\(\)\.employeeId == activeEmployeeId\(\)\)/,
   );
   assert.match(
     slipBlock[0],
-    /isActiveEmployee\(\) && isEmployeeVisibleDoc\(resource\.data\) && \(resource\.data\.authUid == request\.auth\.uid \|\| resource\.data\.employeeId == activeEmployeeId\(\)\)/,
+    /isActiveEmployee\(\) && isSalarySlipVisibleDoc\(resource\.data\) && \(resource\.data\.authUid == request\.auth\.uid \|\| resource\.data\.employeeId == activeEmployeeId\(\)\)/,
   );
   assert.match(slipBlock[0], /allow create: if isValidId\(slipId\) && isSuperAdmin\(\) && isValidSalarySlip\(incoming\(\)\)/);
   assert.match(slipBlock[0], /incoming\(\)\.uploadedAt == existing\(\)\.uploadedAt/);
-  assert.match(slipBlock[0], /allow delete: if isValidId\(slipId\) && isSuperAdmin\(\);/);
+  assert.match(
+    slipBlock[0],
+    /allow delete: if isValidId\(slipId\) && isSuperAdmin\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/,
+  );
 
   // 3. departmentVisibilityService cascades Admin Month Visibility toggles to salary_slips
   const visSvcText = fs.readFileSync(
@@ -3010,7 +3068,7 @@ test('51. Bulk Employee Master engine prevents silent Branch/Dept/Designation ov
   } = await import('../src/lib/employeeBulkImportEngine.ts');
 
   const template = buildEmployeeMasterCsvTemplate(BRANCHES, EMPLOYEES, 'blank');
-  assert.match(template.split('\n')[0], /Employee ID,Login ID,Full Name,Branch,Department,Designation/);
+  assert.match(template.split('\n')[0], /Employee ID,Sale ID,Login ID,Full Name,Branch,Department,Designation/);
 
   const seededEmployees: Employee[] = [
     {
@@ -3305,7 +3363,2185 @@ test('53. Main Owner Gmail exclusivity, Password Admin role resolution/suspensio
   assert.ok(ownerPanelText.includes('if (!isMainOwner)'));
 });
 
+// =========================================================================
+// TEST 54: Unified Date-Column Incentive Template (Single & Multi-Date Upload, Zero Banner Needed)
+// =========================================================================
+test('54. Date-column incentive template parses single & multi-date rows directly by Date cell with unique per-date keys', async () => {
+  assert.equal(parseExcelDateCellToIso('2026-11-12'), '2026-11-12');
+  assert.equal(parseExcelDateCellToIso('15-11-2026'), '2026-11-15');
+  assert.equal(parseExcelDateCellToIso('05/11/2026'), '2026-11-05');
 
+  const buf = await buildDateColumnTemplateWorkbook('2026-11-10', [
+    {
+      dateIso: '2026-11-10',
+      branchName: 'BARAMATI MIDC',
+      salesPersonName: 'ANITA POPAT SHINGADE',
+      salesmanNo: '459',
+      saleAmt1: 50000,
+      saleQty1: 20,
+      component1: 500,
+      component2: 100,
+      component3: 50,
+    },
+    {
+      dateIso: '11-11-2026', // Same employee on next date in DD-MM-YYYY format -> MUST NOT be flagged as duplicate
+      branchName: 'BARAMATI MIDC',
+      salesPersonName: 'ANITA POPAT SHINGADE',
+      salesmanNo: '459',
+      saleAmt1: 60000,
+      saleQty1: 25,
+      component1: 600,
+      component2: 120,
+      component3: 80,
+    },
+  ]);
+
+  const parsed = await parseExcelBuffer(buf, 'date-column-multi.xlsx');
+  assert.equal(parsed.headerRowNumber, 1);
+  assert.equal(parsed.suggestedMapping.businessDate, 'Date');
+  assert.equal(parsed.periodStart, '2026-11-10');
+  assert.equal(parsed.periodEnd, '2026-11-11');
+  assert.equal(parsed.dateValidationError, null);
+
+  const val = validateImportBatch({
+    periodStart: parsed.periodStart,
+    periodEnd: parsed.periodEnd,
+    rawBannerDateText: parsed.reportDateRangeText,
+    rawTotalRows: parsed.rawTotalRows,
+    skippedBlankRows: parsed.skippedBlankRows,
+    skippedSummaryRows: parsed.skippedSummaryRows,
+    rows: parsed.rows,
+    mapping: parsed.suggestedMapping,
+    branches: BRANCHES,
+    employees: EMPLOYEES,
+    publishedIncentives: [],
+  });
+
+  assert.equal(val.canStage, true);
+  assert.equal(val.rows.length, 2);
+  assert.equal(val.rows[0].validationStatus, 'VALID');
+  assert.equal(val.rows[1].validationStatus, 'VALID');
+  assert.equal(val.rows[0].businessDate, '2026-11-10');
+  assert.equal(val.rows[1].businessDate, '2026-11-11');
+  assert.notEqual(val.rows[0].recordKey, val.rows[1].recordKey);
+});
+
+// =========================================================================
+// TEST 55: Branch Transfer Incentive Consolidation (Previous Branch -> New Current Branch)
+// =========================================================================
+test('55. Branch transfer consolidation carries forward previous-branch published incentives into new current branch cleanly', () => {
+  const emp459 = EMPLOYEES[0]; // Currently BARAMATI_MIDC
+  const prevBranchRecords: PublishedIncentive[] = [
+    {
+      recordId: '2026-11-05_459',
+      importType: 'DAILY',
+      periodStart: '2026-11-05',
+      periodEnd: '2026-11-05',
+      businessDate: '2026-11-05',
+      monthKey: '2026-11',
+      employeeId: '459',
+      authUid: emp459.authUid || '',
+      employeeName: emp459.fullName,
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      component1Label: 'New Items Sale',
+      component2Label: 'Old Items Sale',
+      component3Label: 'Other Items Sale',
+      component1Paise: 50000,
+      component2Paise: 10000,
+      component3Paise: 5000,
+      totalPaise: 65000,
+      saleAmt1Paise: 4000000,
+      saleQty1: 20,
+      saleAmt2Paise: 500000,
+      saleQty2: 5,
+      saleAmt3Paise: 1000000,
+      saleQty3: 8,
+      totalSaleAmtPaise: 5500000,
+      totalSaleQty: 33,
+      status: 'PUBLISHED',
+      version: 1,
+      batchId: 'BATCH_PREV_1',
+      publishedAt: '2026-11-05T10:00:00.000Z',
+      publishedByEmail: 'uhvishal41@gmail.com',
+    },
+    {
+      // Superseded record must NEVER be double-counted or migrated
+      recordId: '2026-11-04_459',
+      importType: 'DAILY',
+      periodStart: '2026-11-04',
+      periodEnd: '2026-11-04',
+      businessDate: '2026-11-04',
+      monthKey: '2026-11',
+      employeeId: '459',
+      authUid: emp459.authUid || '',
+      employeeName: emp459.fullName,
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      component1Label: 'New Items Sale',
+      component2Label: 'Old Items Sale',
+      component3Label: 'Other Items Sale',
+      component1Paise: 99900,
+      component2Paise: 0,
+      component3Paise: 0,
+      totalPaise: 99900,
+      status: 'SUPERSEDED',
+      version: 1,
+      batchId: 'BATCH_OLD',
+      publishedAt: '2026-11-04T10:00:00.000Z',
+      publishedByEmail: 'uhvishal41@gmail.com',
+    },
+  ];
+
+  const plan = planBranchTransferConsolidation({
+    employee: emp459,
+    newBranchId: 'BEED',
+    newBranchName: 'BEED',
+    publishedIncentives: prevBranchRecords,
+    targetMonthKeys: ['2026-11'],
+    now: '2026-11-15T12:00:00.000Z',
+  });
+
+  assert.equal(plan.recordsToMigrate.length, 1);
+  assert.equal(plan.recordsToMigrate[0].recordId, '2026-11-05_459');
+  assert.equal(plan.migratedIncentivePaise, 65000);
+  assert.deepEqual(plan.affectedMonthKeys, ['2026-11']);
+  assert.equal(plan.updatedMonthlySummaries.length, 1);
+  assert.equal(plan.updatedMonthlySummaries[0].branchId, 'BEED');
+  assert.equal(plan.updatedMonthlySummaries[0].branchName, 'BEED');
+  assert.equal(plan.updatedMonthlySummaries[0].grandTotalPaise, 65000);
+
+  // After adding a new incentive under BEED, employee's BEED total = Previous (65000) + New (45000) = 110000
+  const postTransferRecords: PublishedIncentive[] = [
+    { ...prevBranchRecords[0], branchId: 'BEED', branchName: 'BEED' },
+    {
+      ...prevBranchRecords[0],
+      recordId: '2026-11-15_459',
+      periodStart: '2026-11-15',
+      periodEnd: '2026-11-15',
+      businessDate: '2026-11-15',
+      branchId: 'BEED',
+      branchName: 'BEED',
+      component1Paise: 30000,
+      component2Paise: 10000,
+      component3Paise: 5000,
+      totalPaise: 45000,
+    },
+  ];
+  const agg = aggregateEmployeeMonth(postTransferRecords, '459', '2026-11');
+  assert.equal(agg.grandTotalPaise, 110000);
+  assert.equal(agg.publishedDaysCount, 2);
+});
+
+// =========================================================================
+// TEST 56: Independent Employee Month Visibility for BOTH Incentives & Payment Slips (Admin & Owner)
+// =========================================================================
+test('56. Independent visibility controls allow different allowed months for Incentives vs Payment Slips and enforce server-side rules', () => {
+  const settings = {
+    settingId: 'visibility' as const,
+    mode: 'SELECTED' as const,
+    visibleMonths: ['2026-11'],
+    salarySlipMode: 'SELECTED' as const,
+    salarySlipVisibleMonths: ['2026-10'],
+    updatedByEmail: 'uhvishal41@gmail.com',
+    updatedAt: '2026-11-20T10:00:00.000Z',
+  };
+
+  // Incentives show ONLY 2026-11
+  assert.equal(isMonthVisibleToEmployees('2026-11', settings), true);
+  assert.equal(isMonthVisibleToEmployees('2026-10', settings), false);
+
+  // Payment Slips show ONLY 2026-10 (independently of Incentives!)
+  assert.equal(isSalarySlipMonthVisibleToEmployees('2026-10', settings), true);
+  assert.equal(isSalarySlipMonthVisibleToEmployees('2026-11', settings), false);
+
+  // Legacy settings doc without salarySlipMode falls back cleanly to Incentive mode
+  const legacySettings = {
+    settingId: 'visibility' as const,
+    mode: 'SELECTED' as const,
+    visibleMonths: ['2026-10'],
+    updatedByEmail: 'uhvishal41@gmail.com',
+    updatedAt: '2026-10-20T10:00:00.000Z',
+  };
+  assert.equal(isSalarySlipMonthVisibleToEmployees('2026-10', legacySettings), true);
+  assert.equal(isSalarySlipMonthVisibleToEmployees('2026-09', legacySettings), false);
+
+  // Verify Firestore Security Rules enforce isSalarySlipVisibleDoc on /salary_slips & allow salarySlipMode updates for Admin & Owner
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
+  assert.match(rulesNoComments, /function isSalarySlipVisibilityRestricted\(\)/);
+  assert.match(rulesNoComments, /function isSalarySlipVisibleDoc\(data\)/);
+  assert.match(rulesNoComments, /'salarySlipMode',\s*'salarySlipVisibleMonths'/);
+  const salaryBlock = rulesNoComments.match(/match \/salary_slips\/\{slipId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(salaryBlock, '/salary_slips/{slipId} rules block must exist');
+  assert.match(salaryBlock[0], /isSalarySlipVisibleDoc\(existing\(\)\)/);
+  assert.match(salaryBlock[0], /isSalarySlipVisibleDoc\(resource\.data\)/);
+});
+
+// =========================================================================
+// TEST 57: 1-Click Incentive & Active Loan EMI Auto-Sync into Salary Slips & CSV Template
+// =========================================================================
+test('57. 1-Click Incentive + Loan EMI sync auto-fills CSV template and recalculates exact paise Net Payable', () => {
+  const emp = EMPLOYEES[0];
+  const pubInc: PublishedIncentive[] = [
+    {
+      recordId: 'DAILY_2026-11-10_459',
+      importType: 'DAILY',
+      periodStart: '2026-11-10',
+      periodEnd: '2026-11-10',
+      businessDate: '2026-11-10',
+      monthKey: '2026-11',
+      employeeId: emp.employeeId,
+      authUid: emp.authUid || 'uid_459',
+      employeeName: emp.fullName,
+      branchId: emp.branchId,
+      branchName: emp.branchName,
+      component1Label: 'New',
+      component2Label: 'Old',
+      component3Label: '0.5%',
+      component1Paise: 200000,
+      component2Paise: 50000,
+      component3Paise: 25000,
+      totalPaise: 275000,
+      saleAmt1Paise: 5000000,
+      saleQty1: 20,
+      saleAmt2Paise: 1000000,
+      saleQty2: 5,
+      saleAmt3Paise: 500000,
+      saleQty3: 3,
+      totalSaleAmtPaise: 6500000,
+      totalSaleQty: 28,
+      status: 'PUBLISHED',
+      version: 1,
+      batchId: 'B1',
+      publishedAt: '2026-11-11T00:00:00.000Z',
+      publishedByEmail: 'uhvishal41@gmail.com',
+    },
+  ];
+  const adjs: IncentiveAdjustment[] = [
+    {
+      adjustmentId: 'ADJ1',
+      employeeId: emp.employeeId,
+      authUid: emp.authUid || 'uid_459',
+      employeeName: emp.fullName,
+      branchId: emp.branchId,
+      branchName: emp.branchName,
+      monthKey: '2026-11',
+      type: 'BONUS',
+      amountPaise: 25000,
+      reason: 'Festival Top Performer',
+      status: 'ACTIVE',
+      createdByEmail: 'uhvishal41@gmail.com',
+      createdAt: '2026-11-12T00:00:00.000Z',
+    },
+  ];
+  const loans: EmployeeLoan[] = [
+    {
+      loanId: 'LOAN_459_1',
+      employeeId: emp.employeeId,
+      authUid: emp.authUid,
+      employeeName: emp.fullName,
+      branchId: emp.branchId,
+      branchName: emp.branchName,
+      loanType: 'SALARY_ADVANCE',
+      principalPaise: 600000,
+      monthlyEmiPaise: 200000,
+      totalInstallments: 3,
+      paidInstallments: 1,
+      remainingBalancePaise: 400000,
+      startMonthKey: '2026-10',
+      lastDeductedMonthKey: '2026-10',
+      status: 'ACTIVE',
+      createdByEmail: 'uhvishal41@gmail.com',
+      createdAt: '2026-10-01T00:00:00.000Z',
+      updatedAt: '2026-10-31T00:00:00.000Z',
+    },
+  ];
+
+  const incMap = computeMonthlyNetIncentiveByEmployee(pubInc, adjs, '2026-11');
+  const loanMap = computeActiveLoanEmiByEmployee(loans, '2026-11');
+  assert.equal(incMap[emp.employeeId.toUpperCase()].netPayablePaise, 300000);
+  assert.equal(loanMap[emp.employeeId.toUpperCase()].totalDueEmiPaise, 200000);
+
+  const csv = buildSalarySlipCsvTemplate([emp], '2026-11', {
+    incentivePaiseByEmp: { [emp.employeeId.toUpperCase()]: 300000 },
+    advanceRecoveryPaiseByEmp: { [emp.employeeId.toUpperCase()]: 200000 },
+  });
+  assert.ok(csv.includes('"3000"'));
+  assert.ok(csv.includes('"2000"'));
+
+  const rawCsv = [
+    'Employee ID,Pay Month,Total Days,Paid Days,Basic Salary,PF',
+    `${emp.employeeId},2026-11,30,30,15000,1800`,
+  ].join('\n');
+  const parsed = parseSalaryCsvText(rawCsv, [emp], '2026-11');
+  assert.equal(parsed.validRows.length, 1);
+  assert.equal(parsed.validRows[0].netPayablePaise, 1320000);
+
+  const synced = applyIncentiveAndLoanSyncToSalaryRows(parsed.rows, incMap, loanMap, {
+    syncIncentives: true,
+    syncLoans: true,
+  });
+  assert.equal(synced.syncedIncentiveCount, 1);
+  assert.equal(synced.syncedLoanCount, 1);
+  assert.equal(synced.rows[0].incentivePaise, 300000);
+  assert.equal(synced.rows[0].advanceRecoveryPaise, 200000);
+  assert.equal(synced.rows[0].grossEarningsPaise, 1800000);
+  assert.equal(synced.rows[0].totalDeductionsPaise, 380000);
+  assert.equal(synced.rows[0].netPayablePaise, 1420000);
+});
+
+// =========================================================================
+// TEST 58: Pre-Publish Smart Audit & Anomaly Guard (Incentives & Salary Slips)
+// =========================================================================
+test('58. Pre-Publish Anomaly Guard flags ±40% variance, zero-sales high incentive, high LOP, and high deductions', () => {
+  const emp = EMPLOYEES[0];
+  const priorInc: PublishedIncentive[] = [
+    {
+      recordId: 'MONTHLY_2026-10_459',
+      importType: 'MONTHLY',
+      periodStart: '2026-10-01',
+      periodEnd: '2026-10-31',
+      businessDate: '2026-10-31',
+      monthKey: '2026-10',
+      employeeId: emp.employeeId,
+      authUid: emp.authUid || 'uid_459',
+      employeeName: emp.fullName,
+      branchId: emp.branchId,
+      branchName: emp.branchName,
+      component1Label: 'A',
+      component2Label: 'B',
+      component3Label: 'C',
+      component1Paise: 100000,
+      component2Paise: 0,
+      component3Paise: 0,
+      totalPaise: 100000,
+      saleAmt1Paise: 5000000,
+      saleQty1: 25,
+      saleAmt2Paise: 0,
+      saleQty2: 0,
+      saleAmt3Paise: 0,
+      saleQty3: 0,
+      totalSaleAmtPaise: 5000000,
+      totalSaleQty: 25,
+      status: 'PUBLISHED',
+      version: 1,
+      batchId: 'B0',
+      publishedAt: '2026-10-31T00:00:00.000Z',
+      publishedByEmail: 'uhvishal41@gmail.com',
+    },
+  ];
+
+  const incAnomalies = detectIncentiveImportAnomalies({
+    validatedRows: [
+      {
+        rowNumber: 2,
+        importType: 'DAILY',
+        periodStart: '2026-11-15',
+        periodEnd: '2026-11-15',
+        businessDate: '2026-11-15',
+        recordKey: `DAILY_2026-11-15_${emp.employeeId}`,
+        employeeId: emp.employeeId,
+        employeeName: emp.fullName,
+        excelEmployeeName: emp.fullName,
+        branchId: emp.branchId,
+        branchName: emp.branchName,
+        branchCodeRaw: emp.branchId,
+        isSmplCandidate: false,
+        isNewCandidate: false,
+        component1Paise: 250000,
+        component2Paise: 0,
+        component3Paise: 0,
+        totalPaise: 250000,
+        saleAmt1Paise: 0,
+        saleQty1: 0,
+        saleAmt2Paise: 0,
+        saleQty2: 0,
+        saleAmt3Paise: 0,
+        saleQty3: 0,
+        totalSaleAmtPaise: 0,
+        totalSaleQty: 0,
+        validationStatus: 'VALID',
+        resolution: 'PUBLISH_NEW',
+        correctionReason: '',
+        overlapConflicts: [],
+        conflictingRecordIds: [],
+        errorMessage: '',
+      },
+    ],
+    publishedIncentives: priorInc,
+  });
+
+  const codes = new Set(incAnomalies.map((a) => a.code));
+  assert.ok(codes.has('ZERO_SALES_HIGH_INCENTIVE'));
+  assert.ok(codes.has('VARIANCE_SPIKE'));
+
+  const csv = [
+    'Employee ID,Pay Month,Total Days,Paid Days,LOP Days,Basic Salary,Advance Recovery',
+    `${emp.employeeId},2026-11,30,18,12,10000,5000`,
+  ].join('\n');
+  const parsed = parseSalaryCsvText(csv, [emp], '2026-11');
+  const salAnomalies = detectSalarySlipAnomalies({
+    validRows: parsed.validRows,
+    existingSlips: [],
+  });
+  const salCodes = new Set(salAnomalies.map((a) => a.code));
+  assert.ok(salCodes.has('HIGH_DEDUCTIONS'));
+  assert.ok(salCodes.has('HIGH_LOP_DAYS'));
+});
+
+// =========================================================================
+// TEST 59: Executive Branch P&L Cost-to-Sales Ratio (Zero Double-Counting of Incentive)
+// =========================================================================
+test('59. computeBranchPnlAnalytics computes exact Cost-to-Sales % without double-counting salary slip incentive line', () => {
+  const emp = EMPLOYEES[0];
+  const summaries: MonthlySummary[] = [
+    {
+      summaryId: `${emp.employeeId}_2026-11`,
+      employeeId: emp.employeeId,
+      authUid: emp.authUid || 'uid_459',
+      employeeName: emp.fullName,
+      branchId: emp.branchId,
+      branchName: emp.branchName,
+      monthKey: '2026-11',
+      sourceType: 'DAILY_AGGREGATE',
+      component1TotalPaise: 500000,
+      component2TotalPaise: 0,
+      component3TotalPaise: 0,
+      grandTotalPaise: 500000,
+      saleAmt1TotalPaise: 25000000,
+      saleQty1Total: 100,
+      saleAmt2TotalPaise: 0,
+      saleQty2Total: 0,
+      saleAmt3TotalPaise: 0,
+      saleQty3Total: 0,
+      totalSaleAmtPaise: 25000000,
+      totalSaleQty: 100,
+      publishedDaysCount: 15,
+      updatedAt: '2026-11-20T00:00:00.000Z',
+    },
+  ];
+  const slips: SalarySlip[] = [
+    {
+      slipId: `2026-11__${emp.employeeId}`,
+      monthKey: '2026-11',
+      employeeId: emp.employeeId,
+      authUid: emp.authUid || 'uid_459',
+      employeeName: emp.fullName,
+      branchId: emp.branchId,
+      branchName: emp.branchName,
+      designation: emp.designation,
+      totalDays: 30,
+      paidDays: 30,
+      lopDays: 0,
+      weeklyOffDays: 4,
+      paidLeaveDays: 0,
+      overtimeHours: 0,
+      basicPaise: 2000000,
+      hraPaise: 0,
+      conveyancePaise: 0,
+      specialAllowancePaise: 0,
+      overtimePaise: 0,
+      incentivePaise: 500000,
+      otherEarningsPaise: 0,
+      grossEarningsPaise: 2500000,
+      pfPaise: 180000,
+      esicPaise: 0,
+      ptPaise: 20000,
+      advanceRecoveryPaise: 0,
+      tdsPaise: 0,
+      otherDeductionPaise: 0,
+      totalDeductionsPaise: 200000,
+      netPayablePaise: 2300000,
+      employeeVisible: true,
+      uploadedByEmail: 'uhvishal41@gmail.com',
+      uploadedAt: '2026-11-25T00:00:00.000Z',
+      updatedAt: '2026-11-25T00:00:00.000Z',
+    },
+  ];
+
+  const pnl = computeBranchPnlAnalytics({
+    branches: BRANCHES,
+    employees: [emp],
+    monthlySummaries: summaries,
+    salarySlips: slips,
+    selectedMonth: '2026-11',
+  });
+
+  assert.equal(pnl.companyTotals.totalPayrollCostPaise, 2500000);
+  assert.equal(pnl.companyTotals.costToSalesPct, 10);
+  assert.equal(pnl.companyTotals.incentiveToSalesPct, 2);
+});
+
+// =========================================================================
+// TEST 60: Multi-Month Performance Streaks (Star Performer 3M) & Early Coaching Alerts (2M Drop)
+// =========================================================================
+test('60. computePerformanceStreaksAndRetention identifies 3M Star Performers and 2M consecutive sales drop alerts', () => {
+  const starEmp = EMPLOYEES[0];
+  const dropEmp = EMPLOYEES[1];
+
+  const mkSummary = (emp: Employee, monthKey: string, salePaise: number): MonthlySummary => ({
+    summaryId: `${emp.employeeId}_${monthKey}`,
+    employeeId: emp.employeeId,
+    authUid: emp.authUid || `uid_${emp.employeeId}`,
+    employeeName: emp.fullName,
+    branchId: emp.branchId,
+    branchName: emp.branchName,
+    monthKey,
+    sourceType: 'MONTHLY_RECORD',
+    component1TotalPaise: 100000,
+    component2TotalPaise: 0,
+    component3TotalPaise: 0,
+    grandTotalPaise: 100000,
+    saleAmt1TotalPaise: salePaise,
+    saleQty1Total: 10,
+    saleAmt2TotalPaise: 0,
+    saleQty2Total: 0,
+    saleAmt3TotalPaise: 0,
+    saleQty3Total: 0,
+    totalSaleAmtPaise: salePaise,
+    totalSaleQty: 10,
+    publishedDaysCount: 1,
+    updatedAt: '2026-11-20T00:00:00.000Z',
+  });
+
+  const mkTarget = (emp: Employee, monthKey: string, targetPaise: number): SalesTarget => ({
+    targetId: `EMP_${emp.employeeId}_${monthKey}`,
+    monthKey,
+    scope: 'EMPLOYEE',
+    branchId: emp.branchId,
+    branchName: emp.branchName,
+    employeeId: emp.employeeId,
+    employeeName: emp.fullName,
+    targetSaleAmtPaise: targetPaise,
+    targetSaleQty: 10,
+    updatedByEmail: 'uhvishal41@gmail.com',
+    updatedAt: '2026-11-01T00:00:00.000Z',
+  });
+
+  const res = computePerformanceStreaksAndRetention({
+    employees: [starEmp, dropEmp],
+    monthlySummaries: [
+      mkSummary(starEmp, '2026-09', 12000000),
+      mkSummary(starEmp, '2026-10', 13000000),
+      mkSummary(starEmp, '2026-11', 15000000),
+      mkSummary(dropEmp, '2026-09', 10000000),
+      mkSummary(dropEmp, '2026-10', 8000000),
+      mkSummary(dropEmp, '2026-11', 6000000),
+    ],
+    salesTargets: [
+      mkTarget(starEmp, '2026-09', 10000000),
+      mkTarget(starEmp, '2026-10', 11000000),
+      mkTarget(starEmp, '2026-11', 12000000),
+    ],
+  });
+
+  assert.equal(res.starPerformers.length, 1);
+  assert.equal(res.starPerformers[0].employeeId, starEmp.employeeId);
+  assert.equal(res.starPerformers[0].consecutiveTargetMetMonths, 3);
+
+  assert.equal(res.coachingAlerts.length, 1);
+  assert.equal(res.coachingAlerts[0].employeeId, dropEmp.employeeId);
+  assert.equal(res.coachingAlerts[0].consecutiveDeclineMonths, 2);
+});
+
+// =========================================================================
+// TEST 61: WhatsApp Dispatch Deep Link & Phone Normalization
+// =========================================================================
+test('61. WhatsApp dispatch builds valid Indian wa.me link with Marathi/English payslip message', () => {
+  const msg = buildWhatsAppSlipMessage({
+    employeeName: 'ANITA POPAT SHINGADE',
+    monthKey: '2026-11',
+    netPayablePaise: 1850000,
+    branchName: 'BARAMATI MIDC',
+    portalUrl: 'https://staff.houseofmuktai.co.in',
+  });
+  assert.ok(msg.includes('ANITA POPAT SHINGADE'));
+  assert.ok(msg.includes('Nov 2026'));
+  assert.ok(msg.includes('https://staff.houseofmuktai.co.in'));
+
+  const link = buildWhatsAppDeepLink('98765 43210', msg);
+  assert.ok(link.startsWith('https://wa.me/919876543210?text='));
+  const fallbackLink = buildWhatsAppDeepLink('', msg);
+  assert.ok(fallbackLink.startsWith('https://wa.me/?text='));
+});
+
+// =========================================================================
+// TEST 62: Firestore Security Rules Enforce Branch Manager Own-Branch Isolation & Employee Loans Privacy
+// =========================================================================
+test('62. Firestore rules enforce Branch Manager own-branch read-only floor view (zero peer salary access) and employee_loans privacy', () => {
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  const draftText = fs.readFileSync(path.resolve(process.cwd(), 'DRAFT_firestore.rules'), 'utf-8');
+  assert.equal(rulesText, draftText, 'firestore.rules and DRAFT_firestore.rules must stay identical');
+
+  const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
+  assert.match(rulesNoComments, /function isActiveBranchManager\(\)/);
+  assert.match(rulesNoComments, /function activeBranchManagerBranchId\(\)/);
+  assert.match(rulesNoComments, /function isValidEmployeeLoan\(data\)/);
+
+  const salaryBlock = rulesNoComments.match(/match \/salary_slips\/\{slipId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(salaryBlock);
+  assert.equal(
+    salaryBlock[0].includes('isActiveBranchManager'),
+    false,
+    'Branch Manager must NEVER be allowed to read peer salary slips',
+  );
+
+  const loansBlock = rulesNoComments.match(/match \/employee_loans\/\{loanId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(loansBlock, '/employee_loans/{loanId} rules block must exist');
+  assert.match(loansBlock[0], /isValidEmployeeLoan\(incoming\(\)\)/);
+  assert.match(loansBlock[0], /activeEmployeeId\(\)/);
+});
+
+// =========================================================================
+// TEST 63: Dual-ID Architecture (Official EMP ID + Optional Unique SELL ID)
+// =========================================================================
+test('63. Dual-ID supports Sales (EMP ID + unique SELL ID) and Non-Sales (blank SELL ID), blocks duplicate SELL ID, and auto-maps POS SELL ID -> Master EMP ID during Incentive Import', async () => {
+  const { parseEmployeeMasterCsvText } = await import('../src/lib/employeeBulkImportEngine.ts');
+
+  // 1. Employee Master Bulk Import: Sales staff with SELL ID + Non-Sales staff with blank SELL ID + duplicate SELL ID check
+  const masterCsv = [
+    'EMP ID,SELL ID,Login ID,Full Name,Branch,Department,Designation,Gender,Category,Status',
+    'EMP001,101,HOM001,Snehal Deshmukh,BARAMATI MIDC,Saree Dept.,Sales Executive,Female,Sales,ACTIVE',
+    'EMP002,,HOM002,Pratiksha Kulkarni,BEED,Accounts,Accountant,Female,Non-Sales,ACTIVE',
+    'EMP003,101,HOM003,Duplicate Seller,BEED,Saree Dept.,Sales Executive,Female,Sales,ACTIVE',
+  ].join('\n');
+
+  const masterSummary = parseEmployeeMasterCsvText(masterCsv, BRANCHES, []);
+  assert.equal(masterSummary.newReadyCount, 2, 'Sales + Non-Sales rows should both be NEW_READY');
+  assert.equal(masterSummary.duplicateInFileCount, 1, 'Duplicate SELL ID 101 must be flagged');
+  const emp1Row = masterSummary.rows.find((r) => r.employeeId === 'EMP001');
+  const emp2Row = masterSummary.rows.find((r) => r.employeeId === 'EMP002');
+  assert.equal(emp1Row?.saleId, '101');
+  assert.equal(emp1Row?.gender, 'Female');
+  assert.equal(emp1Row?.category, 'Sales');
+  assert.equal(emp2Row?.saleId, '');
+  assert.equal(emp2Row?.category, 'Non-Sales');
+
+  // 2. Incentive Upload: POS SELL ID column ("SELL ID") resolves to canonical Master EMP ID
+  // Even if another Non-Sales employee has EMP ID = "101", a "SELL ID" column MUST prefer saleId lookup!
+  const dualEmployees: Employee[] = [
+    {
+      ...EMPLOYEES[0],
+      employeeId: 'EMP001',
+      saleId: '101',
+      loginId: 'HOM001',
+      fullName: 'Snehal Deshmukh',
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      status: 'ACTIVE',
+    },
+    {
+      ...EMPLOYEES[1],
+      employeeId: '101',
+      saleId: '',
+      loginId: 'HOM_ACC101',
+      fullName: 'Accountant Same Number',
+      branchId: 'BEED',
+      branchName: 'BEED',
+      status: 'ACTIVE',
+    },
+  ];
+
+  const val = validateImportBatch({
+    periodStart: null,
+    periodEnd: null,
+    rawBannerDateText: '',
+    rawTotalRows: 1,
+    skippedBlankRows: 0,
+    skippedSummaryRows: 0,
+    rows: [
+      {
+        rowNumber: 2,
+        raw: {
+          Date: '2026-10-15',
+          NAME: 'BARAMATI MIDC',
+          'SELL ID': '101',
+          'EMPLOYEE NAME': 'Snehal Deshmukh',
+          'New Items Sale Amt': 50000,
+          'New Items Sale Qty': 12,
+          'New Items Sale Incentive': 1250,
+          'Old Items Sale Incentive': 0,
+          'Other Items Sale Incentive': 0,
+        },
+      },
+    ],
+    mapping: {
+      businessDate: 'Date',
+      branchCode: 'NAME',
+      employeeId: 'SELL ID',
+      employeeName: 'EMPLOYEE NAME',
+      saleAmt1: 'New Items Sale Amt',
+      saleQty1: 'New Items Sale Qty',
+      component1: 'New Items Sale Incentive',
+      component2: 'Old Items Sale Incentive',
+      component3: 'Other Items Sale Incentive',
+    },
+    branches: BRANCHES,
+    employees: dualEmployees,
+    publishedIncentives: [],
+    overrides: {},
+  });
+
+  assert.equal(val.metrics.validEmployeeRows, 1, 'POS SELL ID row should validate cleanly');
+  assert.equal(
+    val.rows[0].employeeId,
+    'EMP001',
+    'SELL ID "101" must canonically map to Master EMP ID "EMP001" rather than Non-Sales EMP ID "101"',
+  );
+  assert.equal(val.rows[0].employeeName, 'Snehal Deshmukh');
+  assert.equal(val.rows[0].totalPaise, 125_000);
+});
+
+// =========================================================================
+// TEST 64: Exact 45-Column House of Muktai Salary Excel Parser & Formula Cross-Check
+// =========================================================================
+test('64. Salary Slip parser handles all 45 exact House of Muktai headers, attendance formula, zero SALARY/Monthly Gross double-counting, and cross-check warnings', async () => {
+  const {
+    parseSalaryCsvText,
+    getSalarySlipEarningBreakdown,
+    getSalarySlipDeductionBreakdown,
+  } = await import('../src/lib/salarySlipEngine.ts');
+
+  const dualEmployees: Employee[] = [
+    {
+      ...EMPLOYEES[0],
+      employeeId: 'EMP001',
+      saleId: '101',
+      loginId: 'HOM001',
+      fullName: 'Snehal Deshmukh',
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      departmentId: 'SAREE',
+      departmentName: 'Saree Dept.',
+      designation: 'Sales Executive',
+      status: 'ACTIVE',
+    },
+    {
+      ...EMPLOYEES[1],
+      employeeId: 'EMP002',
+      saleId: '',
+      loginId: 'HOM002',
+      fullName: 'Pratiksha Kulkarni',
+      branchId: 'BEED',
+      branchName: 'BEED',
+      departmentId: '',
+      departmentName: 'Accounts',
+      designation: 'Accountant',
+      status: 'ACTIVE',
+    },
+  ];
+
+  // Exact 45 headers provided by the user (preserving exact spellings & trailing space on "TDS ")
+  const headers45 = [
+    'Sr No', 'EMP ID', 'SELL ID', 'EMPLOYEE NAME', 'DEPARTMENT', 'BRANCH',
+    'GENDER', 'CATEGORY', 'SALARY', 'MONTHS DAY', 'PRESENT DAYS', 'W/O',
+    'TOTAL DAYS', 'OT DAYS', 'Monthly Gross', 'BASIC', 'DA', 'HRA',
+    'ATTENDANCE ALLOW', 'WASHING ALLOW', 'CONVEYANCE ALLOW', 'MEDICAL ALLOW',
+    'LTA ALLOW', 'COMM. EXPENSE', 'HEALTH CLUB ALLOW', 'ADVOCH ALLOW',
+    'TRAVALLING ALLOWANCE', 'SALES COMMISION', 'INSENTIVE', 'OT', 'ARREARS',
+    'EARN GROSS', 'PROVIDENT FUND', 'ESIC', 'PROFETIONAL TAX', 'LWF',
+    'Advance', 'TDS ', 'Penalty', 'Insurance', 'Total Deduction', 'NET PAY',
+    'BANK ACCOUNT NO', 'IFSC CODE',
+  ];
+
+  // Row 1: Exact matching math (Earnings sum = 25,000, Deductions sum = 2,500, Net = 22,500)
+  // SALARY (30,000) & Monthly Gross (28,000) MUST NOT be summed into Gross!
+  const row1 = [
+    '1', 'EMP001', '101', 'Snehal Deshmukh', 'Saree Dept.', 'BARAMATI MIDC',
+    'Female', 'Sales', '30000', '31', '24', '4',
+    '28', '2', '28000', '10000', '1000', '2000',
+    '500', '300', '700', '500',
+    '500', '500', '500', '500',
+    '500', '1500', '3000', '1000', '2000',
+    '25000', '1200', '200', '200', '25',
+    '500', '100', '75', '200', '2500', '22500',
+    '123456789012', 'SBIN0001234',
+  ];
+
+  // Row 2: Non-Sales (blank SELL ID) with intentional Excel NET PAY mismatch to verify cross-check warning
+  const row2 = [
+    '2', 'EMP002', '', 'Pratiksha Kulkarni', 'Accounts', 'BEED',
+    'Female', 'Non-Sales', '20000', '31', '27', '4',
+    '31', '0', '20000', '15000', '0', '5000',
+    '0', '0', '0', '0',
+    '0', '0', '0', '0',
+    '0', '0', '0', '0', '0',
+    '20000', '1800', '0', '200', '0',
+    '0', '0', '0', '0', '2000', '19999', // Mismatch: true net is 18,000
+    '987654321098', 'HDFC0000456',
+  ];
+
+  const csv = [headers45.join(','), row1.join(','), row2.join(',')].join('\n');
+  const res = parseSalaryCsvText(csv, dualEmployees, '2026-10');
+
+  assert.equal(res.errorRows.length, 0, 'Both 45-column rows must parse with zero errors');
+  assert.equal(res.validRows.length, 2);
+
+  const r1 = res.validRows[0];
+  assert.equal(r1.employeeId, 'EMP001');
+  assert.equal(r1.saleId, '101');
+  assert.equal(r1.gender, 'Female');
+  assert.equal(r1.category, 'Sales');
+  // Attendance confirmation: MONTHS DAY=31, PRESENT=24, W/O=4, TOTAL DAYS (Paid)=28 -> LOP=3, OT DAYS=2
+  assert.equal(r1.totalDays, 31);
+  assert.equal(r1.presentDays, 24);
+  assert.equal(r1.weeklyOffDays, 4);
+  assert.equal(r1.paidDays, 28);
+  assert.equal(r1.lopDays, 3);
+  assert.equal(r1.overtimeDays, 2);
+  // Reference-only salary fields captured but NOT double-counted
+  assert.equal(r1.monthlySalaryRatePaise, 3_000_000);
+  assert.equal(r1.monthlyGrossRatePaise, 2_800_000);
+  // Exact computed earnings, deductions, net
+  assert.equal(r1.healthClubAllowancePaise, 50_000);
+  assert.equal(r1.arrearsPaise, 200_000);
+  assert.equal(r1.grossEarningsPaise, 2_500_000, 'Gross must equal sum of 18 earning heads (₹25,000), never including SALARY/Monthly Gross');
+  assert.equal(r1.lwfPaise, 2_500);
+  assert.equal(r1.penaltyPaise, 7_500);
+  assert.equal(r1.insurancePaise, 20_000);
+  assert.equal(r1.totalDeductionsPaise, 250_000);
+  assert.equal(r1.netPayablePaise, 2_250_000);
+  assert.equal(r1.bankAccountMasked, 'XXXX9012');
+  assert.equal(r1.bankIfsc, 'SBIN0001234');
+  assert.equal(r1.sheetCrossCheckWarning, '', 'Exact matching row must produce zero cross-check warnings');
+
+  // Breakdown helpers include all new heads
+  const r1Slip = r1 as unknown as import('../src/types/incentive.ts').SalarySlip;
+  const earnBreakdown = getSalarySlipEarningBreakdown(r1Slip, 'en');
+  assert.ok(earnBreakdown.some(([label]) => label.includes('Health Club')));
+  assert.ok(earnBreakdown.some(([label]) => label.includes('Arrears')));
+  const dedBreakdown = getSalarySlipDeductionBreakdown(r1Slip, 'en');
+  assert.ok(dedBreakdown.some(([label]) => label.includes('LWF')));
+  assert.ok(dedBreakdown.some(([label]) => label.includes('Penalty')));
+  assert.ok(dedBreakdown.some(([label]) => label.includes('Insurance')));
+
+  // Row 2 cross-check warning caught
+  const r2 = res.validRows[1];
+  assert.equal(r2.employeeId, 'EMP002');
+  assert.equal(r2.saleId, '');
+  assert.equal(r2.netPayablePaise, 1_800_000);
+  assert.match(r2.sheetCrossCheckWarning, /NET PAY/i, 'Sheet NET PAY mismatch (> ₹1) must surface warning');
+});
+
+// =========================================================================
+// TEST 65: Firestore Rules Invariants for Dual-ID, 45-Column SalarySlip Arithmetic & Main Owner Clean Reset
+// =========================================================================
+test('65. Firestore rules whitelist Dual-ID fields, enforce 45-column SalarySlip arithmetic, gate Clean Reset deletes to Main Owner, and keep audit_logs strictly immutable', () => {
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  const draftText = fs.readFileSync(path.resolve(process.cwd(), 'DRAFT_firestore.rules'), 'utf-8');
+  assert.equal(rulesText, draftText, 'firestore.rules and DRAFT_firestore.rules must stay identical');
+
+  const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
+
+  // 1. Employee Dual-ID fields whitelisted
+  assert.match(rulesNoComments, /isOptionalString\(data,\s*'saleId',\s*40\)/);
+  assert.match(rulesNoComments, /isOptionalString\(data,\s*'gender',\s*20\)/);
+  assert.match(rulesNoComments, /isOptionalString\(data,\s*'category',\s*40\)/);
+
+  // 2. SalarySlip split earnings/deductions validators with all new heads
+  assert.match(rulesNoComments, /function isValidSalarySlipEarnings\(data\)/);
+  assert.match(rulesNoComments, /function isValidSalarySlipDeductions\(data\)/);
+  assert.match(rulesNoComments, /'healthClubAllowancePaise'/);
+  assert.match(rulesNoComments, /'arrearsPaise'/);
+  assert.match(rulesNoComments, /'lwfPaise'/);
+  assert.match(rulesNoComments, /'penaltyPaise'/);
+  assert.match(rulesNoComments, /'insurancePaise'/);
+
+  // 3. Main Owner-only delete gate for Clean Reset while audit_logs remains strictly non-deletable
+  const empBlock = rulesNoComments.match(/match \/employees\/\{employeeId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(empBlock);
+  assert.match(empBlock[0], /allow delete: if isValidId\(employeeId\) && isMainOwner\(\);/);
+
+  const auditBlock = rulesNoComments.match(/match \/audit_logs\/\{logId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(auditBlock);
+  assert.match(auditBlock[0], /allow update, delete: if false;/);
+});
+
+// =========================================================================
+// TEST 66: Dynamic Custom Columns in Employee Master (Bulk Import, Overlap Diff, Export & Firestore Rules)
+// =========================================================================
+test('66. Employee Master supports arbitrary user-defined custom columns in Bulk Import, Zero-Silent-Overlap diffing, CSV export, and Firestore rules', async () => {
+  const {
+    buildEmployeeMasterCsvTemplate,
+    parseEmployeeMasterCsvText,
+  } = await import('../src/lib/employeeBulkImportEngine.ts');
+
+  const existingEmployees: Employee[] = [
+    {
+      ...EMPLOYEES[0],
+      employeeId: 'EMP001',
+      saleId: '101',
+      loginId: 'HOM001',
+      fullName: 'Snehal Deshmukh',
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      departmentId: 'SAREE',
+      departmentName: 'Saree Dept.',
+      designation: 'Sales Executive',
+      status: 'ACTIVE',
+      address: 'Baramati, Pune',
+      emergencyContact: '9876500001',
+      customFields: {
+        'Aadhar No': '1234-5678-9012',
+        'Blood Group': 'O+',
+      },
+    },
+  ];
+
+  // 1. Export pre-filled template with extra custom columns
+  const exportedCsv = buildEmployeeMasterCsvTemplate(
+    BRANCHES,
+    existingEmployees,
+    'prefilled',
+    ['Weekly Off Day'],
+  );
+  assert.ok(exportedCsv.includes('Aadhar No'), 'Exported CSV header must include existing custom column Aadhar No');
+  assert.ok(exportedCsv.includes('Blood Group'), 'Exported CSV header must include existing custom column Blood Group');
+  assert.ok(exportedCsv.includes('Weekly Off Day'), 'Exported CSV header must include requested custom column Weekly Off Day');
+  assert.ok(exportedCsv.includes('1234-5678-9012'), 'Exported CSV row must contain employee custom column value');
+
+  // 2. Parse CSV with extra custom columns:
+  // - Row 1 (EMP001): modifies Blood Group from O+ -> B+ and adds Weekly Off Day = Thursday -> triggers OVERLAP_CONFLICT
+  // - Row 2 (EMP999): new employee with custom columns Aadhar No, Blood Group, Weekly Off Day -> NEW_READY
+  const importCsv = [
+    'Employee ID,Sale ID,Login ID,Full Name,Branch,Department,Designation,Gender,Category,Status,Address,Emergency Contact,Aadhar No,Blood Group,Weekly Off Day',
+    'EMP001,101,HOM001,Snehal Deshmukh,BARAMATI MIDC,Saree Dept.,Sales Executive,Female,Sales,ACTIVE,Baramati,9876500001,1234-5678-9012,B+,Thursday',
+    'EMP999,,HOM999,Rohan Patil,BEED,Accounts,Accountant,Male,Non-Sales,ACTIVE,Beed City,9823000099,9999-8888-7777,A+,Sunday',
+  ].join('\n');
+
+  const parsed = parseEmployeeMasterCsvText(importCsv, BRANCHES, existingEmployees);
+  assert.equal(parsed.errorCount, 0);
+  assert.equal(parsed.newReadyCount, 1);
+  assert.equal(parsed.overlapConflictCount, 1);
+
+  const conflictRow = parsed.rows.find((r) => r.employeeId === 'EMP001');
+  assert.ok(conflictRow);
+  assert.equal(conflictRow.status, 'OVERLAP_CONFLICT');
+  assert.equal(conflictRow.customFields['Blood Group'], 'B+');
+  assert.equal(conflictRow.customFields['Weekly Off Day'], 'Thursday');
+  assert.ok(
+    conflictRow.diffs.some((d) => d.label === 'Blood Group' && d.masterValue === 'O+' && d.fileValue === 'B+'),
+    'Diff engine must detect change in custom column Blood Group',
+  );
+  assert.ok(
+    conflictRow.diffs.some((d) => d.label === 'Weekly Off Day' && d.fileValue === 'Thursday'),
+    'Diff engine must detect newly populated custom column Weekly Off Day',
+  );
+
+  const newRow = parsed.rows.find((r) => r.employeeId === 'EMP999');
+  assert.ok(newRow);
+  assert.equal(newRow.status, 'NEW_READY');
+  assert.equal(newRow.address, 'Beed City');
+  assert.equal(newRow.emergencyContact, '9823000099');
+  assert.equal(newRow.customFields['Aadhar No'], '9999-8888-7777');
+  assert.equal(newRow.customFields['Blood Group'], 'A+');
+  assert.equal(newRow.customFields['Weekly Off Day'], 'Sunday');
+
+  // 3. Verify Firestore rules allow customFields map (up to 25 custom columns) on employees
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  assert.match(rulesText, /'customFields'/);
+  assert.match(rulesText, /data\.customFields is map && data\.customFields\.size\(\) <= 25/);
+});
+
+// =========================================================================
+// TEST 67: Bug #1 & Bug #2 Regression Guard — Login Provisioning Zero Data Loss & Pillar 7 Branch Manager Preservation
+// =========================================================================
+test('67. Login activation preserves saleId/gender/category/isBranchManager/customFields (Bug #1) and all 5 services preserve Branch Manager metadata in active_auth_uids (Bug #2)', async () => {
+  const {
+    buildActiveAuthUidRecord,
+    buildCleanProvisionedEmployeeDoc,
+    sanitizeEmployeeCustomFields,
+  } = await import('../src/lib/employeeRecordHelpers.ts');
+
+  const pendingBranchManager: Employee = {
+    employeeId: 'EMP501',
+    saleId: '777',
+    loginId: 'HOM501',
+    authEmail: 'hom501@staff.houseofmuktai.co.in',
+    authUid: '',
+    fullName: 'Suresh Jadhav',
+    branchId: 'BARAMATI_MIDC',
+    branchName: 'BARAMATI MIDC',
+    departmentId: 'SAREE',
+    departmentName: 'Saree Dept.',
+    designation: 'Branch Floor Manager',
+    gender: 'Male',
+    category: 'Sales',
+    dateOfBirth: '1991-08-15',
+    dateOfJoining: '2022-04-01',
+    phone: '9876543210',
+    address: 'Baramati MIDC Road, Pune',
+    emergencyContact: '9876500099',
+    customFields: {
+      'Aadhar No': '5555-6666-7777',
+      'Blood Group': 'B+',
+      'Weekly Off Day': 'Monday',
+    },
+    role: 'EMPLOYEE',
+    isBranchManager: true,
+    status: 'ACTIVE',
+    mustChangePassword: true,
+    credentialsProvisioned: false,
+    createdAt: '2026-10-01T10:00:00.000Z',
+    updatedAt: '2026-10-01T10:00:00.000Z',
+  };
+
+  // 1. Bug #1 Guard: Activating pending login MUST preserve ALL fields (never drop saleId, gender, category, isBranchManager, customFields)
+  const provisioned = buildCleanProvisionedEmployeeDoc(
+    pendingBranchManager,
+    'uid_suresh_501',
+    '2026-11-25T10:00:00.000Z',
+    (id) => `${id.toLowerCase()}@staff.houseofmuktai.co.in`,
+  );
+  assert.equal(provisioned.authUid, 'uid_suresh_501');
+  assert.equal(provisioned.credentialsProvisioned, true);
+  assert.equal(provisioned.saleId, '777', 'saleId MUST be preserved on login activation');
+  assert.equal(provisioned.gender, 'Male', 'gender MUST be preserved on login activation');
+  assert.equal(provisioned.category, 'Sales', 'category MUST be preserved on login activation');
+  assert.equal(provisioned.isBranchManager, true, 'isBranchManager MUST be preserved on login activation');
+  assert.equal(provisioned.address, 'Baramati MIDC Road, Pune');
+  assert.equal(provisioned.emergencyContact, '9876500099');
+  assert.deepEqual(provisioned.customFields, {
+    'Aadhar No': '5555-6666-7777',
+    'Blood Group': 'B+',
+    'Weekly Off Day': 'Monday',
+  });
+
+  // Cap customFields cleanly at <= 25 keys and strip blank entries
+  const oversizedCustom: Record<string, string> = { BlankCol: '   ' };
+  for (let i = 1; i <= 30; i += 1) {
+    oversizedCustom[`Col_${i}`] = `Val_${i}`;
+  }
+  const sanitizedCustom = sanitizeEmployeeCustomFields(oversizedCustom);
+  assert.equal(Object.keys(sanitizedCustom).length, 25);
+  assert.equal(sanitizedCustom.BlankCol, undefined);
+
+  // 2. Bug #2 Guard: buildActiveAuthUidRecord ALWAYS includes branchId, branchName, isBranchManager, departmentId
+  const activeMgr = buildActiveAuthUidRecord({
+    authUid: 'uid_suresh_501',
+    employeeId: provisioned.employeeId,
+    departmentId: provisioned.departmentId,
+    branchId: provisioned.branchId,
+    branchName: provisioned.branchName,
+    isBranchManager: provisioned.isBranchManager,
+    updatedAt: '2026-11-25T10:00:00.000Z',
+  });
+  assert.deepEqual(activeMgr, {
+    authUid: 'uid_suresh_501',
+    employeeId: 'EMP501',
+    departmentId: 'SAREE',
+    branchId: 'BARAMATI_MIDC',
+    branchName: 'BARAMATI MIDC',
+    isBranchManager: true,
+    active: true,
+    updatedAt: '2026-11-25T10:00:00.000Z',
+  });
+
+  // Non-sales staff (blank/invalid departmentId) gets departmentId: '' while keeping branchId & isBranchManager: false
+  const activeNonSales = buildActiveAuthUidRecord({
+    authUid: 'uid_acc_902',
+    employeeId: 'EMP902',
+    departmentId: 'ACCOUNTS',
+    branchId: 'BEED',
+    branchName: 'BEED',
+    isBranchManager: false,
+    updatedAt: '2026-11-25T10:00:00.000Z',
+  });
+  assert.equal(activeNonSales.departmentId, '');
+  assert.equal(activeNonSales.branchId, 'BEED');
+  assert.equal(activeNonSales.branchName, 'BEED');
+  assert.equal(activeNonSales.isBranchManager, false);
+
+  // 3. Source-code regression guard: ALL 5 services must import and use buildActiveAuthUidRecord
+  const serviceFiles = [
+    'src/services/incentiveService.ts',
+    'src/services/employeeBulkImportService.ts',
+    'src/services/salarySlipService.ts',
+    'src/services/birthdayService.ts',
+    'src/services/departmentVisibilityService.ts',
+  ];
+  for (const relPath of serviceFiles) {
+    const content = fs.readFileSync(path.resolve(process.cwd(), relPath), 'utf-8');
+    assert.ok(
+      content.includes('buildActiveAuthUidRecord'),
+      `${relPath} MUST use shared buildActiveAuthUidRecord helper so Branch Manager access is never wiped`,
+    );
+  }
+});
+
+// =========================================================================
+// TEST 68: Bug #3, #4 & #5 Regression Guard — Cloud Column Rules, Lightweight Vite Pre-Bundling & Bulk CLEAR Token
+// =========================================================================
+test('68. Firestore enforces Admin-only employee_columns sync (Bug #3), Vite avoids eager exceljs/pptxgenjs pre-bundling (Bug #4), and Bulk CSV supports CLEAR sentinel (Bug #5)', async () => {
+  const { parseEmployeeMasterCsvText } = await import('../src/lib/employeeBulkImportEngine.ts');
+
+  // 1. Bug #5 Guard: Blank cell keeps existing custom column value, while CLEAR / [CLEAR] explicitly clears it
+  const existingEmployees: Employee[] = [
+    {
+      ...EMPLOYEES[0],
+      employeeId: 'EMP001',
+      saleId: '101',
+      loginId: 'HOM001',
+      fullName: 'Snehal Deshmukh',
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      departmentId: 'SAREE',
+      departmentName: 'Saree Dept.',
+      designation: 'Sales Executive',
+      status: 'ACTIVE',
+      customFields: {
+        'Aadhar No': '1234-5678-9012',
+        'Blood Group': 'O+',
+      },
+    },
+  ];
+
+  const clearCsv = [
+    'Employee ID,Sale ID,Login ID,Full Name,Branch,Department,Designation,Status,Aadhar No,Blood Group',
+    'EMP001,101,HOM001,Snehal Deshmukh,BARAMATI MIDC,Saree Dept.,Sales Executive,ACTIVE,,CLEAR',
+  ].join('\n');
+
+  const parsed = parseEmployeeMasterCsvText(clearCsv, BRANCHES, existingEmployees);
+  assert.equal(parsed.errorCount, 0);
+  assert.equal(parsed.overlapConflictCount, 1);
+  const row = parsed.rows[0];
+  assert.equal(row.customFields['Aadhar No'], '1234-5678-9012', 'Blank cell must preserve existing custom value safely');
+  assert.equal(row.customFields['Blood Group'], undefined, 'CLEAR token must remove existing custom value');
+  assert.ok(
+    row.diffs.some((d) => d.label === 'Blood Group' && d.masterValue === 'O+' && d.fileValue === '(Cleared)'),
+    'Diff engine must explicitly show cleared custom column change',
+  );
+
+  // 2. Bug #3 Guard: firestore.rules protects portal_settings/employee_columns as strictly Admin-only with bounded lists
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  assert.match(rulesText, /function isValidEmployeeColumnSettings\(data\)/);
+  assert.match(rulesText, /settingId == 'employee_columns' && isSuperAdmin\(\)/);
+  assert.match(rulesText, /data\.customColumns\.size\(\) <= 25/);
+  assert.match(rulesText, /data\.visibleColumns\.size\(\) <= 45/);
+
+  // 3. Bug #4 Guard: vite.config.ts must not eagerly pre-bundle heavy on-demand exceljs or pptxgenjs
+  const viteConfigText = fs.readFileSync(path.resolve(process.cwd(), 'vite.config.ts'), 'utf-8');
+  const optimizeBlock = viteConfigText.match(/optimizeDeps:\s*\{[\s\S]*?\n    \},/);
+  assert.ok(optimizeBlock, 'vite.config.ts should have optimizeDeps block');
+  assert.doesNotMatch(optimizeBlock[0], /'exceljs'/, 'exceljs must stay lazy-loaded, not eagerly pre-bundled');
+  assert.doesNotMatch(optimizeBlock[0], /'pptxgenjs'/, 'pptxgenjs must not be eagerly pre-bundled in client Vite config');
+});
+
+// =========================================================================
+// TEST 69: Sale-ID-Only Incentive Upload & Name-Verified Sale ID Auto-Linking
+// =========================================================================
+test('69. Incentive upload supports blank EMP ID with Sales ID only, auto-links unlinked Master employees by unique Name match, and refuses ambiguous/duplicate collisions', () => {
+  const testEmployees: Employee[] = [
+    // Already linked with saleId '459'
+    {
+      ...EMPLOYEES[0],
+      employeeId: 'EMP459',
+      saleId: '459',
+      fullName: 'Ramesh Patil',
+      branchId: 'BEED',
+      branchName: 'BEED',
+      status: 'ACTIVE',
+    },
+    // Unlinked Master employee (EMP ID only, blank saleId) — exact Name + Branch match
+    {
+      ...EMPLOYEES[0],
+      employeeId: 'EMP707',
+      saleId: '',
+      fullName: 'Pratiksha Kulkarni',
+      branchId: 'BEED',
+      branchName: 'BEED',
+      status: 'ACTIVE',
+    },
+    // Unlinked Master employee — word-order reversed in Excel within same branch
+    {
+      ...EMPLOYEES[0],
+      employeeId: 'EMP708',
+      saleId: '',
+      fullName: 'Sagar Deshmukh',
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      status: 'ACTIVE',
+    },
+    // Ambiguous duplicate-name pair in the SAME branch (both unlinked) — MUST NOT auto-link
+    {
+      ...EMPLOYEES[0],
+      employeeId: 'EMP801',
+      saleId: '',
+      fullName: 'Amit Joshi',
+      branchId: 'BEED',
+      branchName: 'BEED',
+      status: 'ACTIVE',
+    },
+    {
+      ...EMPLOYEES[0],
+      employeeId: 'EMP802',
+      saleId: '',
+      fullName: 'Amit Joshi',
+      branchId: 'BEED',
+      branchName: 'BEED',
+      status: 'ACTIVE',
+    },
+    // Unlinked Master employee whose Excel row tries to reuse already-owned saleId '459' — MUST NOT link
+    {
+      ...EMPLOYEES[0],
+      employeeId: 'EMP901',
+      saleId: '',
+      fullName: 'Kiran Shinde',
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      status: 'ACTIVE',
+    },
+  ];
+
+  const dualColumnMapping = {
+    businessDate: 'Date',
+    branchCode: 'Branch',
+    employeeId: 'Employee ID',
+    saleId: 'Sales ID',
+    employeeName: 'Employee Name',
+    component1: 'New Inc',
+    component2: 'Old Inc',
+    component3: 'Other Inc',
+    saleAmt1: '',
+    saleQty1: '',
+    saleAmt2: '',
+    saleQty2: '',
+    saleAmt3: '',
+    saleQty3: '',
+  };
+
+  // Scenario A: Happy path — blank Employee ID column, only Sales ID populated (1 already linked + 2 unlinked matched by Name)
+  const happyRes = validateImportBatch({
+    periodStart: '2026-10-15',
+    periodEnd: '2026-10-15',
+    rawBannerDateText: '2026-10-15',
+    rawTotalRows: 3,
+    skippedBlankRows: 0,
+    skippedSummaryRows: 0,
+    rows: [
+      {
+        rowNumber: 2,
+        raw: {
+          Date: '2026-10-15',
+          Branch: 'BEED',
+          'Employee ID': '',
+          'Sales ID': '459',
+          'Employee Name': 'Ramesh Patil',
+          'New Inc': 120,
+          'Old Inc': 80,
+          'Other Inc': 50,
+        },
+      },
+      {
+        rowNumber: 3,
+        raw: {
+          Date: '2026-10-15',
+          Branch: 'BEED',
+          'Employee ID': '',
+          'Sales ID': '707',
+          'Employee Name': 'Pratiksha Kulkarni',
+          'New Inc': 200,
+          'Old Inc': 100,
+          'Other Inc': 0,
+        },
+      },
+      {
+        rowNumber: 4,
+        raw: {
+          Date: '2026-10-15',
+          Branch: 'BARAMATI MIDC',
+          'Employee ID': '',
+          'Sales ID': '708',
+          'Employee Name': 'Deshmukh Sagar',
+          'New Inc': 150,
+          'Old Inc': 50,
+          'Other Inc': 25,
+        },
+      },
+    ],
+    mapping: dualColumnMapping,
+    branches: BRANCHES,
+    employees: testEmployees,
+    publishedIncentives: [],
+  });
+
+  assert.equal(happyRes.canStage, true, `Expected canStage=true, got blockingReasons: ${happyRes.blockingReasons.join('; ')}`);
+  assert.equal(happyRes.metrics.invalidRows, 0);
+  assert.equal(happyRes.newEmployeeCandidates.length, 0, 'Auto-linked Master employees must NOT be flagged as new candidates');
+  assert.equal(happyRes.rows[0].employeeId, 'EMP459');
+  assert.equal(happyRes.rows[0].validationStatus, 'VALID');
+  assert.equal(happyRes.rows[0].matchedSaleId, '459');
+  assert.equal(Boolean(happyRes.rows[0].matchedViaSaleIdLink), false);
+
+  assert.equal(happyRes.rows[1].employeeId, 'EMP707');
+  assert.equal(happyRes.rows[1].validationStatus, 'VALID');
+  assert.equal(happyRes.rows[1].matchedSaleId, '707');
+  assert.equal(happyRes.rows[1].matchedViaSaleIdLink, true);
+
+  assert.equal(happyRes.rows[2].employeeId, 'EMP708');
+  assert.equal(happyRes.rows[2].validationStatus, 'VALID');
+  assert.equal(happyRes.rows[2].matchedSaleId, '708');
+  assert.equal(happyRes.rows[2].matchedViaSaleIdLink, true);
+
+  assert.equal(happyRes.pendingSaleIdLinks.length, 2);
+  const link707 = happyRes.pendingSaleIdLinks.find((l) => l.employeeId === 'EMP707');
+  const link708 = happyRes.pendingSaleIdLinks.find((l) => l.employeeId === 'EMP708');
+  assert.ok(link707);
+  assert.equal(link707.proposedSaleId, '707');
+  assert.equal(link707.matchBasis, 'EXACT_NAME_AND_BRANCH');
+  assert.ok(link708);
+  assert.equal(link708.proposedSaleId, '708');
+  assert.equal(link708.matchBasis, 'UNIQUE_NAME_TOKENS_AND_BRANCH');
+
+  // Scenario B: Safety guard — ambiguous duplicate names MUST NOT auto-link, and reusing existing saleId '459' with EMP901 MUST NOT create a duplicate link
+  const guardRes = validateImportBatch({
+    periodStart: '2026-10-16',
+    periodEnd: '2026-10-16',
+    rawBannerDateText: '2026-10-16',
+    rawTotalRows: 2,
+    skippedBlankRows: 0,
+    skippedSummaryRows: 0,
+    rows: [
+      {
+        rowNumber: 2,
+        raw: {
+          Date: '2026-10-16',
+          Branch: 'BEED',
+          'Employee ID': '',
+          'Sales ID': '888',
+          'Employee Name': 'Amit Joshi',
+          'New Inc': 100,
+          'Old Inc': 0,
+          'Other Inc': 0,
+        },
+      },
+      {
+        rowNumber: 3,
+        raw: {
+          Date: '2026-10-16',
+          Branch: 'BARAMATI MIDC',
+          'Employee ID': 'EMP901',
+          'Sales ID': '459',
+          'Employee Name': 'Kiran Shinde',
+          'New Inc': 90,
+          'Old Inc': 0,
+          'Other Inc': 0,
+        },
+      },
+    ],
+    mapping: dualColumnMapping,
+    branches: BRANCHES,
+    employees: testEmployees,
+    publishedIncentives: [],
+  });
+
+  // Row 2 ('Amit Joshi' appears twice in BEED Master) -> MUST NOT auto-link
+  assert.equal(guardRes.rows[0].validationStatus, 'ERROR');
+  assert.equal(Boolean(guardRes.rows[0].matchedViaSaleIdLink), false);
+  // Row 3 ('EMP901' paired with already-owned saleId '459') -> MUST NOT propose linking '459' to EMP901
+  assert.equal(guardRes.pendingSaleIdLinks.length, 0);
+
+  // Scenario C: Backend server.ts validateImportSchema MUST preserve mapping.saleId (not strip it via Zod)
+  const serverText = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf-8');
+  const validateSchemaMatch = serverText.match(/const validateImportSchema = z\.object\(\{[\s\S]*?\n\}\);/);
+  assert.ok(validateSchemaMatch, 'validateImportSchema must exist in server.ts');
+  assert.match(
+    validateSchemaMatch[0],
+    /saleId:\s*z\.string\(\)/,
+    'validateImportSchema.mapping MUST accept optional saleId so Sale-ID-only uploads pass backend validation',
+  );
+});
+
+// =========================================================================
+// TEST 70: Real Monthly Paysheet Upgrades — OT Attendance, Negative ADVOCH, .00/#N/A Cleaning, Unnamed DCR Mode, ₹1 Rounding & Aliases
+// =========================================================================
+test('70. Monthly Paysheet parser handles OT days > 30, negative ADVOCH auto-balance, .00/#N/A cleaning, unnamed DCR column, ₹1 rounding, and retail aliases', async () => {
+  const { resolveCanonicalDepartment } = await import('../src/lib/departmentLeaderboardEngine.ts');
+  const {
+    cleanExcelTextCell,
+    sanitizeSaleIdCell,
+    maskBankAccountNumber,
+  } = await import('../src/lib/salarySlipEngine.ts');
+
+  // 1. Canonical Branch & Department retail aliases
+  assert.equal(resolveCanonicalBranchName('SMPL'), 'BARAMATI MIDC');
+  assert.equal(resolveCanonicalBranchName('MIDC'), 'BARAMATI MIDC');
+  assert.equal(resolveCanonicalBranchName('MOTI 1'), 'BARAMATI MOTIBAGH');
+  assert.equal(resolveCanonicalBranchName('INDPR'), 'INDAPUR');
+  assert.equal(resolveCanonicalBranchName('SGND'), 'SHRIGONDA');
+  assert.equal(resolveCanonicalDepartment('LEADIES WEAR')?.id, 'LADIES_WEAR');
+  assert.equal(resolveCanonicalDepartment('HOSIARY')?.id, 'NON_APPARELS');
+
+  // 2. Excel error tokens, .00 decimal suffixes, and placeholder Sale IDs cleaned safely
+  assert.equal(cleanExcelTextCell('#N/A'), '');
+  assert.equal(cleanExcelTextCell('#REF!'), '');
+  assert.equal(sanitizeSaleIdCell('2216.00'), '2216');
+  assert.equal(sanitizeSaleIdCell('0.00'), '');
+  assert.equal(sanitizeSaleIdCell('BILLING'), '');
+  assert.equal(sanitizeSaleIdCell('HELPER'), '');
+  assert.equal(sanitizeSaleIdCell('HK'), '');
+  assert.equal(maskBankAccountNumber('44035408025.00'), 'XXXX8025');
+  assert.equal(maskBankAccountNumber('#N/A'), '');
+
+  // 3. Full 45-column CSV covering:
+  //    - Row A (0065): OT attendance (MONTHS DAY=30, TOTAL DAYS=31, OT DAYS=1), SELL ID="87.00", Bank="44035408025.00", unnamed trailing col="DCR", DEP="LEADIES WEAR"
+  //    - Row B (3014): Negative ADVOCH ALLOW (-525) absorbed by fixed allowances, DEP="LEFT" ignored (keeps Master dept), unnamed trailing col="NEFT"
+  //    - Row C (3071): Bank-Exact ₹1 rounding (component sum = 4367.50, EARN GROSS = 4367), SELL ID="HELPER", Bank="#N/A", unnamed trailing col="#N/A"
+  const testEmployees: Employee[] = [
+    {
+      ...EMPLOYEES[0],
+      employeeId: '0065',
+      fullName: 'SATISH NAMDEO GAWADE',
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      departmentId: 'SAREE',
+      departmentName: 'Saree Dept.',
+      status: 'ACTIVE',
+    },
+    {
+      ...EMPLOYEES[0],
+      employeeId: '3014',
+      fullName: 'RUKUMINIBAI SURYAVANSHI',
+      branchId: 'BARAMATI_MOTIBAGH',
+      branchName: 'BARAMATI MOTIBAGH',
+      departmentId: 'MENS_WEAR',
+      departmentName: 'Mens Wear Dept.',
+      status: 'ACTIVE',
+    },
+    {
+      ...EMPLOYEES[0],
+      employeeId: '3071',
+      fullName: 'SANDHYA BHIMRAO OHOL',
+      branchId: 'INDAPUR',
+      branchName: 'INDAPUR',
+      departmentId: 'NON_APPARELS',
+      departmentName: 'Non Apparels Dept.',
+      status: 'ACTIVE',
+    },
+  ];
+
+  const headerRow = [
+    'EMP ID',
+    'SELL ID',
+    'BRANCH',
+    'EMP NAME',
+    'DEP',
+    'MONTHS DAY',
+    'PRESENT',
+    'W/O',
+    'OT DAYS',
+    'TOTAL DAYS',
+    'SALARY',
+    'BASIC',
+    'HRA',
+    'CONVEYANCE',
+    'MEDICAL ALLOW',
+    'WASHING ALLOW',
+    'ATTENDANCE ALLOW',
+    'COMMUNICATION EXP',
+    'ADVOCH ALLOW',
+    'OT',
+    'SALES COMMISION',
+    'EARN GROSS',
+    'PF',
+    'PT',
+    'TOTAL DEDUCTION',
+    'NET PAY',
+    'BANK A/C NO',
+    '', // Unnamed 28th trailing column holding DCR / NEFT / #N/A
+  ].join(',');
+
+  const rowA = [
+    '0065', '87.00', 'SMPL', 'SATISH NAMDEO GAWADE', 'LEADIES WEAR',
+    '30', '27', '4', '1', '31',
+    '15000', '8000', '2000', '1000', '500', '500', '500', '500', '2000', '500', '2110', '17610',
+    '1020', '200', '1220', '16390',
+    '44035408025.00', 'DCR',
+  ].join(',');
+
+  const rowB = [
+    '3014', '2448.00', 'MOTI 1', 'RUKUMINIBAI SURYAVANSHI', 'LEFT',
+    '30', '6', '1', '0', '7',
+    '9000', '1500', '358', '200', '200', '150', '100', '50', '-525', '0', '0', '2033',
+    '0', '0', '0', '2033',
+    '123456787202', 'NEFT',
+  ].join(',');
+
+  const rowC = [
+    '3071', 'HELPER', 'INDPR', 'SANDHYA BHIMRAO OHOL', 'HOSIARY',
+    '30', '12.5', '2', '0', '14.5',
+    '9000', '2500', '500', '200', '100', '100', '0', '0', '939', '0', '28.50', '4367',
+    '0', '0', '0', '4367',
+    '#N/A', '#N/A',
+  ].join(',');
+
+  const parsed = parseSalaryCsvText([headerRow, rowA, rowB, rowC].join('\n'), testEmployees, '2026-10');
+
+  assert.equal(parsed.errorRows.length, 0, `Expected 0 errors, got: ${parsed.errorRows.map((e) => e.errorMessage).join('; ')}`);
+  assert.equal(parsed.validRows.length, 3);
+
+  // Row A checks: OT capped cleanly, SELL ID .00 stripped, Bank .00 fixed, DCR mode detected, LEADIES WEAR mapped
+  const rA = parsed.validRows.find((r) => r.employeeId === '0065')!;
+  assert.equal(rA.paidDays, 30);
+  assert.equal(rA.totalDays, 30);
+  assert.equal(rA.overtimeDays, 1);
+  assert.equal(rA.saleId, '87');
+  assert.equal(rA.bankAccountMasked, 'XXXX8025');
+  assert.equal(rA.paymentMode, 'DCR');
+  assert.equal(rA.resolvedDepartment?.id, 'LADIES_WEAR');
+  assert.equal(rA.grossEarningsPaise, 1761000);
+  assert.equal(rA.netPayablePaise, 1639000);
+
+  // Row B checks: Negative ADVOCH (-525) auto-balanced so every earning head >= 0, DEP="LEFT" ignored (keeps Master MENS_WEAR)
+  const rB = parsed.validRows.find((r) => r.employeeId === '3014')!;
+  assert.equal(rB.adhocAllowancePaise, 0);
+  assert.equal(rB.grossEarningsPaise, 203300);
+  assert.equal(rB.netPayablePaise, 203300);
+  assert.equal(rB.paymentMode, 'NEFT');
+  assert.equal(rB.rawDepartment, '');
+  assert.equal(rB.resolvedDepartment, null);
+  assert.equal(rB.willSyncDepartment, false);
+  assert.ok(
+    rB.basicPaise >= 0 && rB.hraPaise >= 0 && rB.conveyancePaise >= 0 &&
+    rB.medicalAllowancePaise >= 0 && rB.washingAllowancePaise >= 0 &&
+    rB.attendanceAllowancePaise >= 0 && rB.communicationExpensesPaise >= 0,
+  );
+
+  // Row C checks: Bank-Exact ₹1 rounding aligns 4367.50 -> 4367.00 while preserving 18-head exact sum; HELPER/#N/A cleaned
+  const rC = parsed.validRows.find((r) => r.employeeId === '3071')!;
+  assert.equal(rC.saleId, '');
+  assert.equal(rC.bankAccountMasked, '');
+  assert.equal(rC.paymentMode, '');
+  assert.equal(rC.resolvedDepartment?.id, 'NON_APPARELS');
+  assert.equal(rC.grossEarningsPaise, 436700);
+  assert.equal(rC.netPayablePaise, 436700);
+  assert.equal(rC.sheetCrossCheckWarning, '');
+  const rCSum =
+    rC.basicPaise + rC.dearnessAllowancePaise + rC.hraPaise + rC.attendanceAllowancePaise +
+    rC.washingAllowancePaise + rC.conveyancePaise + rC.medicalAllowancePaise +
+    rC.leaveTravelAllowancePaise + rC.communicationExpensesPaise + rC.healthClubAllowancePaise +
+    rC.adhocAllowancePaise + rC.travelingAllowancePaise + rC.salesCommissionPaise +
+    rC.specialAllowancePaise + rC.overtimePaise + rC.incentivePaise + rC.arrearsPaise + rC.otherEarningsPaise;
+  assert.equal(rCSum, rC.grossEarningsPaise);
+
+  // 4. firestore.rules & firebase-blueprint.json both whitelist 'DCR' payment mode
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  assert.match(rulesText, /'BANK',\s*'NEFT',\s*'DCR',\s*'CASH',\s*'UPI',\s*'CHEQUE'/);
+  const blueprintText = fs.readFileSync(path.resolve(process.cwd(), 'firebase-blueprint.json'), 'utf-8');
+  assert.match(blueprintText, /"DCR"/);
+});
+
+// =========================================================================
+// TEST 71: Double-Incentive Auto-Protection in 1-Click Sync
+// =========================================================================
+test('71. 1-Click Sync auto-skips rows that already contain Sales Commission to prevent double-counting, while syncing rows without it', () => {
+  const testEmployees: Employee[] = [
+    { ...EMPLOYEES[0], employeeId: 'E1', fullName: 'Has Sales Comm', status: 'ACTIVE' },
+    { ...EMPLOYEES[0], employeeId: 'E2', fullName: 'No Sales Comm', status: 'ACTIVE' },
+  ];
+
+  const csv = [
+    'EMP ID,EMP NAME,MONTHS DAY,TOTAL DAYS,BASIC,SALES COMMISION,EARN GROSS,TOTAL DEDUCTION,NET PAY',
+    'E1,Has Sales Comm,30,30,10000,1500,11500,0,11500',
+    'E2,No Sales Comm,30,30,10000,0,10000,0,10000',
+  ].join('\n');
+
+  const parsed = parseSalaryCsvText(csv, testEmployees, '2026-10');
+  assert.equal(parsed.validRows.length, 2);
+
+  const incentiveMap = {
+    E1: { employeeId: 'E1', grossPaise: 150000, adjustmentsNetPaise: 0, netPayablePaise: 150000 },
+    E2: { employeeId: 'E2', grossPaise: 80000, adjustmentsNetPaise: 0, netPayablePaise: 80000 },
+  };
+
+  // Default behavior: E1 skipped (already has salesCommissionPaise = 150000), E2 synced (incentivePaise = 80000)
+  const guarded = applyIncentiveAndLoanSyncToSalaryRows(parsed.validRows, incentiveMap, {}, { syncIncentives: true });
+  assert.equal(guarded.skippedAlreadyHasSalesCommissionCount, 1);
+  assert.equal(guarded.syncedIncentiveCount, 1);
+
+  const e1Guarded = guarded.rows.find((r) => r.employeeId === 'E1')!;
+  const e2Guarded = guarded.rows.find((r) => r.employeeId === 'E2')!;
+  assert.equal(e1Guarded.salesCommissionPaise, 150000);
+  assert.equal(e1Guarded.incentivePaise, 0);
+  assert.equal(e1Guarded.netPayablePaise, 1150000);
+
+  assert.equal(e2Guarded.salesCommissionPaise, 0);
+  assert.equal(e2Guarded.incentivePaise, 80000);
+  assert.equal(e2Guarded.netPayablePaise, 1080000);
+
+  // Explicit override option still works when intentionally requested
+  const forced = applyIncentiveAndLoanSyncToSalaryRows(parsed.validRows, incentiveMap, {}, {
+    syncIncentives: true,
+    forceOverwriteSalesCommission: true,
+  });
+  assert.equal(forced.skippedAlreadyHasSalesCommissionCount, 0);
+  assert.equal(forced.syncedIncentiveCount, 2);
+});
+
+// =========================================================================
+// TEST 72: Inline Missing Employee Resolution (Add / Change / Update) during Salary Upload
+// =========================================================================
+test('72. Salary upload tags missing employees with EMPLOYEE_NOT_FOUND + canonical rawBranch, ranks smart Master suggestions, and immediately validates after ID override/add', async () => {
+  const {
+    extractRawSalaryRowsFromCsv,
+    parseSalarySheetRows,
+    applyEmployeeIdOverrideToRawRows,
+    findSuggestedMasterEmployeesForSalaryRow,
+  } = await import('../src/lib/salarySlipEngine.ts');
+
+  const masterEmployees: Employee[] = [
+    {
+      ...EMPLOYEES[0],
+      employeeId: '0065',
+      saleId: '87',
+      fullName: 'SATISH NAMDEO GAWADE',
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      status: 'ACTIVE',
+    },
+    {
+      ...EMPLOYEES[0],
+      employeeId: '2040',
+      saleId: '512',
+      fullName: 'ASHVINI PATOLE',
+      branchId: 'BARAMATI_MOTIBAGH',
+      branchName: 'BARAMATI MOTIBAGH',
+      status: 'ACTIVE',
+    },
+  ];
+
+  // CSV has 3 unmatched rows:
+  // Row 2: typo '65' instead of '0065' (leading-zero & exact Sale ID 87 & exact Name match)
+  // Row 3: wrong EMP ID '9999' for 'PATOLE ASHVINI' (reordered Name words match)
+  // Row 4: brand new employee 'HK' LAXMI KALE at branch 'MOTI 1' (not in Master yet)
+  const csv = [
+    'EMP ID,SELL ID,BRANCH,EMP NAME,DEP,MONTHS DAY,TOTAL DAYS,BASIC,EARN GROSS,TOTAL DEDUCTION,NET PAY',
+    '65,87.00,SMPL,SATISH NAMDEO GAWADE,SAREE,30,30,15000,15000,0,15000',
+    '9999,,MOTI 1,PATOLE ASHVINI,LEADIES WEAR,30,30,12000,12000,0,12000',
+    'HK,,MOTI 1,LAXMI KALE,HK,30,30,8000,8000,0,8000',
+  ].join('\n');
+
+  const rawRows = extractRawSalaryRowsFromCsv(csv);
+  assert.equal(rawRows.length, 3);
+
+  const initial = parseSalarySheetRows(rawRows, masterEmployees, '2026-10');
+  assert.equal(initial.validRows.length, 0);
+  assert.equal(initial.errorRows.length, 3);
+  assert.ok(initial.errorRows.every((r) => r.errorCode === 'EMPLOYEE_NOT_FOUND'));
+  assert.equal(initial.errorRows[0].rawBranch, 'BARAMATI MIDC');
+  assert.equal(initial.errorRows[1].rawBranch, 'BARAMATI MOTIBAGH');
+  assert.equal(initial.errorRows[2].rawBranch, 'BARAMATI MOTIBAGH');
+
+  // Smart suggestions rank exact Sale ID / Name match first
+  const sugRow2 = findSuggestedMasterEmployeesForSalaryRow(initial.errorRows[0], masterEmployees);
+  assert.equal(sugRow2[0]?.employee.employeeId, '0065');
+  assert.match(sugRow2[0]?.reason || '', /Exact Sale ID match/);
+
+  const sugRow3 = findSuggestedMasterEmployeesForSalaryRow(initial.errorRows[1], masterEmployees);
+  assert.equal(sugRow3[0]?.employee.employeeId, '2040');
+  assert.match(sugRow3[0]?.reason || '', /Same name words/);
+
+  // 1. Simulate "Change" on Row 2 ('65' -> '0065') & "Update" link on Row 3 ('9999' -> '2040')
+  let nextRaw = applyEmployeeIdOverrideToRawRows(rawRows, initial.errorRows[0].rowNumber, '0065');
+  nextRaw = applyEmployeeIdOverrideToRawRows(nextRaw, initial.errorRows[1].rowNumber, '2040');
+
+  // 2. Simulate "Add" on Row 4 ('HK' -> newly created Master employee '3099' LAXMI KALE)
+  const addedEmployee: Employee = {
+    ...EMPLOYEES[0],
+    employeeId: '3099',
+    loginId: 'HOM3099',
+    fullName: 'LAXMI KALE',
+    branchId: 'BARAMATI_MOTIBAGH',
+    branchName: 'BARAMATI MOTIBAGH',
+    departmentId: '',
+    departmentName: 'Housekeeping',
+    status: 'ACTIVE',
+  };
+  nextRaw = applyEmployeeIdOverrideToRawRows(nextRaw, initial.errorRows[2].rowNumber, '3099');
+
+  const resolved = parseSalarySheetRows(nextRaw, [...masterEmployees, addedEmployee], '2026-10');
+  assert.equal(resolved.errorRows.length, 0);
+  assert.equal(resolved.validRows.length, 3);
+  assert.equal(resolved.totalNetPaise, 3500000); // 15000 + 12000 + 8000 = ₹35,000 exact
+  // Ensure SELL ID on Row 2 was NEVER overwritten by EMP ID override
+  assert.equal(resolved.validRows.find((r) => r.employeeId === '0065')?.saleId, '87');
+});
+
+// =========================================================================
+// TEST 73: Branch P&L Sales Commission Deduplication + Clean Payslip Label
+// =========================================================================
+test('73. computeBranchPnlAnalytics deduplicates salesCommissionPaise when published incentives exist and preserves it on salary-only months', () => {
+  const emp = EMPLOYEES[0];
+  const summariesOct: MonthlySummary[] = [
+    {
+      summaryId: `${emp.employeeId}_2026-10`,
+      employeeId: emp.employeeId,
+      authUid: emp.authUid || 'uid_459',
+      employeeName: emp.fullName,
+      branchId: emp.branchId,
+      branchName: emp.branchName,
+      monthKey: '2026-10',
+      sourceType: 'MONTHLY_RECORD',
+      component1TotalPaise: 400000,
+      component2TotalPaise: 0,
+      component3TotalPaise: 0,
+      grandTotalPaise: 400000, // ₹4,000 published incentive
+      saleAmt1TotalPaise: 20000000, // ₹2,00,000 sales
+      saleQty1Total: 80,
+      saleAmt2TotalPaise: 0,
+      saleQty2Total: 0,
+      saleAmt3TotalPaise: 0,
+      saleQty3Total: 0,
+      totalSaleAmtPaise: 20000000,
+      totalSaleQty: 80,
+      publishedDaysCount: 1,
+      updatedAt: '2026-10-31T00:00:00.000Z',
+    },
+  ];
+  const slips: SalarySlip[] = [
+    {
+      slipId: `2026-10__${emp.employeeId}`,
+      monthKey: '2026-10',
+      employeeId: emp.employeeId,
+      authUid: emp.authUid || 'uid_459',
+      employeeName: emp.fullName,
+      branchId: emp.branchId,
+      branchName: emp.branchName,
+      designation: emp.designation,
+      totalDays: 31,
+      paidDays: 31,
+      lopDays: 0,
+      weeklyOffDays: 4,
+      paidLeaveDays: 0,
+      overtimeHours: 0,
+      basicPaise: 1500000,
+      hraPaise: 100000,
+      conveyancePaise: 50000,
+      salesCommissionPaise: 400000, // ₹4,000 Sales Commission in real paysheet
+      specialAllowancePaise: 0,
+      overtimePaise: 0,
+      incentivePaise: 0,
+      otherEarningsPaise: 0,
+      grossEarningsPaise: 2050000, // ₹20,500 gross incl. ₹4,000 sales commission
+      pfPaise: 0,
+      esicPaise: 0,
+      ptPaise: 0,
+      advanceRecoveryPaise: 0,
+      tdsPaise: 0,
+      otherDeductionPaise: 0,
+      totalDeductionsPaise: 0,
+      netPayablePaise: 2050000,
+      employeeVisible: true,
+      uploadedByEmail: 'uhvishal41@gmail.com',
+      uploadedAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    },
+    {
+      slipId: `2026-09__${emp.employeeId}`,
+      monthKey: '2026-09',
+      employeeId: emp.employeeId,
+      authUid: emp.authUid || 'uid_459',
+      employeeName: emp.fullName,
+      branchId: emp.branchId,
+      branchName: emp.branchName,
+      designation: emp.designation,
+      totalDays: 30,
+      paidDays: 30,
+      lopDays: 0,
+      weeklyOffDays: 4,
+      paidLeaveDays: 0,
+      overtimeHours: 0,
+      basicPaise: 1500000,
+      hraPaise: 0,
+      conveyancePaise: 0,
+      salesCommissionPaise: 300000,
+      specialAllowancePaise: 0,
+      overtimePaise: 0,
+      incentivePaise: 0,
+      otherEarningsPaise: 0,
+      grossEarningsPaise: 1800000, // Salary-only month (no published summary)
+      pfPaise: 0,
+      esicPaise: 0,
+      ptPaise: 0,
+      advanceRecoveryPaise: 0,
+      tdsPaise: 0,
+      otherDeductionPaise: 0,
+      totalDeductionsPaise: 0,
+      netPayablePaise: 1800000,
+      employeeVisible: true,
+      uploadedByEmail: 'uhvishal41@gmail.com',
+      uploadedAt: '2026-10-01T00:00:00.000Z',
+      updatedAt: '2026-10-01T00:00:00.000Z',
+    },
+  ];
+
+  // Case A: Oct 2026 has BOTH published incentives & salesCommissionPaise -> ZERO double-counting
+  const pnlOct = computeBranchPnlAnalytics({
+    branches: BRANCHES,
+    employees: [emp],
+    monthlySummaries: summariesOct,
+    salarySlips: slips,
+    selectedMonth: '2026-10',
+  });
+  assert.equal(pnlOct.companyTotals.totalPayrollCostPaise, 2050000); // ₹20,500 (NOT ₹24,500!)
+  assert.equal(pnlOct.companyTotals.costToSalesPct, 10.25);
+  const octTrend = pnlOct.monthlyTrend.find((m) => m.monthKey === '2026-10');
+  assert.equal(octTrend?.totalPayrollCostPaise, 2050000);
+
+  // Case B: Sep 2026 has ONLY salary slip (no published incentives) -> preserves full ₹18,000 gross
+  const sepTrend = pnlOct.monthlyTrend.find((m) => m.monthKey === '2026-09');
+  assert.equal(sepTrend?.totalPayrollCostPaise, 1800000);
+
+  // Case C: Printed earning breakdown uses clean "Conveyance Allowance" spelling
+  const enRows = getSalarySlipEarningBreakdown(slips[0], 'en');
+  assert.ok(enRows.some(([label, amt]) => label === 'Conveyance Allowance' && amt === 50000));
+});
+
+// =========================================================================
+// TEST 74: Login Provisioning Collision-Free Re-issue Helper (auth/email-already-in-use fix)
+// =========================================================================
+test('74. generateNextAvailableLoginId produces collision-free, Firestore-rule-compliant alternate Login IDs', () => {
+  const loginRuleRegex = /^[A-Z0-9_-]{3,40}$/;
+
+  assert.equal(normalizeLoginIdCandidate(' hom 0065! '), 'HOM0065');
+
+  const used = new Set<string>(['HOM0065', 'HOM0065A']);
+  const next1 = generateNextAvailableLoginId('HOM0065', used);
+  assert.equal(next1, 'HOM0065B');
+  assert.match(next1, loginRuleRegex);
+
+  used.add(next1);
+  const next2 = generateNextAvailableLoginId('HOM0065', used);
+  assert.equal(next2, 'HOM0065C');
+  assert.match(next2, loginRuleRegex);
+
+  // Handles long Login IDs near the 40-char Firestore rule ceiling cleanly
+  const longBase = 'HOM' + '9'.repeat(37);
+  const usedLong = new Set<string>([longBase]);
+  const altLong = generateNextAvailableLoginId(longBase, usedLong);
+  assert.ok(altLong.length <= 40);
+  assert.notEqual(altLong, longBase);
+  assert.match(altLong, loginRuleRegex);
+});
+
+// =========================================================================
+// TEST 75: Branch Reports Engine — Strict Branch Scoping for NEFT, DCR/Cash, Statutory & Incentives
+// =========================================================================
+test('75. branchReportsEngine isolates Bank NEFT, DCR/Cash, Statutory PF/ESIC/PT/LWF, and Incentives per selected branch', () => {
+  const empMidc = {
+    ...EMPLOYEES[0],
+    bankName: 'HDFC Bank',
+    bankAccountMasked: 'XXXX1234',
+    bankIfsc: 'HDFC0001234',
+    uanNumber: '100998877665',
+  };
+  const empMotibag = {
+    ...EMPLOYEES[1],
+    bankName: '',
+    bankAccountMasked: '',
+    bankIfsc: '',
+  };
+
+  const slips: SalarySlip[] = [
+    {
+      slipId: '2026-10__459',
+      monthKey: '2026-10',
+      employeeId: empMidc.employeeId,
+      authUid: 'uid_459',
+      employeeName: empMidc.fullName,
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      designation: empMidc.designation,
+      totalDays: 31,
+      paidDays: 31,
+      lopDays: 0,
+      weeklyOffDays: 4,
+      paidLeaveDays: 0,
+      overtimeHours: 0,
+      basicPaise: 1500000,
+      hraPaise: 300000,
+      conveyancePaise: 0,
+      specialAllowancePaise: 0,
+      overtimePaise: 0,
+      incentivePaise: 0,
+      otherEarningsPaise: 0,
+      grossEarningsPaise: 1800000,
+      pfPaise: 180000,
+      esicPaise: 13500,
+      ptPaise: 20000,
+      lwfPaise: 1200,
+      advanceRecoveryPaise: 0,
+      tdsPaise: 0,
+      otherDeductionPaise: 0,
+      totalDeductionsPaise: 214700,
+      netPayablePaise: 1585300,
+      paymentMode: 'NEFT',
+      employeeVisible: true,
+      uploadedByEmail: 'uhvishal41@gmail.com',
+      uploadedAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    },
+    {
+      slipId: '2026-10__355',
+      monthKey: '2026-10',
+      employeeId: empMotibag.employeeId,
+      authUid: 'uid_355',
+      employeeName: empMotibag.fullName,
+      branchId: 'BARAMATI_MOTIBAG',
+      branchName: 'BARAMATI MOTIBAG',
+      designation: empMotibag.designation,
+      totalDays: 31,
+      paidDays: 29,
+      lopDays: 2,
+      weeklyOffDays: 4,
+      paidLeaveDays: 0,
+      overtimeHours: 0,
+      basicPaise: 1200000,
+      hraPaise: 0,
+      conveyancePaise: 0,
+      specialAllowancePaise: 0,
+      overtimePaise: 0,
+      incentivePaise: 0,
+      otherEarningsPaise: 0,
+      grossEarningsPaise: 1200000,
+      pfPaise: 0,
+      esicPaise: 0,
+      ptPaise: 20000,
+      lwfPaise: 0,
+      advanceRecoveryPaise: 0,
+      tdsPaise: 0,
+      otherDeductionPaise: 0,
+      totalDeductionsPaise: 20000,
+      netPayablePaise: 1180000,
+      paymentMode: 'DCR',
+      employeeVisible: true,
+      uploadedByEmail: 'uhvishal41@gmail.com',
+      uploadedAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    },
+  ];
+
+  // Single-branch NEFT report -> strictly BARAMATI_MIDC
+  const neftMidc = buildBankNeftTransferDataset({
+    salarySlips: slips,
+    employees: [empMidc, empMotibag],
+    selectedMonth: '2026-10',
+    selectedBranchId: 'BARAMATI_MIDC',
+  });
+  assert.equal(neftMidc.rows.length, 1);
+  assert.equal(neftMidc.readyCount, 1);
+  assert.equal(neftMidc.missingBankDetailsCount, 0);
+  assert.equal(neftMidc.totalAmountPaise, 1585300);
+
+  // Single-branch DCR/Cash report -> strictly BARAMATI_MOTIBAG
+  const dcrMotibag = buildDcrCashDisbursementDataset({
+    salarySlips: slips,
+    selectedMonth: '2026-10',
+    selectedBranchId: 'BARAMATI_MOTIBAG',
+  });
+  assert.equal(dcrMotibag.rows.length, 1);
+  assert.equal(dcrMotibag.dcrCount, 1);
+  assert.equal(dcrMotibag.totalAmountPaise, 1180000);
+
+  // Statutory report across ALL vs single branch
+  const statMidc = buildStatutoryComplianceDataset({
+    salarySlips: slips,
+    employees: [empMidc, empMotibag],
+    selectedMonth: '2026-10',
+    selectedBranchId: 'BARAMATI_MIDC',
+  });
+  assert.equal(statMidc.totals.pfPaise, 180000);
+  assert.equal(statMidc.totals.esicPaise, 13500);
+  assert.equal(statMidc.totals.ptPaise, 20000);
+  assert.equal(statMidc.totals.lwfPaise, 1200);
+  assert.equal(statMidc.totals.totalStatutoryPaise, 214700);
+  assert.equal(statMidc.rows[0].uanNumber, '100998877665');
+
+  // Branch incentive dataset & side-by-side summary
+  const summaries: MonthlySummary[] = [
+    {
+      summaryId: '2026-10__459',
+      monthKey: '2026-10',
+      employeeId: empMidc.employeeId,
+      authUid: 'uid_459',
+      employeeName: empMidc.fullName,
+      branchId: 'BARAMATI_MIDC',
+      branchName: 'BARAMATI MIDC',
+      component1TotalPaise: 200000,
+      component2TotalPaise: 100000,
+      component3TotalPaise: 50000,
+      grandTotalPaise: 350000,
+      totalSaleAmtPaise: 25000000,
+      totalSaleQty: 140,
+      publishedDaysCount: 1,
+      sourceType: 'MONTHLY_RECORD',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    },
+  ];
+  const incMidc = buildBranchIncentiveDataset({
+    monthlySummaries: summaries,
+    employees: [empMidc, empMotibag],
+    payoutRecords: [],
+    adjustments: [],
+    selectedMonth: '2026-10',
+    selectedBranchId: 'BARAMATI_MIDC',
+  });
+  assert.equal(incMidc.rows.length, 1);
+  assert.equal(incMidc.totals.netPayablePaise, 350000);
+
+  const summaryRows = buildBranchExecutiveSummaryRows({
+    branches: BRANCHES,
+    employees: [empMidc, empMotibag],
+    salarySlips: slips,
+    monthlySummaries: summaries,
+    payoutRecords: [],
+    adjustments: [],
+    selectedMonth: '2026-10',
+    selectedBranchId: 'ALL',
+  });
+  const midcSummary = summaryRows.find((r) => r.branchId === 'BARAMATI_MIDC');
+  const motibagSummary = summaryRows.find((r) => r.branchId === 'BARAMATI_MOTIBAG');
+  assert.equal(midcSummary?.neftAmountPaise, 1585300);
+  assert.equal(motibagSummary?.dcrCashAmountPaise, 1180000);
+});
+
+// =========================================================================
+// TEST 76: Overtime, Attendance (LOP) & Attrition Insights Analytics (Pro #5)
+// =========================================================================
+test('76. computeAttendanceOtAttritionAnalytics flags High-LOP (>=4d), High-OT, Attrition %, and New Joiners', () => {
+  const emps: Employee[] = [
+    { ...EMPLOYEES[0], status: 'ACTIVE', dateOfJoining: '2026-10-05' },
+    { ...EMPLOYEES[1], status: 'INACTIVE', dateOfJoining: '2024-01-10' },
+  ];
+  const slips: SalarySlip[] = [
+    {
+      slipId: '2026-10__459',
+      monthKey: '2026-10',
+      employeeId: emps[0].employeeId,
+      authUid: 'uid_459',
+      employeeName: emps[0].fullName,
+      branchId: emps[0].branchId,
+      branchName: emps[0].branchName,
+      designation: emps[0].designation,
+      totalDays: 31,
+      paidDays: 26,
+      lopDays: 5,
+      weeklyOffDays: 4,
+      paidLeaveDays: 0,
+      overtimeDays: 6,
+      overtimeHours: 48,
+      basicPaise: 1200000,
+      hraPaise: 0,
+      conveyancePaise: 0,
+      specialAllowancePaise: 0,
+      overtimePaise: 400000, // 33.3% of Basic -> High OT
+      incentivePaise: 0,
+      otherEarningsPaise: 0,
+      grossEarningsPaise: 1600000,
+      pfPaise: 0,
+      esicPaise: 0,
+      ptPaise: 0,
+      advanceRecoveryPaise: 0,
+      tdsPaise: 0,
+      otherDeductionPaise: 0,
+      totalDeductionsPaise: 0,
+      netPayablePaise: 1600000,
+      employeeVisible: true,
+      uploadedByEmail: 'uhvishal41@gmail.com',
+      uploadedAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    },
+  ];
+
+  const report = computeAttendanceOtAttritionAnalytics({
+    branches: BRANCHES,
+    employees: emps,
+    salarySlips: slips,
+    selectedMonth: '2026-10',
+  });
+
+  assert.equal(report.companyTotals.activeStaffCount, 1);
+  assert.equal(report.companyTotals.inactiveStaffCount, 1);
+  assert.equal(report.companyTotals.attritionPct, 50);
+  assert.equal(report.companyTotals.newJoinersCount, 1);
+  assert.equal(report.companyTotals.totalOvertimeDays, 6);
+  assert.equal(report.companyTotals.totalOvertimePaise, 400000);
+  assert.equal(report.companyTotals.totalLopDays, 5);
+  assert.equal(report.highLopAlerts.length, 1);
+  assert.equal(report.highLopAlerts[0].lopDays, 5);
+  assert.equal(report.highOtAlerts.length, 1);
+  assert.equal(report.highOtAlerts[0].overtimeDays, 6);
+});
+
+// =========================================================================
+// TEST 77: Firestore Rules Governance for Month Payroll Lock / Freeze (Pro #4)
+// =========================================================================
+test('77. firestore.rules restricts payroll_locks writes strictly to Main Owner and blocks locked-month salary/incentive mutations', () => {
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
+
+  assert.match(rulesNoComments, /function isMonthPayrollLocked\(monthKey\)/);
+  assert.match(rulesNoComments, /function isValidPayrollLockSettings\(data\)/);
+
+  const settingsBlock = rulesNoComments.match(
+    /match \/portal_settings\/\{settingId\}\s*\{[\s\S]*?\n    \}/,
+  );
+  assert.ok(settingsBlock);
+  assert.match(settingsBlock[0], /settingId == 'payroll_locks' && isMainOwner\(\) && isValidPayrollLockSettings\(incoming\(\)\)/);
+
+  const slipsBlock = rulesNoComments.match(/match \/salary_slips\/\{slipId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(slipsBlock);
+  assert.match(slipsBlock[0], /!isMonthPayrollLocked\(incoming\(\)\.monthKey\)/);
+  assert.match(slipsBlock[0], /!isMonthPayrollLocked\(existing\(\)\.monthKey\)/);
+
+  const pubBlock = rulesNoComments.match(
+    /match \/published_incentives\/\{recordId\}\s*\{[\s\S]*?\n    \}/,
+  );
+  assert.ok(pubBlock);
+  assert.match(pubBlock[0], /!isMonthPayrollLocked\(incoming\(\)\.monthKey\)/);
+  assert.match(pubBlock[0], /!isMonthPayrollLocked\(existing\(\)\.monthKey\)/);
+});
+
+// =========================================================================
+// TEST 78: Firestore Rules Security Audit Hardening Invariants
+// =========================================================================
+test('78. firestore.rules enforces SalarySlip string bounds, employee_queries employeeId binding, active_auth_uids existsAfter guard, and admins email binding', () => {
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  const draftText = fs.readFileSync(path.resolve(process.cwd(), 'DRAFT_firestore.rules'), 'utf-8');
+  assert.equal(rulesText, draftText, 'firestore.rules and DRAFT_firestore.rules must stay identical');
+
+  const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
+
+  // 1. SalarySlip optional strings and slipId are bounded
+  const metaMatch = rulesNoComments.match(/function isValidSalarySlipMetadata\(data\)\s*\{[\s\S]*?\n    \}/);
+  assert.ok(metaMatch, 'isValidSalarySlipMetadata helper must exist');
+  for (const field of [
+    'departmentName', 'designation', 'dateOfJoining', 'panNumber', 'uanNumber',
+    'pfNumber', 'esicNumber', 'bankName', 'bankAccountMasked', 'bankIfsc',
+    'paymentReference', 'paymentDate', 'remarks',
+  ]) {
+    assert.ok(metaMatch[0].includes(`'${field}'`), `isValidSalarySlipMetadata must bound ${field}`);
+  }
+  assert.match(rulesNoComments, /isValidSalarySlipMetadata\(data\)/);
+
+  // 2. employee_queries create binds employeeId to activeEmployeeId()
+  const queriesBlock = rulesNoComments.match(/match \/employee_queries\/\{queryId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(queriesBlock);
+  assert.match(queriesBlock[0], /incoming\(\)\.authUid == request\.auth\.uid\s*&&\s*incoming\(\)\.employeeId == activeEmployeeId\(\)/);
+
+  // 3. active_auth_uids self-heal checks active == true, existsAfter, and branchName
+  const registryBlock = rulesNoComments.match(/match \/active_auth_uids\/\{authUid\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(registryBlock);
+  assert.match(registryBlock[0], /incoming\(\)\.active == true/);
+  assert.match(registryBlock[0], /existsAfter\(\/databases\/\$\(database\)\/documents\/employees\/\$\(incoming\(\)\.employeeId\)\)/);
+  assert.match(registryBlock[0], /incoming\(\)\.branchName == getAfter\(\/databases\/\$\(database\)\/documents\/employees\/\$\(incoming\(\)\.employeeId\)\)\.data\.branchName/);
+
+  // 4. admins self-update binds existing email to request.auth.token.email
+  const adminsBlock = rulesNoComments.match(/match \/admins\/\{adminUid\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(adminsBlock);
+  assert.match(adminsBlock[0], /existing\(\)\.email == request\.auth\.token\.email/);
+});
 
 
 

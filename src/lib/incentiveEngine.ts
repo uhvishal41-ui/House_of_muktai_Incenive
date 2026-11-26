@@ -48,6 +48,23 @@ export interface BranchTransferCandidate {
   rowNumber: number;
 }
 
+export interface PendingSaleIdLinkCandidate {
+  employeeId: string;
+  masterFullName: string;
+  excelEmployeeName: string;
+  branchId: string;
+  branchName: string;
+  excelBranchName: string;
+  proposedSaleId: string;
+  matchBasis:
+    | 'EXACT_EMP_ID'
+    | 'EXACT_NAME_AND_BRANCH'
+    | 'UNIQUE_NAME_TOKENS_AND_BRANCH'
+    | 'UNIQUE_EXACT_NAME';
+  rowCount: number;
+  sampleRowNumber: number;
+}
+
 export interface PeriodOverlapDetail {
   conflictingRecordId: string;
   conflictingImportType: ImportType;
@@ -66,6 +83,8 @@ export interface ValidatedImportRow {
   employeeId: string;
   employeeName: string;
   excelEmployeeName: string;
+  matchedSaleId?: string;
+  matchedViaSaleIdLink?: boolean;
   branchId: string;
   branchName: string;
   branchCodeRaw: string;
@@ -102,6 +121,7 @@ export interface ImportPreviewMetrics {
   totalExcelRows: number;
   validEmployeeRows: number;
   newEmployeeCandidates: number;
+  pendingSaleIdLinksCount: number;
   existingEmployees: number;
   smplCandidates: number;
   blankRowsSkipped: number;
@@ -127,6 +147,7 @@ export interface ImportValidationResult {
   metrics: ImportPreviewMetrics;
   missingBranches: string[];
   newEmployeeCandidates: NewEmployeeCandidate[];
+  pendingSaleIdLinks: PendingSaleIdLinkCandidate[];
   branchTransfers: BranchTransferCandidate[];
   hasUnresolvedOverlaps: boolean;
   missingCorrectionReason: boolean;
@@ -145,9 +166,23 @@ const BRANCH_CANONICAL_ALIASES: Record<string, string> = {
   'BARAMATI-MOTIBAG': 'BARAMATI MOTIBAGH',
   BARAMATI_MOTIBAGH: 'BARAMATI MOTIBAGH',
   'BARAMATI-MOTIBAGH': 'BARAMATI MOTIBAGH',
+  'MOTI 1': 'BARAMATI MOTIBAGH',
+  MOTI1: 'BARAMATI MOTIBAGH',
+  MOTIBAG: 'BARAMATI MOTIBAGH',
+  MOTIBAGH: 'BARAMATI MOTIBAGH',
   BARAMATI_MIDC: 'BARAMATI MIDC',
   'BARAMATI-MIDC': 'BARAMATI MIDC',
+  MIDC: 'BARAMATI MIDC',
+  SMPL: 'BARAMATI MIDC',
+  BHOS: 'BHOSARI',
   OSMANABAD: 'DHARASHIV',
+  DHSV: 'DHARASHIV',
+  INDPR: 'INDAPUR',
+  LOND: 'LONAND',
+  PNDR: 'PANDHARPUR',
+  PRND: 'PARANDA',
+  RASH: 'RASHIN',
+  SGND: 'SHRIGONDA',
 };
 
 export function resolveCanonicalBranchName(raw: string): string {
@@ -176,6 +211,33 @@ export function isValidIsoDate(iso: string | null | undefined): iso is string {
   return Number.isInteger(d) && d >= 1 && d <= maxDay;
 }
 
+const MONTH_NAME_MAP: Record<string, string> = {
+  jan: '01',
+  january: '01',
+  feb: '02',
+  february: '02',
+  mar: '03',
+  march: '03',
+  apr: '04',
+  april: '04',
+  may: '05',
+  jun: '06',
+  june: '06',
+  jul: '07',
+  july: '07',
+  aug: '08',
+  august: '08',
+  sep: '09',
+  sept: '09',
+  september: '09',
+  oct: '10',
+  october: '10',
+  nov: '11',
+  november: '11',
+  dec: '12',
+  december: '12',
+};
+
 export function parseDmyToIsoStrict(raw: string): string | null {
   const cleaned = raw.trim();
   const isoMatch = cleaned.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
@@ -183,13 +245,62 @@ export function parseDmyToIsoStrict(raw: string): string | null {
     const candidate = `${isoMatch[1]}-${isoMatch[2].padStart(2, '0')}-${isoMatch[3].padStart(2, '0')}`;
     return isValidIsoDate(candidate) ? candidate : null;
   }
-  const dmyMatch = cleaned.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
-  if (!dmyMatch) return null;
-  const day = dmyMatch[1].padStart(2, '0');
-  const month = dmyMatch[2].padStart(2, '0');
-  const year = dmyMatch[3];
-  const candidate = `${year}-${month}-${day}`;
-  return isValidIsoDate(candidate) ? candidate : null;
+  const dmyMatch = cleaned.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/);
+  if (dmyMatch) {
+    const day = dmyMatch[1].padStart(2, '0');
+    const month = dmyMatch[2].padStart(2, '0');
+    const year = dmyMatch[3];
+    const candidate = `${year}-${month}-${day}`;
+    return isValidIsoDate(candidate) ? candidate : null;
+  }
+  const namedMatch = cleaned.match(/^(\d{1,2})[\s/-]+([a-zA-Z]{3,9})[\s,/-]+(\d{4})$/);
+  if (namedMatch) {
+    const mm = MONTH_NAME_MAP[namedMatch[2].toLowerCase()];
+    if (!mm) return null;
+    const candidate = `${namedMatch[3]}-${mm}-${namedMatch[1].padStart(2, '0')}`;
+    return isValidIsoDate(candidate) ? candidate : null;
+  }
+  return null;
+}
+
+/**
+ * Parses an Excel Date cell value (YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY, DD-MMM-YYYY,
+ * or numeric Excel serial date) strictly into an ISO YYYY-MM-DD date string.
+ */
+export function parseExcelDateCellToIso(
+  raw: string | number | Date | null | undefined,
+): string | null {
+  if (raw === null || raw === undefined) return null;
+  if (raw instanceof Date) {
+    if (Number.isNaN(raw.getTime())) return null;
+    const y = raw.getUTCFullYear();
+    const m = String(raw.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(raw.getUTCDate()).padStart(2, '0');
+    const iso = `${y}-${m}-${d}`;
+    return isValidIsoDate(iso) ? iso : null;
+  }
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    // Excel serial date range (roughly 2000-01-01 to 2100-12-31 -> 36526..73415)
+    if (raw >= 36526 && raw <= 73415) {
+      const utcMs = Date.UTC(1899, 11, 30) + Math.floor(raw) * 86400000;
+      const dt = new Date(utcMs);
+      const iso = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+      return isValidIsoDate(iso) ? iso : null;
+    }
+    return null;
+  }
+  const str = String(raw).trim();
+  if (!str) return null;
+  // Handle ISO timestamps like "2026-10-15T00:00:00.000Z"
+  const isoPrefix = str.match(/^(\d{4}-\d{2}-\d{2})[T\s]/);
+  if (isoPrefix) {
+    return isValidIsoDate(isoPrefix[1]) ? isoPrefix[1] : null;
+  }
+  // Numeric string representing Excel serial date
+  if (/^\d{5}(\.\d+)?$/.test(str)) {
+    return parseExcelDateCellToIso(Number(str));
+  }
+  return parseDmyToIsoStrict(str);
 }
 
 export function classifyImportPeriod(
@@ -419,15 +530,105 @@ export function validateImportBatch(params: {
   overlapReconcileReason?: string;
   overrides?: Record<number, { resolution: RowResolution; correctionReason: string }>;
 }): ImportValidationResult {
-  const period = classifyImportPeriod(params.periodStart, params.periodEnd, params.rawBannerDateText);
+  const hasDateColumn = Boolean(params.mapping.businessDate && params.mapping.businessDate.trim());
+  const parsedRowDates = hasDateColumn
+    ? params.rows.map((r) => parseExcelDateCellToIso(r.raw[params.mapping.businessDate]))
+    : [];
+  const validRowDatesSorted = hasDateColumn
+    ? parsedRowDates.filter((d): d is string => Boolean(d)).sort((a, b) => a.localeCompare(b))
+    : [];
+
+  const period: PeriodClassification = hasDateColumn
+    ? validRowDatesSorted.length > 0
+      ? {
+          valid: true,
+          importType: 'DAILY',
+          periodStart: validRowDatesSorted[0],
+          periodEnd: validRowDatesSorted[validRowDatesSorted.length - 1],
+          businessDate: validRowDatesSorted[validRowDatesSorted.length - 1],
+          errorCode: null,
+          errorMessage: null,
+        }
+      : {
+          valid: false,
+          importType: null,
+          periodStart: null,
+          periodEnd: null,
+          businessDate: null,
+          errorCode: 'MISSING_BANNER_DATE',
+          errorMessage: `No valid dates found in the "${params.mapping.businessDate}" column. Enter valid YYYY-MM-DD or DD-MM-YYYY dates in each row.`,
+        }
+    : classifyImportPeriod(params.periodStart, params.periodEnd, params.rawBannerDateText);
+
   const overrides = params.overrides || {};
   const overlapResolutionMode: OverlapResolutionMode = params.overlapResolutionMode || 'BLOCK';
   const overlapReconcileReason = (params.overlapReconcileReason || '').trim();
 
   const employeesById: Record<string, Employee> = {};
+  const employeesBySaleId: Record<string, Employee> = {};
+  const unlinkedByNameAndBranch = new Map<string, Employee[]>();
+  const unlinkedByTokensAndBranch = new Map<string, Employee[]>();
+  const unlinkedByName = new Map<string, Employee[]>();
+
+  const normalizeNameForMatch = (raw: string): string =>
+    String(raw || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const buildTokenSignature = (normName: string): string => {
+    const tokens = normName.split(' ').filter((t) => t.length > 0);
+    if (tokens.length < 2) return '';
+    return [...tokens].sort().join('|');
+  };
+
+  const pushMapItem = (map: Map<string, Employee[]>, key: string, emp: Employee) => {
+    if (!key) return;
+    const arr = map.get(key);
+    if (arr) arr.push(emp);
+    else map.set(key, [emp]);
+  };
+
   for (const emp of params.employees) {
-    employeesById[sanitizeId(emp.employeeId)] = emp;
+    employeesById[sanitizeId(emp.employeeId).toUpperCase()] = emp;
+    if (emp.saleId && emp.saleId.trim()) {
+      employeesBySaleId[sanitizeId(emp.saleId).toUpperCase()] = emp;
+    } else {
+      // Master employees who do NOT yet have a Sale ID are eligible for verified name-based Sale ID linking
+      const normName = normalizeNameForMatch(emp.fullName);
+      if (normName) {
+        pushMapItem(unlinkedByName, normName, emp);
+        if (emp.branchId) {
+          pushMapItem(unlinkedByNameAndBranch, `${normName}__${emp.branchId}`, emp);
+          const tokenSig = buildTokenSignature(normName);
+          if (tokenSig) {
+            pushMapItem(unlinkedByTokensAndBranch, `${tokenSig}__${emp.branchId}`, emp);
+          }
+        }
+      }
+    }
   }
+  const preferSaleIdLookup = /sell[\s_-]*(id|code|no)|sale[\s_-]*(id|code|no)|salesman/i.test(
+    params.mapping.employeeId || '',
+  );
+
+  // Also detect any unmapped ID columns in the sheet so if the user has both Employee ID and Sales ID columns and fills either one, it resolves seamlessly
+  const sampleRowKeys = params.rows[0] ? Object.keys(params.rows[0].raw) : [];
+  const autoEmpIdCol =
+    params.mapping.employeeId ||
+    sampleRowKeys.find((k) => /emp(loyee)?[\s_-]*(id|code|no)|staff[\s_-]*(id|code|no)|login[\s_-]*id/i.test(k)) ||
+    '';
+  const autoSaleIdCol =
+    params.mapping.saleId ||
+    sampleRowKeys.find(
+      (k) =>
+        k !== autoEmpIdCol &&
+        /sell[\s_-]*(id|code|no)|sale[\s_-]*(id|code|no)|salesman[\s_-]*(no|id|code)?|sales[\s_-]*(id|code|no)/i.test(
+          k,
+        ),
+    ) ||
+    '';
 
   const branchesByKey: Record<string, Branch> = {};
   for (const b of params.branches) {
@@ -453,20 +654,24 @@ export function validateImportBatch(params: {
 
   const missingBranchSet = new Set<string>();
   const newCandidateMap = new Map<string, NewEmployeeCandidate>();
+  const pendingSaleIdLinkMap = new Map<string, PendingSaleIdLinkCandidate>();
+  const claimedSaleIdToEmpId = new Map<string, string>();
+  const claimedEmpIdToSaleId = new Map<string, string>();
   const branchTransfers: BranchTransferCandidate[] = [];
   const existingEmployeeIdsInFile = new Set<string>();
   const smplCandidateIds = new Set<string>();
   const seenKeys = new Set<string>();
 
-  const effectiveImportType: ImportType = period.importType || 'DAILY';
-  const effectiveStart = period.periodStart || '';
-  const effectiveEnd = period.periodEnd || '';
-  // For DAILY, businessDate is the exact day. For MONTHLY / CUSTOM_PERIOD, businessDate carries periodEnd only for storage sort compatibility.
-  const effectiveBusinessDate =
-    effectiveImportType === 'DAILY' ? effectiveStart : effectiveEnd;
+  const fallbackImportType: ImportType = period.importType || 'DAILY';
+  const fallbackStart = period.periodStart || '';
+  const fallbackEnd = period.periodEnd || '';
+  const fallbackBusinessDate = fallbackImportType === 'DAILY' ? fallbackStart : fallbackEnd;
 
-  const validatedRows: ValidatedImportRow[] = params.rows.map((row) => {
-    const rawEmpId = params.mapping.employeeId ? row.raw[params.mapping.employeeId] : null;
+  const VALID_SALE_ID_RE = /^[A-Z0-9_-]{1,40}$/;
+
+  const validatedRows: ValidatedImportRow[] = params.rows.map((row, rowIdx) => {
+    const rawEmpId = autoEmpIdCol ? row.raw[autoEmpIdCol] : null;
+    const rawSaleId = autoSaleIdCol ? row.raw[autoSaleIdCol] : null;
     const rawEmpName = params.mapping.employeeName ? row.raw[params.mapping.employeeName] : null;
     const rawBranch = params.mapping.branchCode ? row.raw[params.mapping.branchCode] : null;
     const rawC1 = params.mapping.component1 ? row.raw[params.mapping.component1] : null;
@@ -479,15 +684,23 @@ export function validateImportBatch(params: {
     const rawSaleAmt3 = params.mapping.saleAmt3 ? row.raw[params.mapping.saleAmt3] : null;
     const rawSaleQty3 = params.mapping.saleQty3 ? row.raw[params.mapping.saleQty3] : null;
 
-    const employeeId =
+    const rowDateIso = hasDateColumn ? parsedRowDates[rowIdx] : null;
+    const effectiveImportType: ImportType = hasDateColumn ? 'DAILY' : fallbackImportType;
+    const effectiveStart = hasDateColumn ? rowDateIso || '' : fallbackStart;
+    const effectiveEnd = hasDateColumn ? rowDateIso || '' : fallbackEnd;
+    const effectiveBusinessDate = hasDateColumn ? rowDateIso || '' : fallbackBusinessDate;
+    const rowPeriodValid = hasDateColumn ? Boolean(rowDateIso) : period.valid;
+
+    const empIdToken =
       rawEmpId !== null && rawEmpId !== undefined ? sanitizeId(String(rawEmpId)) : '';
+    const saleIdToken =
+      rawSaleId !== null && rawSaleId !== undefined ? sanitizeId(String(rawSaleId)) : '';
+    const empIdUpper = empIdToken.toUpperCase();
+    const saleIdUpper = saleIdToken.toUpperCase();
+    const rawIdToken = empIdToken || saleIdToken;
     const excelEmployeeName = rawEmpName ? String(rawEmpName).trim() : '';
     const branchCodeRaw = rawBranch ? String(rawBranch).trim() : '';
     const isSmplCandidate = isSmplCandidateName(excelEmployeeName);
-
-    if (isSmplCandidate && employeeId) {
-      smplCandidateIds.add(employeeId);
-    }
 
     const bKey = resolveCanonicalBranchName(branchCodeRaw);
     const rawKey = normalizeBranchKey(branchCodeRaw);
@@ -502,16 +715,171 @@ export function validateImportBatch(params: {
       missingBranchSet.add(bKey);
     }
 
-    // Strict matching strictly by permanent Salesman No (employeeId) — NEVER by name
-    const employee = employeeId ? employeesById[employeeId] : undefined;
-    const isNewCandidate = Boolean(employeeId && !employee);
+    // 1. Direct Dual-ID matching: checks Employee ID column AND Sales ID column (either or both can be filled)
+    let employee: Employee | undefined;
+    let matchedSaleId: string | undefined;
+    let matchedViaSaleIdLink = false;
+
+    if (empIdUpper) {
+      if (preferSaleIdLookup) {
+        if (employeesBySaleId[empIdUpper]) {
+          employee = employeesBySaleId[empIdUpper];
+          matchedSaleId = empIdUpper;
+        } else if (employeesById[empIdUpper]) {
+          employee = employeesById[empIdUpper];
+        }
+      } else {
+        if (employeesById[empIdUpper]) {
+          employee = employeesById[empIdUpper];
+        } else if (employeesBySaleId[empIdUpper]) {
+          employee = employeesBySaleId[empIdUpper];
+          matchedSaleId = empIdUpper;
+        }
+      }
+    }
+    if (!employee && saleIdUpper) {
+      if (employeesBySaleId[saleIdUpper]) {
+        employee = employeesBySaleId[saleIdUpper];
+        matchedSaleId = saleIdUpper;
+      } else if (employeesById[saleIdUpper]) {
+        employee = employeesById[saleIdUpper];
+      }
+    }
+
+    // 1b. If matched directly by EMP ID, and Excel ALSO has a Sales ID while Master has no Sale ID yet, propose verified Sale ID link
+    if (
+      employee &&
+      saleIdUpper &&
+      (!employee.saleId || !employee.saleId.trim()) &&
+      VALID_SALE_ID_RE.test(saleIdUpper) &&
+      !employeesBySaleId[saleIdUpper]
+    ) {
+      const existingSaleOwner = claimedSaleIdToEmpId.get(saleIdUpper);
+      const existingEmpSale = claimedEmpIdToSaleId.get(employee.employeeId.toUpperCase());
+      if (
+        (!existingSaleOwner || existingSaleOwner === employee.employeeId.toUpperCase()) &&
+        (!existingEmpSale || existingEmpSale === saleIdUpper)
+      ) {
+        claimedSaleIdToEmpId.set(saleIdUpper, employee.employeeId.toUpperCase());
+        claimedEmpIdToSaleId.set(employee.employeeId.toUpperCase(), saleIdUpper);
+        matchedSaleId = saleIdUpper;
+        matchedViaSaleIdLink = true;
+        const linkKey = employee.employeeId.toUpperCase();
+        const prevLink = pendingSaleIdLinkMap.get(linkKey);
+        if (prevLink) {
+          prevLink.rowCount += 1;
+        } else {
+          pendingSaleIdLinkMap.set(linkKey, {
+            employeeId: employee.employeeId,
+            masterFullName: employee.fullName,
+            excelEmployeeName: excelEmployeeName || employee.fullName,
+            branchId: employee.branchId,
+            branchName: employee.branchName,
+            excelBranchName: matchedBranch?.branchName || bKey || employee.branchName,
+            proposedSaleId: saleIdUpper,
+            matchBasis: 'EXACT_EMP_ID',
+            rowCount: 1,
+            sampleRowNumber: row.rowNumber,
+          });
+        }
+      }
+    }
+
+    // 2. Smart Name-Verified Auto-Link:
+    // If Excel only has Sales ID (Employee ID blank or unmapped) and Master has this employee by EMP ID WITHOUT a Sale ID yet,
+    // match strictly uniquely by Name (+ Branch) with zero ambiguity/collision and propose linking Sale ID to Master!
+    const candidateSaleId = saleIdUpper || empIdUpper;
+    if (
+      !employee &&
+      candidateSaleId &&
+      VALID_SALE_ID_RE.test(candidateSaleId) &&
+      !employeesBySaleId[candidateSaleId]
+    ) {
+      const alreadyClaimedEmpId = claimedSaleIdToEmpId.get(candidateSaleId);
+      if (alreadyClaimedEmpId && employeesById[alreadyClaimedEmpId]) {
+        employee = employeesById[alreadyClaimedEmpId];
+        matchedSaleId = candidateSaleId;
+        matchedViaSaleIdLink = true;
+        const prevLink = pendingSaleIdLinkMap.get(alreadyClaimedEmpId);
+        if (prevLink) prevLink.rowCount += 1;
+      } else if (excelEmployeeName) {
+        const normName = normalizeNameForMatch(excelEmployeeName);
+        if (normName) {
+          let resolvedCandidate: Employee | undefined;
+          let matchBasis: PendingSaleIdLinkCandidate['matchBasis'] | undefined;
+
+          if (matchedBranch) {
+            const byNameBranch = unlinkedByNameAndBranch.get(`${normName}__${matchedBranch.branchId}`);
+            if (byNameBranch && byNameBranch.length === 1) {
+              resolvedCandidate = byNameBranch[0];
+              matchBasis = 'EXACT_NAME_AND_BRANCH';
+            } else {
+              const tokenSig = buildTokenSignature(normName);
+              const byTokensBranch = tokenSig
+                ? unlinkedByTokensAndBranch.get(`${tokenSig}__${matchedBranch.branchId}`)
+                : undefined;
+              if (byTokensBranch && byTokensBranch.length === 1) {
+                resolvedCandidate = byTokensBranch[0];
+                matchBasis = 'UNIQUE_NAME_TOKENS_AND_BRANCH';
+              }
+            }
+          }
+
+          if (!resolvedCandidate) {
+            const byExactName = unlinkedByName.get(normName);
+            if (byExactName && byExactName.length === 1) {
+              resolvedCandidate = byExactName[0];
+              matchBasis = 'UNIQUE_EXACT_NAME';
+            }
+          }
+
+          if (resolvedCandidate && matchBasis) {
+            const empKey = resolvedCandidate.employeeId.toUpperCase();
+            const existingEmpSale = claimedEmpIdToSaleId.get(empKey);
+            // Zero-collision guard: never link two different Sale IDs to the same Master employee
+            if (!existingEmpSale || existingEmpSale === candidateSaleId) {
+              employee = resolvedCandidate;
+              matchedSaleId = candidateSaleId;
+              matchedViaSaleIdLink = true;
+              claimedSaleIdToEmpId.set(candidateSaleId, empKey);
+              claimedEmpIdToSaleId.set(empKey, candidateSaleId);
+              const prevLink = pendingSaleIdLinkMap.get(empKey);
+              if (prevLink) {
+                prevLink.rowCount += 1;
+              } else {
+                pendingSaleIdLinkMap.set(empKey, {
+                  employeeId: resolvedCandidate.employeeId,
+                  masterFullName: resolvedCandidate.fullName,
+                  excelEmployeeName,
+                  branchId: resolvedCandidate.branchId,
+                  branchName: resolvedCandidate.branchName,
+                  excelBranchName: matchedBranch?.branchName || bKey || resolvedCandidate.branchName,
+                  proposedSaleId: candidateSaleId,
+                  matchBasis,
+                  rowCount: 1,
+                  sampleRowNumber: row.rowNumber,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const employeeId = employee ? employee.employeeId : rawIdToken;
+
+    if (isSmplCandidate && employeeId) {
+      smplCandidateIds.add(employeeId);
+    }
+
+    const isNewCandidate = Boolean(rawIdToken && !employee);
 
     if (employee) {
       existingEmployeeIdsInFile.add(employee.employeeId);
-    } else if (employeeId && !newCandidateMap.has(employeeId)) {
-      newCandidateMap.set(employeeId, {
-        salesmanNo: employeeId,
-        salesPersonName: excelEmployeeName || `Salesman ${employeeId}`,
+    } else if (rawIdToken && !newCandidateMap.has(rawIdToken)) {
+      newCandidateMap.set(rawIdToken, {
+        salesmanNo: rawIdToken,
+        salesPersonName: excelEmployeeName || `Employee ${rawIdToken}`,
         erpBranchName: bKey,
         isSmplCandidate,
       });
@@ -528,15 +896,24 @@ export function validateImportBatch(params: {
     const sq3 = params.mapping.saleQty3 ? parseOptionalQty(rawSaleQty3) : 0;
 
     const hardErrors: string[] = [];
-    if (!period.valid) {
-      hardErrors.push(period.errorMessage || 'Invalid or missing Excel banner date range');
+    if (hasDateColumn) {
+      if (!rowDateIso) {
+        const rawDateDisplay = String(row.raw[params.mapping.businessDate] ?? '').trim();
+        hardErrors.push(
+          rawDateDisplay
+            ? `Invalid Date "${rawDateDisplay}" in "${params.mapping.businessDate}" column (use YYYY-MM-DD or DD-MM-YYYY)`
+            : `Missing Date in "${params.mapping.businessDate}" column`,
+        );
+      }
+    } else if (!period.valid) {
+      hardErrors.push(period.errorMessage || 'Invalid or missing Excel date');
     }
     if (!employeeId) {
-      hardErrors.push('Missing Salesman No / Employee ID');
+      hardErrors.push('Missing Employee ID / Sales ID');
     }
     if (employeeId && !employee) {
       hardErrors.push(
-        `Salesman No "${employeeId}" (${excelEmployeeName || 'Unknown'}) is a new candidate — register in Employee Master (with explicit Super Admin Active/Inactive status) before publishing`,
+        `Employee ID / Sales ID "${employeeId}" (${excelEmployeeName || 'Unknown'}) is a new candidate — register in Employee Master (with explicit Super Admin Active/Inactive status) before publishing`,
       );
     } else if (employee && employee.status !== 'ACTIVE') {
       hardErrors.push(
@@ -576,7 +953,7 @@ export function validateImportBatch(params: {
     const totalSaleQty = Math.round((safeSq1 + safeSq2 + safeSq3) * 100) / 100;
 
     const recordKey =
-      period.valid && employeeId
+      rowPeriodValid && employeeId
         ? getIncentiveRecordKey(effectiveImportType, effectiveStart, effectiveEnd, employeeId)
         : '';
 
@@ -597,7 +974,7 @@ export function validateImportBatch(params: {
     }
 
     const overlapConflicts =
-      period.valid && employeeId && hardErrors.length === 0
+      rowPeriodValid && employeeId && hardErrors.length === 0
         ? detectPeriodOverlapsForEmployee({
             employeeId,
             incomingImportType: effectiveImportType,
@@ -621,11 +998,11 @@ export function validateImportBatch(params: {
     } else if (hasBranchTransfer && employee && matchedBranch) {
       validationStatus = 'BRANCH_TRANSFER';
       defaultResolution = 'SKIP';
-      errorMessage = `Branch transfer warning: Employee Master has ${employee.branchName}, Excel has ${matchedBranch.branchName}. Super Admin must explicitly approve transfer before publishing.`;
+      errorMessage = `Branch transfer detected: Master has ${employee.branchName}, template has ${matchedBranch.branchName}. Approve transfer to move employee & carry forward previous branch incentives into ${matchedBranch.branchName}.`;
     } else if (seenKeys.has(recordKey)) {
       validationStatus = 'DUPLICATE_IN_FILE';
       defaultResolution = 'SKIP';
-      errorMessage = `Duplicate record for Salesman No ${employeeId} (${effectiveImportType} ${effectiveStart} to ${effectiveEnd}) inside uploaded file`;
+      errorMessage = `Duplicate record for Employee ID ${employeeId} (${effectiveImportType} ${effectiveStart}${effectiveStart === effectiveEnd ? '' : ` to ${effectiveEnd}`}) inside uploaded file`;
     } else if (overlapConflicts.length > 0) {
       seenKeys.add(recordKey);
       validationStatus = 'PERIOD_OVERLAP';
@@ -669,6 +1046,8 @@ export function validateImportBatch(params: {
       employeeId,
       employeeName: employee?.fullName || excelEmployeeName || '—',
       excelEmployeeName,
+      ...(matchedSaleId ? { matchedSaleId } : {}),
+      ...(matchedViaSaleIdLink ? { matchedViaSaleIdLink: true } : {}),
       branchId: employee?.branchId || matchedBranch?.branchId || '',
       branchName: employee?.branchName || matchedBranch?.branchName || branchCodeRaw || '—',
       branchCodeRaw,
@@ -775,6 +1154,7 @@ export function validateImportBatch(params: {
       totalExcelRows: params.rawTotalRows,
       validEmployeeRows,
       newEmployeeCandidates: newCandidateMap.size,
+      pendingSaleIdLinksCount: pendingSaleIdLinkMap.size,
       existingEmployees: existingEmployeeIdsInFile.size,
       smplCandidates: smplCandidateIds.size,
       blankRowsSkipped: params.skippedBlankRows,
@@ -794,6 +1174,7 @@ export function validateImportBatch(params: {
     },
     missingBranches: Array.from(missingBranchSet),
     newEmployeeCandidates: Array.from(newCandidateMap.values()),
+    pendingSaleIdLinks: Array.from(pendingSaleIdLinkMap.values()),
     branchTransfers,
     hasUnresolvedOverlaps,
     missingCorrectionReason,
@@ -1201,5 +1582,131 @@ export function canEmployeeLogin(employee: Employee | null | undefined): Employe
     allowed: true,
     code: 'OK',
     message: 'Access granted.',
+  };
+}
+
+// --- BRANCH TRANSFER INCENTIVE CONSOLIDATION (PREVIOUS BRANCH -> CURRENT BRANCH) ---
+
+export interface BranchTransferConsolidationPlan {
+  employeeId: string;
+  previousBranchId: string;
+  previousBranchName: string;
+  newBranchId: string;
+  newBranchName: string;
+  affectedMonthKeys: string[];
+  recordsToMigrate: PublishedIncentive[];
+  migratedIncentivePaise: number;
+  migratedSaleAmtPaise: number;
+  migratedSaleQty: number;
+  updatedMonthlySummaries: MonthlySummary[];
+}
+
+/**
+ * Pure planner for consolidating a transferred employee's previous-branch incentives into
+ * their NEW current branch without any double counting.
+ *
+ * When `targetMonthKeys` is provided (e.g. from the uploaded template's Date column),
+ * all active PUBLISHED incentives in those month(s) currently attributed to another branch
+ * are re-attributed to the employee's new current branch and monthly summaries are rebuilt
+ * under the new branch so current branch totals seamlessly include previous branch incentives.
+ */
+export function planBranchTransferConsolidation(params: {
+  employee: Employee;
+  newBranchId: string;
+  newBranchName: string;
+  publishedIncentives: PublishedIncentive[];
+  targetMonthKeys?: string[];
+  now?: string;
+}): BranchTransferConsolidationPlan {
+  const cleanEmp = sanitizeId(params.employee.employeeId);
+  const now = params.now || new Date().toISOString();
+  const normalizedTargetMonths = Array.from(
+    new Set(
+      (params.targetMonthKeys || [])
+        .map((m) => m.trim())
+        .filter((m) => /^\d{4}-\d{2}$/.test(m)),
+    ),
+  );
+  const targetMonthSet = normalizedTargetMonths.length > 0 ? new Set(normalizedTargetMonths) : null;
+
+  const employeePublished = params.publishedIncentives.filter(
+    (r) => r.status === 'PUBLISHED' && sanitizeId(r.employeeId) === cleanEmp,
+  );
+
+  // If no explicit target months were passed, default to the employee's latest published month
+  let effectiveMonthSet = targetMonthSet;
+  if (!effectiveMonthSet && employeePublished.length > 0) {
+    const latestMonth = employeePublished
+      .map((r) => r.monthKey)
+      .filter((m) => /^\d{4}-\d{2}$/.test(m))
+      .sort((a, b) => b.localeCompare(a))[0];
+    if (latestMonth) {
+      effectiveMonthSet = new Set([latestMonth]);
+    }
+  }
+
+  const recordsToMigrate: PublishedIncentive[] = [];
+  const affectedMonthSet = new Set<string>(normalizedTargetMonths);
+
+  for (const rec of employeePublished) {
+    if (effectiveMonthSet && !effectiveMonthSet.has(rec.monthKey)) continue;
+    if (rec.branchId !== params.newBranchId || rec.branchName !== params.newBranchName) {
+      recordsToMigrate.push({
+        ...rec,
+        branchId: params.newBranchId,
+        branchName: params.newBranchName,
+      });
+      affectedMonthSet.add(rec.monthKey);
+    }
+  }
+
+  const migratedIds = new Set(recordsToMigrate.map((r) => r.recordId));
+  const postMigrationRecords = params.publishedIncentives.map((r) =>
+    migratedIds.has(r.recordId)
+      ? { ...r, branchId: params.newBranchId, branchName: params.newBranchName }
+      : r,
+  );
+
+  const migratedEmployee: Employee = {
+    ...params.employee,
+    branchId: params.newBranchId,
+    branchName: params.newBranchName,
+    updatedAt: now,
+  };
+
+  const affectedMonthKeys = Array.from(affectedMonthSet).sort((a, b) => b.localeCompare(a));
+  const updatedMonthlySummaries: MonthlySummary[] = [];
+  for (const mk of affectedMonthKeys) {
+    const summary = buildMonthlySummaryDocument({
+      records: postMigrationRecords,
+      employee: migratedEmployee,
+      monthKey: mk,
+      now,
+    });
+    if (summary.sourceType !== 'NO_DATA') {
+      updatedMonthlySummaries.push(summary);
+    }
+  }
+
+  const migratedIncentivePaise = recordsToMigrate.reduce((acc, r) => acc + r.totalPaise, 0);
+  const migratedSaleAmtPaise = recordsToMigrate.reduce(
+    (acc, r) => acc + (r.totalSaleAmtPaise || 0),
+    0,
+  );
+  const migratedSaleQty =
+    Math.round(recordsToMigrate.reduce((acc, r) => acc + (r.totalSaleQty || 0), 0) * 100) / 100;
+
+  return {
+    employeeId: params.employee.employeeId,
+    previousBranchId: params.employee.branchId,
+    previousBranchName: params.employee.branchName,
+    newBranchId: params.newBranchId,
+    newBranchName: params.newBranchName,
+    affectedMonthKeys,
+    recordsToMigrate,
+    migratedIncentivePaise,
+    migratedSaleAmtPaise,
+    migratedSaleQty,
+    updatedMonthlySummaries,
   };
 }

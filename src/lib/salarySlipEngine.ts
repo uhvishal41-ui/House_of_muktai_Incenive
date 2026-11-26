@@ -3,6 +3,7 @@ import {
   resolveCanonicalDepartment,
   type OfficialDepartment,
 } from './departmentLeaderboardEngine';
+import { resolveCanonicalBranchName } from './incentiveEngine';
 import type {
   DepartmentId,
   Employee,
@@ -14,12 +15,111 @@ export function buildSalarySlipId(monthKey: string, employeeId: string): string 
   return `${monthKey.trim()}__${employeeId.trim()}`.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
+const EXCEL_ERROR_TOKEN_RE = /^(#N\/A|#REF!|#VALUE!|#NAME\?|#DIV\/0!|#NUM!|#NULL!|N\/A|NA|-|--)$/i;
+
+const NON_SALE_ID_KEYWORDS = new Set([
+  'BILLING',
+  'HELPER',
+  'MANAGER',
+  'MANGR',
+  'SM',
+  'HK',
+  'HOUSEKEEPING',
+  'DRIVER',
+  'DRVIER',
+  'INVENTOR',
+  'INVENTORY',
+  'SALE',
+  'SALES',
+  'NEW',
+  'LEFT',
+  'NONE',
+  'NIL',
+  'NA',
+  'CASHIER',
+  'SECURITY',
+  'CLEANER',
+  'TAILOR',
+  'OFFICE',
+  'HO',
+  'ADMIN',
+  'HR',
+  'ACCOUNT',
+  'ACCOUNTS',
+  'STORE',
+  'TRAINEE',
+  'ONROLL',
+  'SUPERVISOR',
+  'WATCHMAN',
+  'PEON',
+  'GUARD',
+  'PACKING',
+  'DISPATCH',
+  'GODOWN',
+  'RECEPTION',
+  'MARKETING',
+  'TELECALLER',
+  'AUDIT',
+  'IT',
+  'EDP',
+  'FLOOR',
+  'FLOORMANAGER',
+  'ASST',
+  'ASSISTANT',
+  'STAFF',
+  'EMPLOYEE',
+  'EMP',
+  'WORKER',
+  'OTHER',
+  'MISC',
+  'TEMP',
+  'TEMPORARY',
+  'INTERN',
+  'CEO',
+  'MD',
+  'DIRECTOR',
+  'OWNER',
+]);
+
 /**
- * Privacy-safe bank account masking: converts full account numbers (e.g. 123456789012)
- * into `XXXX9012`, while keeping already-masked values intact.
+ * Cleans Excel formula error tokens (`#N/A`, `#REF!`, `#VALUE!`, `N/A`, `-`, `--`)
+ * into clean blank strings so they never pollute Employee Master or PDF Salary Slips.
+ */
+export function cleanExcelTextCell(raw: unknown): string {
+  const s = String(raw ?? '').trim();
+  if (!s || EXCEL_ERROR_TOKEN_RE.test(s)) return '';
+  return s;
+}
+
+/**
+ * Sanitizes a raw POS `SELL ID` / `Sale ID` cell:
+ * - Strips Excel numeric `.00` suffixes (e.g. `2216.00` -> `2216`, `0.00` -> `""`)
+ * - Ignores Excel error tokens (`#N/A`) and non-ID role/designation labels (`BILLING`, `HELPER`, `HK`, `MANAGER`, `NEW`, etc.)
+ */
+export function sanitizeSaleIdCell(raw: unknown): string {
+  const text = cleanExcelTextCell(raw);
+  if (!text) return '';
+  // Strip trailing .0 / .00 from Excel numeric export (e.g., "2216.00" -> "2216")
+  const withoutTrailingDecimal = text.replace(/^(\d+)\.0+$/, '$1');
+  const compact = withoutTrailingDecimal
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '')
+    .slice(0, 40);
+  if (!compact || /^0+$/.test(compact) || NON_SALE_ID_KEYWORDS.has(compact)) {
+    return '';
+  }
+  return compact;
+}
+
+/**
+ * Privacy-safe bank account masking: converts full account numbers (e.g. 123456789012 or 44035408025.00)
+ * into `XXXX9012` / `XXXX8025`, while keeping already-masked values intact and ignoring `#N/A`.
  */
 export function maskBankAccountNumber(raw?: string | null): string {
-  const cleaned = String(raw || '').trim().replace(/\s+/g, '');
+  const base = cleanExcelTextCell(raw);
+  if (!base) return '';
+  const cleaned = base.replace(/\s+/g, '').replace(/^(\d+)\.0+$/, '$1');
   if (!cleaned) return '';
   if (/^X+\d{2,6}$/i.test(cleaned)) {
     return cleaned.toUpperCase().slice(0, 32);
@@ -105,11 +205,13 @@ export function paiseToIndianWords(paise: number): string {
 }
 
 export function normalizeSalaryPaymentMode(raw?: string | null): SalarySlipPaymentMode {
-  const compact = String(raw || '')
-    .trim()
+  const cleaned = cleanExcelTextCell(raw);
+  if (!cleaned) return '';
+  const compact = cleaned
     .toUpperCase()
     .replace(/[^A-Z]/g, '');
   if (!compact) return '';
+  if (compact === 'DCR' || compact.includes('DIRECTCREDIT')) return 'DCR';
   if (compact.includes('NEFT') || compact.includes('RTGS') || compact.includes('IMPS')) return 'NEFT';
   if (compact.includes('BANK') || compact.includes('TRANSFER') || compact.includes('ACCOUNT')) return 'BANK';
   if (compact.includes('UPI') || compact.includes('GPAY') || compact.includes('PHONEPE')) return 'UPI';
@@ -170,20 +272,35 @@ export function normalizeMonthKeyFromCell(raw?: string | null, fallbackMonthKey 
   return fallbackMonthKey;
 }
 
+export type SalaryRowErrorCode =
+  | 'EMPLOYEE_NOT_FOUND'
+  | 'INVALID_MONTH'
+  | 'DUPLICATE_IN_FILE'
+  | 'INVALID_ATTENDANCE'
+  | 'INVALID_MONEY'
+  | 'ZERO_GROSS'
+  | 'NEGATIVE_NET'
+  | 'INVALID_DEPARTMENT';
+
 export interface ParsedSalaryRow {
   rowNumber: number;
   status: 'VALID' | 'ERROR' | 'DUPLICATE_IN_FILE';
+  errorCode?: SalaryRowErrorCode;
   errorMessage: string;
   monthKey: string;
   employeeId: string;
+  saleId: string;
   matchedEmployee: Employee | null;
   employeeName: string;
   branchId: string;
   branchName: string;
+  rawBranch: string;
   resolvedDepartment: OfficialDepartment | null;
   customDepartmentName: string;
   rawDepartment: string;
   designation: string;
+  gender: string;
+  category: string;
   dateOfJoining: string;
   panNumber: string;
   uanNumber: string;
@@ -193,11 +310,15 @@ export interface ParsedSalaryRow {
   bankAccountMasked: string;
   bankIfsc: string;
   totalDays: number;
+  presentDays: number;
   paidDays: number;
   lopDays: number;
   weeklyOffDays: number;
   paidLeaveDays: number;
+  overtimeDays: number;
   overtimeHours: number;
+  monthlySalaryRatePaise: number;
+  monthlyGrossRatePaise: number;
   basicPaise: number;
   dearnessAllowancePaise: number;
   hraPaise: number;
@@ -207,22 +328,28 @@ export interface ParsedSalaryRow {
   medicalAllowancePaise: number;
   leaveTravelAllowancePaise: number;
   communicationExpensesPaise: number;
+  healthClubAllowancePaise: number;
   adhocAllowancePaise: number;
   travelingAllowancePaise: number;
   salesCommissionPaise: number;
   specialAllowancePaise: number;
   overtimePaise: number;
   incentivePaise: number;
+  arrearsPaise: number;
   otherEarningsPaise: number;
   grossEarningsPaise: number;
   pfPaise: number;
   esicPaise: number;
   ptPaise: number;
+  lwfPaise: number;
   advanceRecoveryPaise: number;
   tdsPaise: number;
+  penaltyPaise: number;
+  insurancePaise: number;
   otherDeductionPaise: number;
   totalDeductionsPaise: number;
   netPayablePaise: number;
+  sheetCrossCheckWarning: string;
   paymentMode: SalarySlipPaymentMode;
   paymentReference: string;
   paymentDate: string;
@@ -315,12 +442,14 @@ export function normalizeDateCellToIso(raw: unknown): string {
 }
 
 const SALARY_HEADER_SIGNALS = [
-  'salesmanno',
   'employeeid',
   'empid',
   'empcode',
   'staffid',
   'loginid',
+  'sellid',
+  'saleid',
+  'salesmanno',
   'employeename',
   'salespersonname',
   'basicsalary',
@@ -328,27 +457,50 @@ const SALARY_HEADER_SIGNALS = [
   'basic',
   'dearnessallowance',
   'hra',
+  'attendanceallow',
   'attendanceallowance',
+  'washingallow',
   'washingallowance',
   'convenienceallowance',
+  'conveyanceallow',
   'conveyanceallowance',
+  'medicalallow',
   'medicalallowance',
+  'ltaallow',
   'leavetravelallowance',
+  'commexpense',
   'communicationexpanses',
   'communicationexpenses',
+  'healthcluballow',
+  'healthcluballowance',
+  'advochallow',
   'adhocallowance',
+  'travallingallowance',
   'travelingallowance',
   'travellingallowance',
+  'salescommision',
   'salescommotion',
   'salescommission',
+  'insentive',
+  'arrears',
+  'earngross',
   'department',
+  'monthsday',
+  'presentdays',
   'paiddays',
   'totaldays',
+  'otdays',
   'gross',
   'netpay',
   'netsalary',
   'pfdeduction',
+  'providentfund',
+  'profetionaltax',
   'professionaltax',
+  'lwf',
+  'penalty',
+  'insurance',
+  'totaldeduction',
   'paymonth',
 ];
 
@@ -412,21 +564,30 @@ export function parseSalarySheetRows(
       }
     }
 
-    const rawEmpId = String(
+    // Strict Salary matching: Prioritize official EMP ID / Employee ID — NEVER confuse with SELL ID when EMP ID is present
+    const rawEmpId = cleanExcelTextCell(
       pickCellValue(
         normMap,
-        ['salesmanno', 'employeeid', 'empid', 'empcode', 'staffid', 'loginid', 'id'],
-        ['salesmanno', 'employeeid', 'empid', 'empcode', 'staffid', 'loginid'],
+        ['employeeid', 'empid', 'empcode', 'staffid', 'loginid', 'salesmanno', 'id'],
+        ['employeeid', 'empid', 'empcode', 'staffid', 'loginid', 'salesmanno'],
+        ['sell', 'sale'],
       ),
-    ).trim();
-    const rawName = String(
+    );
+    const rawSaleId = sanitizeSaleIdCell(
       pickCellValue(
         normMap,
-        ['employeename', 'salespersonname', 'fullname', 'staffname', 'name'],
-        ['employeename', 'salespersonname', 'fullname', 'staffname'],
+        ['sellid', 'saleid', 'sellcode', 'salecode', 'salesmanno', 'salesmancode'],
+        ['sellid', 'saleid', 'salesmanno', 'salesmancode'],
+      ),
+    );
+    const rawName = cleanExcelTextCell(
+      pickCellValue(
+        normMap,
+        ['employeename', 'empname', 'salespersonname', 'fullname', 'staffname', 'name'],
+        ['employeename', 'empname', 'salespersonname', 'fullname', 'staffname'],
         ['branch', 'bank', 'dept', 'department'],
       ),
-    ).trim();
+    );
 
     // Skip blank or subtotal/total rows automatically
     const compactId = rawEmpId.toLowerCase();
@@ -441,109 +602,137 @@ export function parseSalarySheetRows(
       continue;
     }
 
-    const rawMonth = String(
+    const rawMonth = cleanExcelTextCell(
       pickCellValue(
         normMap,
         ['paymonth', 'monthkey', 'salarymonth', 'month'],
         ['paymonth', 'monthkey', 'salarymonth'],
+        ['day', 'gross'],
       ),
-    ).trim();
+    );
     const monthKey = normalizeMonthKeyFromCell(rawMonth, defaultMonthKey);
     const matched =
       empById.get(rawEmpId.toUpperCase()) || empByLogin.get(rawEmpId.toUpperCase()) || null;
 
-    const rawDepartment = String(
+    const rawBranchCell = cleanExcelTextCell(
       pickCellValue(
         normMap,
-        ['department', 'deptname', 'dept', 'section'],
+        ['branch', 'branchname', 'branchcode', 'location', 'showroom', 'store'],
+        ['branchname', 'branchcode', 'branch'],
+      ),
+    );
+    const rawBranch = rawBranchCell ? resolveCanonicalBranchName(rawBranchCell) : '';
+
+    const rawDepartmentCandidate = cleanExcelTextCell(
+      pickCellValue(
+        normMap,
+        ['department', 'deptname', 'dept', 'dep', 'section'],
         ['department', 'deptname', 'section'],
       ),
-    ).trim();
+    );
+    // Ignore status tags like "LEFT" inside the DEP column so we never overwrite real departments
+    const rawDepartment =
+      rawDepartmentCandidate.toUpperCase() === 'LEFT' ? '' : rawDepartmentCandidate;
     const resolvedDepartment = resolveCanonicalDepartment(rawDepartment);
 
-    const designation = String(
+    const designation = cleanExcelTextCell(
       pickCellValue(
         normMap,
         ['designation', 'role', 'post', 'position'],
         ['designation', 'position'],
       ),
-    )
-      .trim()
-      .slice(0, 80);
+    ).slice(0, 80);
+    const gender = cleanExcelTextCell(
+      pickCellValue(normMap, ['gender', 'sex'], ['gender']),
+    ).slice(0, 20);
+    const category = cleanExcelTextCell(
+      pickCellValue(normMap, ['category', 'empcategory', 'staffcategory'], ['category']),
+    ).slice(0, 40);
     const dateOfJoining = normalizeDateCellToIso(
-      pickCellValue(
-        normMap,
-        ['dateofjoining', 'doj', 'joiningdate', 'joindate'],
-        ['dateofjoining', 'joiningdate', 'joindate'],
+      cleanExcelTextCell(
+        pickCellValue(
+          normMap,
+          ['dateofjoining', 'doj', 'joiningdate', 'joindate'],
+          ['dateofjoining', 'joiningdate', 'joindate'],
+        ),
       ),
     ).slice(0, 20);
-    const panNumber = String(
+    const panNumber = cleanExcelTextCell(
       pickCellValue(normMap, ['pannumber', 'panno', 'pan'], ['pannumber', 'panno']),
     )
-      .trim()
       .toUpperCase()
       .slice(0, 20);
-    const uanNumber = String(
+    const uanNumber = cleanExcelTextCell(
       pickCellValue(normMap, ['uannumber', 'uanno', 'uan'], ['uannumber', 'uanno']),
-    )
-      .trim()
-      .slice(0, 24);
-    const pfNumber = String(
-      pickCellValue(normMap, ['pfnumber', 'pfno', 'epfno', 'epfnumber'], ['pfnumber', 'pfno', 'epfno']),
-    )
-      .trim()
-      .slice(0, 32);
-    const esicNumber = String(
+    ).slice(0, 24);
+    const pfNumber = cleanExcelTextCell(
+      pickCellValue(
+        normMap,
+        ['pfaccountnumber', 'providentfundnumber', 'pfnumber', 'pfno', 'epfno', 'epfnumber'],
+        ['pfaccountnumber', 'providentfundnumber', 'pfnumber', 'pfno', 'epfno'],
+      ),
+    ).slice(0, 32);
+    const esicNumber = cleanExcelTextCell(
       pickCellValue(
         normMap,
         ['esicnumber', 'esicno', 'esino', 'esinumber'],
         ['esicnumber', 'esicno', 'esino', 'esinumber'],
       ),
-    )
-      .trim()
-      .slice(0, 32);
-    const bankName = String(
+    ).slice(0, 32);
+    const bankName = cleanExcelTextCell(
       pickCellValue(
         normMap,
         ['bankname', 'bank'],
         ['bankname'],
         ['account', 'acc', 'ifsc'],
       ),
-    )
-      .trim()
-      .slice(0, 80);
+    ).slice(0, 80);
     const bankAccountMasked = maskBankAccountNumber(
       String(
         pickCellValue(
           normMap,
-          ['bankaccount', 'bankaccountno', 'bankacno', 'accountno', 'accountnumber', 'acno', 'accno'],
-          ['bankaccount', 'bankacno', 'accountno', 'accountnumber', 'acno', 'accno'],
+          ['bankaccountnumber', 'bankaccount', 'bankaccountno', 'bankacno', 'accountno', 'accountnumber', 'acno', 'accno'],
+          ['bankaccountnumber', 'bankaccount', 'bankacno', 'accountno', 'accountnumber', 'acno', 'accno'],
         ),
       ),
     );
-    const bankIfsc = String(
-      pickCellValue(normMap, ['bankifsc', 'ifsccode', 'ifsc'], ['bankifsc', 'ifsccode', 'ifsc']),
+    const bankIfsc = cleanExcelTextCell(
+      pickCellValue(
+        normMap,
+        ['bankifsccode', 'bankifsc', 'ifsccode', 'ifsc'],
+        ['bankifsccode', 'bankifsc', 'ifsccode', 'ifsc'],
+      ),
     )
-      .trim()
       .toUpperCase()
       .slice(0, 20);
 
-    // Attendance
+    // Attendance — supports BOTH House of Muktai 45-col payroll sheet (MONTHS DAY / PRESENT DAYS / W/O / TOTAL DAYS / OT DAYS)
+    // AND standard template (Total Days / Paid Days / Loss of Pay Days / Weekly Off / Paid Leave / Overtime Hours)
     const defaultDays = getDaysInMonth(monthKey || defaultMonthKey);
-    const rawTotalDaysCell = pickCellValue(
+    const rawMonthsDayCell = pickCellValue(
       normMap,
-      ['totaldays', 'monthdays', 'calendardays'],
-      ['totaldays', 'monthdays', 'calendardays'],
+      ['monthsday', 'monthsdays', 'monthday', 'monthdays', 'calendardays'],
+      ['monthsday', 'monthdays', 'calendardays'],
     );
-    const rawPaidDaysCell = pickCellValue(
+    const rawTotalDaysColCell = pickCellValue(
       normMap,
-      ['paiddays', 'presentdays', 'workeddays', 'paydays'],
-      ['paiddays', 'presentdays', 'workeddays', 'paydays'],
+      ['totaldays'],
+      ['totaldays'],
+    );
+    const rawPaidDaysColCell = pickCellValue(
+      normMap,
+      ['paiddays', 'paydays', 'workeddays'],
+      ['paiddays', 'paydays', 'workeddays'],
+    );
+    const rawPresentDaysCell = pickCellValue(
+      normMap,
+      ['presentdays', 'presentday', 'present'],
+      ['presentdays', 'presentday'],
     );
     const rawLopDaysCell = pickCellValue(
       normMap,
-      ['lopdays', 'absentdays', 'lop', 'absent'],
-      ['lopdays', 'absentdays'],
+      ['lossofpaydays', 'lossofpay', 'lopdays', 'absentdays', 'lop', 'absent'],
+      ['lossofpaydays', 'lossofpay', 'lopdays', 'absentdays'],
     );
     const rawWeeklyOffCell = pickCellValue(
       normMap,
@@ -555,46 +744,117 @@ export function parseSalarySheetRows(
       ['paidleavedays', 'paidleave', 'pl', 'cl'],
       ['paidleave'],
     );
+    const rawOtDaysCell = pickCellValue(
+      normMap,
+      ['otdays', 'overtimedays', 'otday'],
+      ['otdays', 'overtimedays'],
+    );
     const rawOtHoursCell = pickCellValue(
       normMap,
-      ['overtimehours', 'othours', 'othrs'],
-      ['overtimehours', 'othours', 'othrs'],
+      ['extradutyhours', 'overtimehours', 'othours', 'othrs'],
+      ['extradutyhours', 'overtimehours', 'othours', 'othrs'],
     );
 
-    const hasExplicitTotalDays = String(rawTotalDaysCell ?? '').trim() !== '';
-    const hasExplicitPaidDays = String(rawPaidDaysCell ?? '').trim() !== '';
+    const hasMonthsDay = String(rawMonthsDayCell ?? '').trim() !== '';
+    const hasTotalDaysCol = String(rawTotalDaysColCell ?? '').trim() !== '';
+    const hasPaidDaysCol = String(rawPaidDaysColCell ?? '').trim() !== '';
+    const hasPresentDaysCol = String(rawPresentDaysCell ?? '').trim() !== '';
+    const hasExplicitLopCol = String(rawLopDaysCell ?? '').trim() !== '';
 
-    const totalDaysNum = parseNumericField(rawTotalDaysCell);
-    const paidDaysNum = parseNumericField(rawPaidDaysCell);
+    const monthsDayNum = parseNumericField(rawMonthsDayCell);
+    const totalDaysColNum = parseNumericField(rawTotalDaysColCell);
+    const paidDaysColNum = parseNumericField(rawPaidDaysColCell);
+    const presentDaysNum = parseNumericField(rawPresentDaysCell);
     const lopDaysNum = parseNumericField(rawLopDaysCell);
     const weeklyOffNum = parseNumericField(rawWeeklyOffCell);
     const paidLeaveNum = parseNumericField(rawPaidLeaveCell);
+    const overtimeDaysNum = parseNumericField(rawOtDaysCell);
     const overtimeHoursNum = parseNumericField(rawOtHoursCell);
 
     const attendanceNums = [
-      totalDaysNum,
-      paidDaysNum,
+      monthsDayNum,
+      totalDaysColNum,
+      paidDaysColNum,
+      presentDaysNum,
       lopDaysNum,
       weeklyOffNum,
       paidLeaveNum,
+      overtimeDaysNum,
       overtimeHoursNum,
     ];
-    const hasInvalidAttendance =
-      attendanceNums.some((v) => !Number.isFinite(v) || v < 0);
+    const hasInvalidAttendance = attendanceNums.some((v) => !Number.isFinite(v) || v < 0);
 
-    const totalDays = hasExplicitTotalDays && Number.isFinite(totalDaysNum) ? totalDaysNum : defaultDays;
-    const lopDays = Number.isFinite(lopDaysNum) && lopDaysNum >= 0 ? lopDaysNum : 0;
-    const paidDays =
-      hasExplicitPaidDays && Number.isFinite(paidDaysNum)
-        ? paidDaysNum
-        : Math.max(0, Number((totalDays - lopDays).toFixed(2)));
+    // When MONTHS DAY is provided (user's 45-col sheet): MONTHS DAY = Calendar Total Days, TOTAL DAYS = Paid Days (PRESENT DAYS + W/O)
+    const totalDays = hasMonthsDay
+      ? Number.isFinite(monthsDayNum)
+        ? monthsDayNum
+        : defaultDays
+      : hasTotalDaysCol && Number.isFinite(totalDaysColNum)
+        ? totalDaysColNum
+        : defaultDays;
+
     const weeklyOffDays = Number.isFinite(weeklyOffNum) && weeklyOffNum >= 0 ? weeklyOffNum : 0;
     const paidLeaveDays = Number.isFinite(paidLeaveNum) && paidLeaveNum >= 0 ? paidLeaveNum : 0;
-    const overtimeHours = Number.isFinite(overtimeHoursNum) && overtimeHoursNum >= 0 ? overtimeHoursNum : 0;
+    const presentDays =
+      hasPresentDaysCol && Number.isFinite(presentDaysNum) && presentDaysNum >= 0
+        ? presentDaysNum
+        : 0;
+    let overtimeDays =
+      Number.isFinite(overtimeDaysNum) && overtimeDaysNum >= 0 ? overtimeDaysNum : 0;
+    const overtimeHours =
+      Number.isFinite(overtimeHoursNum) && overtimeHoursNum >= 0 ? overtimeHoursNum : 0;
+
+    let paidDays: number;
+    if (hasMonthsDay) {
+      if (hasTotalDaysCol && Number.isFinite(totalDaysColNum)) {
+        // In House of Muktai 45-column paysheets, TOTAL DAYS = PRESENT DAYS + W/O can reach 31–34
+        // when staff work weekly-offs, with extra days paid separately in OT DAYS / OT.
+        // Cap Paid Days at MONTHS DAY (30) and preserve extra days in overtimeDays.
+        if (
+          totalDaysColNum > totalDays &&
+          totalDaysColNum <= 35 &&
+          (overtimeDays > 0 ||
+            (hasPresentDaysCol &&
+              presentDaysNum <= totalDays &&
+              Math.abs(presentDaysNum + weeklyOffDays - totalDaysColNum) <= 0.5))
+        ) {
+          paidDays = totalDays;
+          if (overtimeDays === 0) {
+            overtimeDays = Number((totalDaysColNum - totalDays).toFixed(2));
+          }
+        } else {
+          paidDays = totalDaysColNum;
+        }
+      } else if (hasPaidDaysCol && Number.isFinite(paidDaysColNum)) {
+        paidDays = paidDaysColNum;
+      } else if (hasPresentDaysCol && Number.isFinite(presentDaysNum)) {
+        paidDays = Math.min(totalDays, Number((presentDaysNum + weeklyOffDays).toFixed(2)));
+      } else {
+        const rawLop = Number.isFinite(lopDaysNum) && lopDaysNum >= 0 ? lopDaysNum : 0;
+        paidDays = Math.max(0, Number((totalDays - rawLop).toFixed(2)));
+      }
+    } else if (hasPaidDaysCol && Number.isFinite(paidDaysColNum)) {
+      paidDays = paidDaysColNum;
+    } else if (hasPresentDaysCol && Number.isFinite(presentDaysNum)) {
+      paidDays = presentDaysNum;
+    } else {
+      const rawLop = Number.isFinite(lopDaysNum) && lopDaysNum >= 0 ? lopDaysNum : 0;
+      paidDays = Math.max(0, Number((totalDays - rawLop).toFixed(2)));
+    }
+
+    const lopDays = hasExplicitLopCol
+      ? Number.isFinite(lopDaysNum) && lopDaysNum >= 0
+        ? lopDaysNum
+        : 0
+      : hasMonthsDay
+        ? Math.max(0, Number((totalDays - paidDays).toFixed(2)))
+        : 0;
 
     const attendanceOutOfBounds =
       totalDays < 1 ||
       totalDays > 31 ||
+      presentDays < 0 ||
+      presentDays > 31 ||
       paidDays < 0 ||
       paidDays > 31 ||
       paidDays > totalDays ||
@@ -604,59 +864,76 @@ export function parseSalarySheetRows(
       weeklyOffDays > 31 ||
       paidLeaveDays < 0 ||
       paidLeaveDays > 31 ||
+      overtimeDays < 0 ||
+      overtimeDays > 31 ||
       overtimeHours > 500;
 
-    // Earnings (rupees -> paise) — all 14 official House of Muktai payroll heads + legacy Special/Other
+    // Reference Rate / CTC Columns (stored for reference ONLY — NEVER summed into grossEarningsPaise!)
+    const monthlySalaryRateVal = parseNumericField(
+      pickCellValue(normMap, ['salary', 'monthlysalary', 'ctcsalary', 'fixedsalary'], []),
+    );
+    const monthlyGrossRateVal = parseNumericField(
+      pickCellValue(normMap, ['monthlygross', 'fixedgross', 'grossrate'], ['monthlygross']),
+    );
+
+    // Earnings (rupees -> paise) — all official House of Muktai payroll heads (including exact Excel spellings + Health Club Allow + Arrears)
     const basicVal = parseNumericField(
       pickCellValue(normMap, ['basicsalary', 'basicpay', 'basic'], ['basicsalary', 'basicpay']),
     );
     const dearnessVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['dearnessallowance', 'dearness', 'da'],
+        ['dearnessallowance', 'dearnessallow', 'dearness', 'da'],
         ['dearnessallowance', 'dearness'],
       ),
     );
     const hraVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['hra', 'houserentallowance', 'houserent'],
+        ['hra', 'houserentallowance', 'houserentallowancehra', 'houserentallow', 'houserent'],
         ['houserentallowance', 'houserent'],
       ),
     );
     const attendanceVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['attendanceallowance', 'attendancebonus', 'attendancepay'],
-        ['attendanceallowance', 'attendancebonus'],
+        ['attendanceallowance', 'attendanceallow', 'attendancebonus', 'attendancepay'],
+        ['attendanceallowance', 'attendanceallow', 'attendancebonus'],
       ),
     );
     const washingVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['washingallowance', 'washing'],
-        ['washingallowance', 'washing'],
+        ['washingallowance', 'washingallow', 'washing'],
+        ['washingallowance', 'washingallow', 'washing'],
       ),
     );
     const conveyanceVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['convenienceallowance', 'conveyanceallowance', 'convenience', 'conveyance'],
-        ['convenienceallowance', 'conveyanceallowance', 'convenience', 'conveyance'],
+        [
+          'convenienceallowance',
+          'convenienceallow',
+          'conveyanceallowance',
+          'conveyanceallow',
+          'convenience',
+          'conveyance',
+        ],
+        ['convenienceallow', 'conveyanceallow', 'convenience', 'conveyance'],
       ),
     );
     const medicalVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['medicalallowance', 'medical'],
-        ['medicalallowance', 'medical'],
+        ['medicalallowance', 'medicalallow', 'medical'],
+        ['medicalallowance', 'medicalallow', 'medical'],
       ),
     );
     const ltaVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['leavetravelallowance', 'leavetravel', 'lta'],
-        ['leavetravelallowance', 'leavetravel'],
+        ['leavetravelallowance', 'leavetravelallow', 'leavetravel', 'ltaallow', 'lta'],
+        ['leavetravelallowance', 'leavetravel', 'ltaallow'],
       ),
     );
     const communicationVal = parseNumericField(
@@ -667,60 +944,88 @@ export function parseSalarySheetRows(
           'communicationexpenses',
           'communicationallowance',
           'communicationexpense',
+          'commexpense',
+          'commexpenses',
+          'commallow',
           'communication',
         ],
-        ['communicationexpan', 'communicationexpen', 'communicationallow', 'communication'],
+        ['communicationexpan', 'communicationexpen', 'communicationallow', 'commexpense', 'communication'],
+      ),
+    );
+    const healthClubVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['healthcluballowance', 'healthcluballow', 'healthclub'],
+        ['healthclub'],
       ),
     );
     const adhocVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['adhocallowance', 'adhocpay', 'adhoc'],
-        ['adhocallowance', 'adhoc'],
+        ['adhocallowance', 'adhocallow', 'advochallow', 'advochallowance', 'adhocpay', 'adhoc', 'advoch'],
+        ['adhocallow', 'advochallow', 'adhoc', 'advoch'],
       ),
     );
     const travelingVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['travelingallowance', 'travellingallowance', 'travelallowance', 'traveling', 'travelling', 'ta'],
-        ['travelingallowance', 'travellingallowance', 'travelallowance'],
+        [
+          'travelingallowance',
+          'travellingallowance',
+          'travallingallowance',
+          'travallingallow',
+          'travelingallow',
+          'travellingallow',
+          'travelallowance',
+          'traveling',
+          'travelling',
+          'ta',
+        ],
+        ['travelingallow', 'travellingallow', 'travallingallow', 'travelallowance'],
         ['leave'],
       ),
     );
     const salesCommVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['salescommotion', 'salescommission', 'salescomm', 'commission'],
-        ['salescommotion', 'salescommission', 'commission'],
+        ['salescommotion', 'salescommission', 'salescommision', 'salescomm', 'commission', 'commision'],
+        ['salescommotion', 'salescommission', 'salescommision', 'commission', 'commision'],
       ),
     );
     const specialVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['specialallowance', 'special'],
-        ['specialallowance'],
+        ['specialallowance', 'specialallow', 'special'],
+        ['specialallowance', 'specialallow'],
       ),
     );
     const overtimeVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['overtime', 'overtimeamount', 'otamount', 'overtimepay'],
+        ['overtime', 'overtimeamount', 'otamount', 'overtimepay', 'ot'],
         ['overtimeamount', 'otamount', 'overtimepay'],
-        ['hours', 'hrs'],
+        ['hours', 'hrs', 'days', 'day'],
       ),
     );
     const incentiveVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['incentive', 'incentivebonus', 'bonus'],
-        ['incentive', 'bonus'],
+        ['incentive', 'insentive', 'incentivebonus', 'bonus'],
+        ['incentive', 'insentive', 'bonus'],
         ['attendance'],
+      ),
+    );
+    const arrearsVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['arrears', 'arrear', 'salaryarrears'],
+        ['arrears', 'arrear'],
       ),
     );
     const otherEarnVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['otherearnings', 'otherallowance', 'miscallowance'],
+        ['otherearnings', 'otherallowance', 'otherallow', 'miscallowance'],
         ['otherearnings', 'otherallowance', 'miscallowance'],
         [
           'conveyance',
@@ -732,21 +1037,27 @@ export function parseSalarySheetRows(
           'washing',
           'medical',
           'travel',
+          'travall',
           'communication',
+          'commexpense',
+          'healthclub',
           'adhoc',
+          'advoch',
           'commission',
+          'commision',
           'commotion',
+          'arrear',
         ],
       ),
     );
 
-    // Deductions (rupees -> paise) — strict exclusions prevent double-counting PF/PT/Total Deductions
+    // Deductions (rupees -> paise) — strict exclusions prevent double-counting PF/PT/LWF/Penalty/Insurance/Total Deductions
     const pfVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['pfdeduction', 'providentfund', 'epfdeduction', 'epf', 'pf'],
+        ['pfdeduction', 'providentfund', 'providentfundpf', 'epfdeduction', 'epf', 'pf'],
         ['pfdeduction', 'providentfund', 'epfdeduction'],
-        ['number', 'no', 'uan'],
+        ['number', 'no', 'uan', 'account'],
       ),
     );
     const esicVal = parseNumericField(
@@ -760,8 +1071,15 @@ export function parseSalarySheetRows(
     const ptVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['professionaltax', 'proftax', 'ptax', 'pt'],
-        ['professionaltax', 'proftax', 'ptax'],
+        ['professionaltax', 'professionaltaxpt', 'profetionaltax', 'proftax', 'ptax', 'pt'],
+        ['professionaltax', 'profetionaltax', 'proftax', 'ptax'],
+      ),
+    );
+    const lwfVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['lwf', 'labourwelfarefund', 'laborwelfarefund', 'welfarefund'],
+        ['labourwelfare', 'laborwelfare'],
       ),
     );
     const advanceVal = parseNumericField(
@@ -774,9 +1092,23 @@ export function parseSalarySheetRows(
     const tdsVal = parseNumericField(
       pickCellValue(
         normMap,
-        ['tds', 'tdsdeduction', 'incometax'],
+        ['tds', 'tdsdeduction', 'incometax', 'incometaxtds'],
         ['tdsdeduction', 'incometax'],
         ['prof', 'ptax'],
+      ),
+    );
+    const penaltyVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['penalty', 'penalties', 'latepenalty'],
+        ['penalty', 'penalties'],
+      ),
+    );
+    const insuranceVal = parseNumericField(
+      pickCellValue(
+        normMap,
+        ['insurance', 'mediclaim', 'healthinsurance', 'groupinsurance'],
+        ['insurance', 'mediclaim'],
       ),
     );
     const otherDedVal = parseNumericField(
@@ -784,42 +1116,136 @@ export function parseSalarySheetRows(
         normMap,
         ['otherdeduction', 'otherdeductions', 'miscdeduction', 'latefine', 'uniform', 'fine'],
         ['otherdeduction', 'miscdeduction', 'latefine'],
-        ['total', 'pf', 'esic', 'esi', 'prof', 'ptax', 'tds', 'tax', 'advance', 'loan'],
+        ['total', 'pf', 'esic', 'esi', 'prof', 'ptax', 'lwf', 'tds', 'tax', 'advance', 'loan', 'penalty', 'insurance'],
       ),
     );
 
-    const paymentMode = normalizeSalaryPaymentMode(
-      String(
-        pickCellValue(
-          normMap,
-          ['paymentmode', 'paymode', 'mode'],
-          ['paymentmode', 'paymode'],
-        ),
+    // Optional Excel summary columns for Pre-Publish Cross-Check (NEVER override computed paise math!)
+    const sheetEarnGrossRaw = pickCellValue(normMap, ['earngross', 'earnedgross', 'grossearnings'], ['earngross', 'earnedgross']);
+    const sheetTotalDedRaw = pickCellValue(normMap, ['totaldeduction', 'totaldeductions'], ['totaldeduction']);
+    const sheetNetPayRaw = pickCellValue(normMap, ['netpay', 'netpayable', 'netsalary'], ['netpay', 'netsalary']);
+
+    let rawPaymentModeCell = cleanExcelTextCell(
+      pickCellValue(
+        normMap,
+        ['paymentmode', 'paymode', 'mode'],
+        ['paymentmode', 'paymode'],
       ),
     );
-    const paymentReference = String(
+    // Auto-detect unnamed trailing Payment Mode column (e.g. 45th column in ALL BRANCH PAYSHEET containing DCR / NEFT)
+    if (!rawPaymentModeCell) {
+      const UNNAMED_MODE_RE = /^(DCR|NEFT|RTGS|IMPS|UPI|CASH|CHEQUE|CHQ|BANK|BANKTRANSFER|DIRECTCREDIT)$/i;
+      for (const [origKey, origVal] of Object.entries(raw.cells)) {
+        const nk = normHeader(origKey);
+        if (!nk || /^col\d+$/.test(nk)) {
+          const candidate = cleanExcelTextCell(origVal);
+          if (candidate && UNNAMED_MODE_RE.test(candidate.replace(/\s+/g, ''))) {
+            rawPaymentModeCell = candidate;
+            break;
+          }
+        }
+      }
+    }
+    const paymentMode = normalizeSalaryPaymentMode(rawPaymentModeCell);
+    const paymentReference = cleanExcelTextCell(
       pickCellValue(
         normMap,
         ['paymentreference', 'paymentref', 'utr', 'utrno', 'referenceno', 'refno', 'transactionid'],
         ['paymentreference', 'paymentref', 'utrno', 'referenceno', 'transactionid'],
       ),
-    )
-      .trim()
-      .slice(0, 120);
+    ).slice(0, 120);
     const paymentDate = normalizeDateCellToIso(
-      pickCellValue(
-        normMap,
-        ['paymentdate', 'paydate', 'paiddate', 'creditedon'],
-        ['paymentdate', 'paydate', 'paiddate', 'creditedon'],
+      cleanExcelTextCell(
+        pickCellValue(
+          normMap,
+          ['paymentdate', 'paydate', 'paiddate', 'creditedon'],
+          ['paymentdate', 'paydate', 'paiddate', 'creditedon'],
+        ),
       ),
     ).slice(0, 30);
-    const remarks = String(
+    const remarks = cleanExcelTextCell(
       pickCellValue(normMap, ['remarks', 'notes', 'comment'], ['remarks', 'comment']),
-    )
-      .trim()
-      .slice(0, 240);
+    ).slice(0, 240);
 
-    const moneyValues = [
+    const monthlySalaryRatePaise =
+      Number.isFinite(monthlySalaryRateVal) && monthlySalaryRateVal > 0
+        ? rupeesToPaise(monthlySalaryRateVal)
+        : 0;
+    const monthlyGrossRatePaise =
+      Number.isFinite(monthlyGrossRateVal) && monthlyGrossRateVal > 0
+        ? rupeesToPaise(monthlyGrossRateVal)
+        : 0;
+
+    let basicPaise = Number.isFinite(basicVal) && basicVal > 0 ? rupeesToPaise(basicVal) : 0;
+    let dearnessAllowancePaise =
+      Number.isFinite(dearnessVal) && dearnessVal > 0 ? rupeesToPaise(dearnessVal) : 0;
+    let hraPaise = Number.isFinite(hraVal) && hraVal > 0 ? rupeesToPaise(hraVal) : 0;
+    let attendanceAllowancePaise =
+      Number.isFinite(attendanceVal) && attendanceVal > 0 ? rupeesToPaise(attendanceVal) : 0;
+    let washingAllowancePaise =
+      Number.isFinite(washingVal) && washingVal > 0 ? rupeesToPaise(washingVal) : 0;
+    let conveyancePaise =
+      Number.isFinite(conveyanceVal) && conveyanceVal > 0 ? rupeesToPaise(conveyanceVal) : 0;
+    let medicalAllowancePaise =
+      Number.isFinite(medicalVal) && medicalVal > 0 ? rupeesToPaise(medicalVal) : 0;
+    let leaveTravelAllowancePaise =
+      Number.isFinite(ltaVal) && ltaVal > 0 ? rupeesToPaise(ltaVal) : 0;
+    let communicationExpensesPaise =
+      Number.isFinite(communicationVal) && communicationVal > 0
+        ? rupeesToPaise(communicationVal)
+        : 0;
+    let healthClubAllowancePaise =
+      Number.isFinite(healthClubVal) && healthClubVal > 0 ? rupeesToPaise(healthClubVal) : 0;
+    let adhocAllowancePaise =
+      Number.isFinite(adhocVal) && adhocVal > 0 ? rupeesToPaise(adhocVal) : 0;
+    const travelingAllowancePaise =
+      Number.isFinite(travelingVal) && travelingVal > 0 ? rupeesToPaise(travelingVal) : 0;
+    let salesCommissionPaise =
+      Number.isFinite(salesCommVal) && salesCommVal > 0 ? rupeesToPaise(salesCommVal) : 0;
+    const specialAllowancePaise =
+      Number.isFinite(specialVal) && specialVal > 0 ? rupeesToPaise(specialVal) : 0;
+    let overtimePaise =
+      Number.isFinite(overtimeVal) && overtimeVal > 0 ? rupeesToPaise(overtimeVal) : 0;
+    let incentivePaise =
+      Number.isFinite(incentiveVal) && incentiveVal > 0 ? rupeesToPaise(incentiveVal) : 0;
+    let arrearsPaise =
+      Number.isFinite(arrearsVal) && arrearsVal > 0 ? rupeesToPaise(arrearsVal) : 0;
+    let otherEarningsPaise =
+      Number.isFinite(otherEarnVal) && otherEarnVal > 0 ? rupeesToPaise(otherEarnVal) : 0;
+
+    // Auto-balance negative ADVOCH ALLOW (occurs on short-attendance rows where fixed allowances weren't pro-rated)
+    // Absorbs the negative plug cleanly from fixed allowances so every slip head stays >= 0 while Monthly Gross stays 100% exact.
+    let adhocAutoBalanced = false;
+    if (Number.isFinite(adhocVal) && adhocVal < 0) {
+      const deficitPaise = Math.round(Math.abs(adhocVal) * 100);
+      const totalAbsorbable =
+        communicationExpensesPaise +
+        washingAllowancePaise +
+        attendanceAllowancePaise +
+        medicalAllowancePaise +
+        conveyancePaise +
+        leaveTravelAllowancePaise +
+        healthClubAllowancePaise;
+      if (totalAbsorbable >= deficitPaise) {
+        let rem = deficitPaise;
+        const take = (curr: number): number => {
+          const cut = Math.min(curr, rem);
+          rem -= cut;
+          return curr - cut;
+        };
+        communicationExpensesPaise = take(communicationExpensesPaise);
+        washingAllowancePaise = take(washingAllowancePaise);
+        attendanceAllowancePaise = take(attendanceAllowancePaise);
+        medicalAllowancePaise = take(medicalAllowancePaise);
+        conveyancePaise = take(conveyancePaise);
+        leaveTravelAllowancePaise = take(leaveTravelAllowancePaise);
+        healthClubAllowancePaise = take(healthClubAllowancePaise);
+        adhocAllowancePaise = 0;
+        adhocAutoBalanced = true;
+      }
+    }
+
+    const strictNonNegMoneyValues = [
       basicVal,
       dearnessVal,
       hraVal,
@@ -829,58 +1255,30 @@ export function parseSalarySheetRows(
       medicalVal,
       ltaVal,
       communicationVal,
-      adhocVal,
+      healthClubVal,
+      ...(adhocAutoBalanced ? [] : [adhocVal]),
       travelingVal,
       salesCommVal,
       specialVal,
       overtimeVal,
       incentiveVal,
+      arrearsVal,
       otherEarnVal,
       pfVal,
       esicVal,
       ptVal,
+      lwfVal,
       advanceVal,
       tdsVal,
+      penaltyVal,
+      insuranceVal,
       otherDedVal,
     ];
 
-    const hasNaNMoney = moneyValues.some((v) => !Number.isFinite(v));
-    const hasNegMoney = moneyValues.some((v) => Number.isFinite(v) && v < 0);
+    const hasNaNMoney = strictNonNegMoneyValues.some((v) => !Number.isFinite(v)) || !Number.isFinite(adhocVal);
+    const hasNegMoney = strictNonNegMoneyValues.some((v) => Number.isFinite(v) && v < 0);
 
-    const basicPaise = Number.isFinite(basicVal) && basicVal > 0 ? rupeesToPaise(basicVal) : 0;
-    const dearnessAllowancePaise =
-      Number.isFinite(dearnessVal) && dearnessVal > 0 ? rupeesToPaise(dearnessVal) : 0;
-    const hraPaise = Number.isFinite(hraVal) && hraVal > 0 ? rupeesToPaise(hraVal) : 0;
-    const attendanceAllowancePaise =
-      Number.isFinite(attendanceVal) && attendanceVal > 0 ? rupeesToPaise(attendanceVal) : 0;
-    const washingAllowancePaise =
-      Number.isFinite(washingVal) && washingVal > 0 ? rupeesToPaise(washingVal) : 0;
-    const conveyancePaise =
-      Number.isFinite(conveyanceVal) && conveyanceVal > 0 ? rupeesToPaise(conveyanceVal) : 0;
-    const medicalAllowancePaise =
-      Number.isFinite(medicalVal) && medicalVal > 0 ? rupeesToPaise(medicalVal) : 0;
-    const leaveTravelAllowancePaise =
-      Number.isFinite(ltaVal) && ltaVal > 0 ? rupeesToPaise(ltaVal) : 0;
-    const communicationExpensesPaise =
-      Number.isFinite(communicationVal) && communicationVal > 0
-        ? rupeesToPaise(communicationVal)
-        : 0;
-    const adhocAllowancePaise =
-      Number.isFinite(adhocVal) && adhocVal > 0 ? rupeesToPaise(adhocVal) : 0;
-    const travelingAllowancePaise =
-      Number.isFinite(travelingVal) && travelingVal > 0 ? rupeesToPaise(travelingVal) : 0;
-    const salesCommissionPaise =
-      Number.isFinite(salesCommVal) && salesCommVal > 0 ? rupeesToPaise(salesCommVal) : 0;
-    const specialAllowancePaise =
-      Number.isFinite(specialVal) && specialVal > 0 ? rupeesToPaise(specialVal) : 0;
-    const overtimePaise =
-      Number.isFinite(overtimeVal) && overtimeVal > 0 ? rupeesToPaise(overtimeVal) : 0;
-    const incentivePaise =
-      Number.isFinite(incentiveVal) && incentiveVal > 0 ? rupeesToPaise(incentiveVal) : 0;
-    const otherEarningsPaise =
-      Number.isFinite(otherEarnVal) && otherEarnVal > 0 ? rupeesToPaise(otherEarnVal) : 0;
-
-    const grossEarningsPaise =
+    const computeGross = () =>
       basicPaise +
       dearnessAllowancePaise +
       hraPaise +
@@ -890,20 +1288,69 @@ export function parseSalarySheetRows(
       medicalAllowancePaise +
       leaveTravelAllowancePaise +
       communicationExpensesPaise +
+      healthClubAllowancePaise +
       adhocAllowancePaise +
       travelingAllowancePaise +
       salesCommissionPaise +
       specialAllowancePaise +
       overtimePaise +
       incentivePaise +
+      arrearsPaise +
       otherEarningsPaise;
+
+    let grossEarningsPaise = computeGross();
+
+    // Bank-Exact Re 1 Rounding Alignment:
+    // When Excel EARN GROSS is rounded to whole rupees (e.g. ROUND(sum, 0)) and differs from
+    // fractional Sales Commission / OT paise sum by <= ₹1.00, absorb the exact rounding delta
+    // into the fractional earning head so PDF Net Pay matches bank transfer (DCR/NEFT) to the exact rupee
+    // while strictly preserving Firestore's `grossEarningsPaise == sum(earningComponents)` invariant.
+    if (!hasNaNMoney && !hasNegMoney && String(sheetEarnGrossRaw ?? '').trim() !== '') {
+      const sheetGrossNum = parseNumericField(sheetEarnGrossRaw);
+      const sheetGrossPaise =
+        Number.isFinite(sheetGrossNum) && sheetGrossNum > 0 ? rupeesToPaise(sheetGrossNum) : 0;
+      const deltaPaise = sheetGrossPaise - grossEarningsPaise;
+      if (sheetGrossPaise > 0 && sheetGrossPaise % 100 === 0 && deltaPaise !== 0 && Math.abs(deltaPaise) <= 100) {
+        const tryApplyDelta = (onlyFractional: boolean): boolean => {
+          const candidates: Array<{ get: () => number; set: (v: number) => void }> = [
+            { get: () => salesCommissionPaise, set: (v) => { salesCommissionPaise = v; } },
+            { get: () => overtimePaise, set: (v) => { overtimePaise = v; } },
+            { get: () => adhocAllowancePaise, set: (v) => { adhocAllowancePaise = v; } },
+            { get: () => otherEarningsPaise, set: (v) => { otherEarningsPaise = v; } },
+            { get: () => incentivePaise, set: (v) => { incentivePaise = v; } },
+            { get: () => arrearsPaise, set: (v) => { arrearsPaise = v; } },
+            { get: () => hraPaise, set: (v) => { hraPaise = v; } },
+            { get: () => dearnessAllowancePaise, set: (v) => { dearnessAllowancePaise = v; } },
+            { get: () => basicPaise, set: (v) => { basicPaise = v; } },
+          ];
+          for (const c of candidates) {
+            const val = c.get();
+            if (val <= 0) continue;
+            if (onlyFractional && val % 100 === 0) continue;
+            if (val + deltaPaise >= 0) {
+              c.set(val + deltaPaise);
+              return true;
+            }
+          }
+          return false;
+        };
+        if (tryApplyDelta(true) || tryApplyDelta(false)) {
+          grossEarningsPaise = computeGross();
+        }
+      }
+    }
 
     const pfPaise = Number.isFinite(pfVal) && pfVal > 0 ? rupeesToPaise(pfVal) : 0;
     const esicPaise = Number.isFinite(esicVal) && esicVal > 0 ? rupeesToPaise(esicVal) : 0;
     const ptPaise = Number.isFinite(ptVal) && ptVal > 0 ? rupeesToPaise(ptVal) : 0;
+    const lwfPaise = Number.isFinite(lwfVal) && lwfVal > 0 ? rupeesToPaise(lwfVal) : 0;
     const advanceRecoveryPaise =
       Number.isFinite(advanceVal) && advanceVal > 0 ? rupeesToPaise(advanceVal) : 0;
     const tdsPaise = Number.isFinite(tdsVal) && tdsVal > 0 ? rupeesToPaise(tdsVal) : 0;
+    const penaltyPaise =
+      Number.isFinite(penaltyVal) && penaltyVal > 0 ? rupeesToPaise(penaltyVal) : 0;
+    const insurancePaise =
+      Number.isFinite(insuranceVal) && insuranceVal > 0 ? rupeesToPaise(insuranceVal) : 0;
     const otherDeductionPaise =
       Number.isFinite(otherDedVal) && otherDedVal > 0 ? rupeesToPaise(otherDedVal) : 0;
 
@@ -911,13 +1358,45 @@ export function parseSalarySheetRows(
       pfPaise +
       esicPaise +
       ptPaise +
+      lwfPaise +
       advanceRecoveryPaise +
       tdsPaise +
+      penaltyPaise +
+      insurancePaise +
       otherDeductionPaise;
 
     const netPayablePaise = grossEarningsPaise - totalDeductionsPaise;
 
+    // Cross-check computed totals against optional EARN GROSS / Total Deduction / NET PAY columns in Excel (> ₹1 tolerance)
+    const crossCheckIssues: string[] = [];
+    if (String(sheetEarnGrossRaw ?? '').trim() !== '') {
+      const sheetGrossNum = parseNumericField(sheetEarnGrossRaw);
+      if (Number.isFinite(sheetGrossNum) && Math.abs(rupeesToPaise(sheetGrossNum) - grossEarningsPaise) > 100) {
+        crossCheckIssues.push(
+          `Excel EARN GROSS (₹${sheetGrossNum.toFixed(2)}) ≠ Sum of Earnings (₹${(grossEarningsPaise / 100).toFixed(2)})`,
+        );
+      }
+    }
+    if (String(sheetTotalDedRaw ?? '').trim() !== '') {
+      const sheetDedNum = parseNumericField(sheetTotalDedRaw);
+      if (Number.isFinite(sheetDedNum) && Math.abs(rupeesToPaise(sheetDedNum) - totalDeductionsPaise) > 100) {
+        crossCheckIssues.push(
+          `Excel Total Deduction (₹${sheetDedNum.toFixed(2)}) ≠ Sum of Deductions (₹${(totalDeductionsPaise / 100).toFixed(2)})`,
+        );
+      }
+    }
+    if (String(sheetNetPayRaw ?? '').trim() !== '') {
+      const sheetNetNum = parseNumericField(sheetNetPayRaw);
+      if (Number.isFinite(sheetNetNum) && Math.abs(rupeesToPaise(sheetNetNum) - netPayablePaise) > 100) {
+        crossCheckIssues.push(
+          `Excel NET PAY (₹${sheetNetNum.toFixed(2)}) ≠ Computed Net (₹${(netPayablePaise / 100).toFixed(2)})`,
+        );
+      }
+    }
+    const sheetCrossCheckWarning = crossCheckIssues.join(' · ');
+
     let status: ParsedSalaryRow['status'] = 'VALID';
+    let errorCode: SalaryRowErrorCode | undefined;
     let errorMessage = '';
 
     const customDepartmentName =
@@ -928,30 +1407,38 @@ export function parseSalarySheetRows(
     const dedupeKey = `${monthKey}__${(matched?.employeeId || rawEmpId).toUpperCase()}`;
     if (!/^\d{4}-\d{2}$/.test(monthKey)) {
       status = 'ERROR';
+      errorCode = 'INVALID_MONTH';
       errorMessage = 'Invalid Pay Month. Select a valid YYYY-MM month.';
     } else if (!matched) {
       status = 'ERROR';
+      errorCode = 'EMPLOYEE_NOT_FOUND';
       errorMessage = `Employee ID "${rawEmpId || 'blank'}" not found in Employee Master.`;
     } else if (seenEmployeeKeys.has(dedupeKey)) {
       status = 'DUPLICATE_IN_FILE';
+      errorCode = 'DUPLICATE_IN_FILE';
       errorMessage = `Duplicate row in file for ${matched.employeeId} (${monthKey}).`;
     } else if (hasInvalidAttendance || attendanceOutOfBounds) {
       status = 'ERROR';
+      errorCode = 'INVALID_ATTENDANCE';
       errorMessage =
         paidDays > totalDays
           ? `Paid Days (${paidDays}) cannot exceed Total Days (${totalDays}).`
           : 'Attendance days must be between 0 and 31 (Total Days 1–31; OT Hours <= 500).';
     } else if (hasNaNMoney || hasNegMoney) {
       status = 'ERROR';
+      errorCode = 'INVALID_MONEY';
       errorMessage = 'Contains invalid or negative earnings/deduction amount.';
     } else if (grossEarningsPaise <= 0) {
       status = 'ERROR';
+      errorCode = 'ZERO_GROSS';
       errorMessage = 'Gross Earnings must be greater than ₹0.';
     } else if (netPayablePaise < 0) {
       status = 'ERROR';
+      errorCode = 'NEGATIVE_NET';
       errorMessage = `Total Deductions (₹${(totalDeductionsPaise / 100).toFixed(2)}) exceed Gross Earnings (₹${(grossEarningsPaise / 100).toFixed(2)}). Net Payable cannot be negative.`;
     } else if (rawDepartment && !resolvedDepartment && !customDepartmentName) {
       status = 'ERROR';
+      errorCode = 'INVALID_DEPARTMENT';
       errorMessage = `Invalid department "${rawDepartment}". Enter a valid Sales Dept (Saree, Ladies Wear, Kids Wear, Mens Wear, Non Apparels) or Non-Sales Dept (Accounts, HR, Billing, Head Office, etc.).`;
     }
 
@@ -971,6 +1458,9 @@ export function parseSalarySheetRows(
     const willSyncMasterFields = Boolean(
       matched &&
         (willSyncDepartment ||
+          (rawSaleId && !matched.saleId) ||
+          (gender && gender !== (matched.gender || '')) ||
+          (category && category !== (matched.category || '')) ||
           (designation && designation !== matched.designation) ||
           (dateOfJoining && dateOfJoining !== (matched.dateOfJoining || '')) ||
           (panNumber && panNumber !== (matched.panNumber || '')) ||
@@ -985,17 +1475,22 @@ export function parseSalarySheetRows(
     rows.push({
       rowNumber: raw.rowNumber,
       status,
+      errorCode,
       errorMessage,
       monthKey,
       employeeId: matched?.employeeId || rawEmpId,
+      saleId: rawSaleId || matched?.saleId || '',
       matchedEmployee: matched,
       employeeName: matched?.fullName || rawName || '—',
       branchId: matched?.branchId || '',
-      branchName: matched?.branchName || '—',
+      branchName: matched?.branchName || rawBranch || '—',
+      rawBranch,
       resolvedDepartment,
       customDepartmentName,
       rawDepartment,
       designation: designation || matched?.designation || 'Employee',
+      gender: gender || matched?.gender || '',
+      category: category || matched?.category || '',
       dateOfJoining: dateOfJoining || matched?.dateOfJoining || '',
       panNumber: panNumber || matched?.panNumber || '',
       uanNumber: uanNumber || matched?.uanNumber || '',
@@ -1005,11 +1500,15 @@ export function parseSalarySheetRows(
       bankAccountMasked: bankAccountMasked || matched?.bankAccountMasked || '',
       bankIfsc: bankIfsc || matched?.bankIfsc || '',
       totalDays,
+      presentDays,
       paidDays,
       lopDays,
       weeklyOffDays,
       paidLeaveDays,
+      overtimeDays,
       overtimeHours,
+      monthlySalaryRatePaise,
+      monthlyGrossRatePaise,
       basicPaise,
       dearnessAllowancePaise,
       hraPaise,
@@ -1019,22 +1518,28 @@ export function parseSalarySheetRows(
       medicalAllowancePaise,
       leaveTravelAllowancePaise,
       communicationExpensesPaise,
+      healthClubAllowancePaise,
       adhocAllowancePaise,
       travelingAllowancePaise,
       salesCommissionPaise,
       specialAllowancePaise,
       overtimePaise,
       incentivePaise,
+      arrearsPaise,
       otherEarningsPaise,
       grossEarningsPaise,
       pfPaise,
       esicPaise,
       ptPaise,
+      lwfPaise,
       advanceRecoveryPaise,
       tdsPaise,
+      penaltyPaise,
+      insurancePaise,
       otherDeductionPaise,
       totalDeductionsPaise,
       netPayablePaise,
+      sheetCrossCheckWarning,
       paymentMode,
       paymentReference,
       paymentDate,
@@ -1085,11 +1590,7 @@ function splitCsvLine(line: string): string[] {
   return result;
 }
 
-export function parseSalaryCsvText(
-  csvText: string,
-  employees: Employee[],
-  defaultMonthKey: string,
-): SalarySheetParseSummary {
+export function extractRawSalaryRowsFromCsv(csvText: string): RawSalaryInputRow[] {
   const lines = csvText
     .replace(/^\uFEFF/, '')
     .replace(/\r\n/g, '\n')
@@ -1098,6 +1599,34 @@ export function parseSalaryCsvText(
     .filter((l) => l.trim().length > 0);
 
   if (lines.length < 2) {
+    return [];
+  }
+
+  const matrix = lines.map((line) => splitCsvLine(line));
+  const headerIdx = detectSalaryHeaderRowIndex(matrix);
+  const headers = matrix[headerIdx] || [];
+  const rawRows: RawSalaryInputRow[] = [];
+  for (let i = headerIdx + 1; i < matrix.length; i += 1) {
+    const cols = matrix[i];
+    const cells: Record<string, unknown> = {};
+    const maxCols = Math.max(headers.length, cols.length);
+    for (let idx = 0; idx < maxCols; idx += 1) {
+      const h = (headers[idx] || '').trim();
+      const key = h || `col_${idx + 1}`;
+      cells[key] = cols[idx] ?? '';
+    }
+    rawRows.push({ rowNumber: i + 1, cells });
+  }
+  return rawRows;
+}
+
+export function parseSalaryCsvText(
+  csvText: string,
+  employees: Employee[],
+  defaultMonthKey: string,
+): SalarySheetParseSummary {
+  const rawRows = extractRawSalaryRowsFromCsv(csvText);
+  if (rawRows.length === 0) {
     return {
       rows: [],
       validRows: [],
@@ -1110,28 +1639,158 @@ export function parseSalaryCsvText(
       totalNetPaise: 0,
     };
   }
+  return parseSalarySheetRows(rawRows, employees, defaultMonthKey);
+}
 
-  const matrix = lines.map((line) => splitCsvLine(line));
-  const headerIdx = detectSalaryHeaderRowIndex(matrix);
-  const headers = matrix[headerIdx] || [];
-  const rawRows: RawSalaryInputRow[] = [];
-  for (let i = headerIdx + 1; i < matrix.length; i += 1) {
-    const cols = matrix[i];
-    const cells: Record<string, unknown> = {};
-    headers.forEach((h, idx) => {
-      cells[h] = cols[idx] ?? '';
-    });
-    rawRows.push({ rowNumber: i + 1, cells });
+/**
+ * Updates the Employee ID cell on a single uploaded raw salary row (by `rowNumber`)
+ * without mutating any other rows or columns, so re-parsing immediately links/validates that row.
+ */
+export function applyEmployeeIdOverrideToRawRows(
+  rawRows: RawSalaryInputRow[],
+  rowNumber: number,
+  newEmployeeId: string,
+): RawSalaryInputRow[] {
+  const cleanId = newEmployeeId.trim();
+  const empIdExactSet = new Set([
+    'employeeid',
+    'empid',
+    'empcode',
+    'staffid',
+    'loginid',
+    'id',
+  ]);
+  const empIdContainsList = ['employeeid', 'empid', 'empcode', 'staffid', 'loginid'];
+
+  return rawRows.map((row) => {
+    if (row.rowNumber !== rowNumber) return row;
+    const nextCells: Record<string, unknown> = { ...row.cells };
+    const keys = Object.keys(nextCells);
+
+    // Find the exact header key used for Employee ID in this sheet (never touching SELL ID / SALE ID)
+    let targetKey =
+      keys.find((k) => {
+        const nk = normHeader(k);
+        return empIdExactSet.has(nk) && !nk.includes('sell') && !nk.includes('sale');
+      }) ||
+      keys.find((k) => {
+        const nk = normHeader(k);
+        return (
+          empIdContainsList.some((p) => nk.includes(p)) &&
+          !nk.includes('sell') &&
+          !nk.includes('sale')
+        );
+      }) ||
+      'EMP ID';
+
+    nextCells[targetKey] = cleanId;
+    return { ...row, cells: nextCells };
+  });
+}
+
+export interface SuggestedMasterEmployeeMatch {
+  employee: Employee;
+  reason: string;
+  score: number;
+}
+
+function normalizeNameTokens(name: string): string[] {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length >= 2);
+}
+
+function stripLeadingZerosDigits(id: string): string {
+  const trimmed = id.trim().toUpperCase();
+  if (/^\d+$/.test(trimmed)) {
+    return trimmed.replace(/^0+/, '') || '0';
+  }
+  return '';
+}
+
+/**
+ * Smartly ranks existing Employee Master records that likely correspond to an unmatched
+ * salary sheet row (via Sale ID, Name, Leading-Zero Employee ID, or Token Overlap).
+ */
+export function findSuggestedMasterEmployeesForSalaryRow(
+  row: Pick<ParsedSalaryRow, 'employeeId' | 'saleId' | 'employeeName' | 'rawBranch'>,
+  employees: Employee[],
+  limit = 5,
+): SuggestedMasterEmployeeMatch[] {
+  const sheetSaleId = (row.saleId || '').trim().toUpperCase();
+  const sheetEmpDigits = stripLeadingZerosDigits(row.employeeId || '');
+  const sheetNameNorm = (row.employeeName || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const sheetTokens = normalizeNameTokens(row.employeeName || '');
+  const sheetTokenSet = new Set(sheetTokens);
+  const sheetBranchNorm = (row.rawBranch || '').trim().toUpperCase();
+
+  const matches: SuggestedMasterEmployeeMatch[] = [];
+
+  for (const emp of employees) {
+    let score = 0;
+    let reason = '';
+
+    const empSaleId = (emp.saleId || '').trim().toUpperCase();
+    const empDigits = stripLeadingZerosDigits(emp.employeeId);
+    const empNameNorm = emp.fullName.trim().toLowerCase().replace(/\s+/g, ' ');
+    const empTokens = normalizeNameTokens(emp.fullName);
+
+    if (sheetSaleId && empSaleId && sheetSaleId === empSaleId) {
+      score = 100;
+      reason = `Exact Sale ID match (${empSaleId})`;
+    } else if (sheetNameNorm && sheetNameNorm !== '—' && empNameNorm === sheetNameNorm) {
+      score = 95;
+      reason = 'Exact Name match';
+    } else if (sheetEmpDigits && empDigits && sheetEmpDigits === empDigits) {
+      score = 92;
+      reason = `Similar Employee ID (${emp.employeeId})`;
+    } else if (sheetTokens.length >= 2 && empTokens.length >= 2) {
+      const empTokenSet = new Set(empTokens);
+      let shared = 0;
+      for (const tok of sheetTokenSet) {
+        if (empTokenSet.has(tok)) shared += 1;
+      }
+      if (shared === sheetTokenSet.size && shared === empTokenSet.size) {
+        score = 88;
+        reason = 'Same name words (reordered)';
+      } else if (shared >= 2) {
+        score = 72 + Math.min(10, shared * 3);
+        reason = `${shared} matching name words`;
+      } else if (shared === 1 && (sheetTokens.length === 1 || empTokens.length === 1)) {
+        score = 55;
+        reason = 'Partial name match';
+      }
+    }
+
+    if (score > 0) {
+      if (sheetBranchNorm && emp.branchName.trim().toUpperCase() === sheetBranchNorm) {
+        score += 3;
+      }
+      matches.push({ employee: emp, reason, score });
+    }
   }
 
-  return parseSalarySheetRows(rawRows, employees, defaultMonthKey);
+  return matches
+    .sort((a, b) => b.score - a.score || a.employee.fullName.localeCompare(b.employee.fullName))
+    .slice(0, limit);
 }
 
 /**
  * Generates a ready-to-fill CSV template pre-populated with all ACTIVE employees
  * across all 12 branches with all 14 official House of Muktai Salary earning columns.
  */
-export function buildSalarySlipCsvTemplate(employees: Employee[], monthKey: string): string {
+export interface SalarySlipTemplatePrefill {
+  incentivePaiseByEmp?: Record<string, number>;
+  advanceRecoveryPaiseByEmp?: Record<string, number>;
+}
+
+export function buildSalarySlipCsvTemplate(
+  employees: Employee[],
+  monthKey: string,
+  prefill?: SalarySlipTemplatePrefill,
+): string {
   const days = getDaysInMonth(monthKey);
   const headers = [
     'Employee ID',
@@ -1139,17 +1798,17 @@ export function buildSalarySlipCsvTemplate(employees: Employee[], monthKey: stri
     'Branch Name',
     'Department',
     'Designation',
-    'DOJ',
+    'Date of Joining',
     'Pay Month',
     'Total Days',
     'Paid Days',
-    'LOP Days',
+    'Loss of Pay Days',
     'Weekly Off',
     'Paid Leave',
-    'OT Hours',
+    'Extra Duty Hours',
     'Basic Salary',
     'Dearness Allowance',
-    'HRA',
+    'House Rent Allowance (HRA)',
     'Attendance Allowance',
     'Washing Allowance',
     'Convenience Allowance',
@@ -1161,34 +1820,43 @@ export function buildSalarySlipCsvTemplate(employees: Employee[], monthKey: stri
     'Sales Commotion',
     'Incentive',
     'Overtime',
-    'PF',
-    'ESIC',
-    'PT',
+    'Provident Fund (PF)',
+    'ESIC Deduction',
+    'Professional Tax (PT)',
     'Advance Recovery',
-    'TDS',
+    'Income Tax (TDS)',
     'Other Deduction',
     'Payment Mode',
     'Payment Date',
     'Payment Reference',
     'Bank Name',
-    'Account No',
-    'IFSC',
-    'PAN',
-    'UAN',
-    'PF No',
-    'ESIC No',
+    'Bank Account Number',
+    'Bank IFSC Code',
+    'PAN Number',
+    'UAN Number',
+    'PF Account Number',
+    'ESIC Number',
     'Remarks',
   ];
 
   const esc = (v: string | number | undefined) =>
     `"${String(v ?? '').replace(/"/g, '""')}"`;
 
+  const formatRupeesCell = (paise?: number): string | number => {
+    if (!paise || paise <= 0) return 0;
+    const rupees = paise / 100;
+    return Number.isInteger(rupees) ? rupees : Number(rupees.toFixed(2));
+  };
+
   const activeSorted = [...employees]
     .filter((e) => e.status === 'ACTIVE')
     .sort((a, b) => a.branchName.localeCompare(b.branchName) || a.fullName.localeCompare(b.fullName));
 
-  const lines = activeSorted.map((emp) =>
-    [
+  const lines = activeSorted.map((emp) => {
+    const empKey = emp.employeeId.trim().toUpperCase();
+    const prefillInc = prefill?.incentivePaiseByEmp?.[empKey] ?? 0;
+    const prefillAdv = prefill?.advanceRecoveryPaiseByEmp?.[empKey] ?? 0;
+    return [
       esc(emp.employeeId),
       esc(emp.fullName),
       esc(emp.branchName),
@@ -1214,12 +1882,12 @@ export function buildSalarySlipCsvTemplate(employees: Employee[], monthKey: stri
       esc(0), // Adhoc Allowance
       esc(0), // Traveling Allowance
       esc(0), // Sales Commotion
-      esc(0), // Incentive
+      esc(formatRupeesCell(prefillInc)), // Incentive (auto-filled when prefill provided)
       esc(0), // Overtime
       esc(0), // PF
       esc(0), // ESIC
       esc(0), // PT
-      esc(0), // Advance Recovery
+      esc(formatRupeesCell(prefillAdv)), // Advance Recovery (auto-filled active Loan EMI)
       esc(0), // TDS
       esc(0), // Other Deduction
       esc('NEFT'),
@@ -1233,8 +1901,8 @@ export function buildSalarySlipCsvTemplate(employees: Employee[], monthKey: stri
       esc(emp.pfNumber || ''),
       esc(emp.esicNumber || ''),
       esc(''),
-    ].join(','),
-  );
+    ].join(',');
+  });
 
   return [headers.map(esc).join(','), ...lines].join('\n');
 }
@@ -1263,7 +1931,7 @@ export function getSalarySlipEarningBreakdown(
       slip.washingAllowancePaise || 0,
     ],
     [
-      isMr ? 'वाहन भत्ता (Convenience Allowance)' : 'Convenience Allowance',
+      isMr ? 'वाहन भत्ता (Conveyance Allowance)' : 'Conveyance Allowance',
       slip.conveyancePaise,
     ],
     [
@@ -1277,6 +1945,10 @@ export function getSalarySlipEarningBreakdown(
     [
       isMr ? 'संपर्क खर्च (Communication Expenses)' : 'Communication Expenses',
       slip.communicationExpensesPaise || 0,
+    ],
+    [
+      isMr ? 'हेल्थ क्लब भत्ता (Health Club Allowance)' : 'Health Club Allowance',
+      slip.healthClubAllowancePaise || 0,
     ],
     [
       isMr ? 'तात्पुरता भत्ता (Adhoc Allowance)' : 'Adhoc Allowance',
@@ -1293,9 +1965,32 @@ export function getSalarySlipEarningBreakdown(
     [isMr ? 'विशेष भत्ता (Special Allowance)' : 'Special Allowance', slip.specialAllowancePaise],
     [isMr ? 'इन्सेंटिव्ह (Incentive)' : 'Incentive', slip.incentivePaise],
     [isMr ? 'ओव्हरटाईम (Overtime)' : 'Overtime', slip.overtimePaise],
+    [isMr ? 'थकबाकी (Arrears)' : 'Arrears', slip.arrearsPaise || 0],
     [isMr ? 'इतर उत्पन्न (Other Earnings)' : 'Other Earnings', slip.otherEarningsPaise],
   ];
   return rows.filter(([, amt], idx) => idx === 0 || amt > 0);
+}
+
+/**
+ * Returns the ordered non-zero deduction rows for Official Salary Slip PDFs & Staff App views.
+ */
+export function getSalarySlipDeductionBreakdown(
+  slip: SalarySlip,
+  lang: 'en' | 'mr' = 'en',
+): Array<[string, number]> {
+  const isMr = lang === 'mr';
+  const rows: Array<[string, number]> = [
+    [isMr ? 'भविष्य निर्वाह निधी (PF)' : 'Provident Fund (PF)', slip.pfPaise],
+    [isMr ? 'ईएसआयसी (ESIC)' : 'ESIC Contribution', slip.esicPaise],
+    [isMr ? 'व्यवसाय कर (PT)' : 'Professional Tax (PT)', slip.ptPaise],
+    [isMr ? 'कामगार कल्याण निधी (LWF)' : 'Labour Welfare Fund (LWF)', slip.lwfPaise || 0],
+    [isMr ? 'अ‍ॅडव्हान्स / कर्ज वसुली (Advance)' : 'Advance / Loan Recovery', slip.advanceRecoveryPaise],
+    [isMr ? 'आयकर (TDS)' : 'Income Tax (TDS)', slip.tdsPaise],
+    [isMr ? 'दंड (Penalty)' : 'Penalty', slip.penaltyPaise || 0],
+    [isMr ? 'विमा (Insurance)' : 'Insurance', slip.insurancePaise || 0],
+    [isMr ? 'इतर कपात (Other Deductions)' : 'Other Deductions', slip.otherDeductionPaise],
+  ];
+  return rows.filter(([, amt]) => amt > 0);
 }
 
 export function getEffectiveDepartmentId(

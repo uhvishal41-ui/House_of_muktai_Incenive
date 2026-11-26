@@ -514,7 +514,7 @@ export function AdminAnalytics({
   };
 
   const handleExportAlertsCsv = () => {
-    const header = 'Month,Branch,Salesman No,Employee Name,Sale Amt (Rs),Sale Qty,Incentive (Rs),Alert Flag';
+    const header = 'Month,Branch,Employee ID,Employee Name,Sale Amt (Rs),Sale Qty,Incentive (Rs),Alert Flag';
     const lines = lowPerformerAlerts.map((a) =>
       [
         selectedMonth,
@@ -619,14 +619,14 @@ export function AdminAnalytics({
     },
     {
       key: 'dept_leaders',
-      label: 'Dept. Leaders',
-      sublabel: `${OFFICIAL_DEPARTMENTS.length} depts · Top 3 Sale`,
+      label: 'Department Leaders',
+      sublabel: `${OFFICIAL_DEPARTMENTS.length} departments · Top 3 Sales`,
       icon: Trophy,
     },
     {
       key: 'efficiency',
       label: 'Branch Efficiency',
-      sublabel: `${kpis.incentivePct.toFixed(2)}% inc-to-sale`,
+      sublabel: `${kpis.incentivePct.toFixed(2)}% incentive-to-sale`,
       icon: Building2,
     },
     {
@@ -1027,9 +1027,9 @@ export function AdminAnalytics({
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 font-semibold text-slate-600">
                   <th className="py-2.5 px-4">Branch</th>
-                  <th className="py-2.5 px-4">Sales Person / No</th>
-                  <th className="py-2.5 px-4 text-right">Sale Amt</th>
-                  <th className="py-2.5 px-4 text-right">Branch Avg</th>
+                  <th className="py-2.5 px-4">Employee Name &amp; ID</th>
+                  <th className="py-2.5 px-4 text-right">Sale Amount</th>
+                  <th className="py-2.5 px-4 text-right">Branch Average</th>
                   <th className="py-2.5 px-4 text-right">Incentive</th>
                   <th className="py-2.5 px-4">Alert Reason</th>
                 </tr>
@@ -1043,7 +1043,7 @@ export function AdminAnalytics({
                     <td className="py-2.5 px-4">
                       <div className="font-medium text-slate-900">{item.employee.fullName}</div>
                       <div className="font-mono text-[11px] text-slate-500">
-                        Salesman No: {item.employee.employeeId}
+                        Employee ID: {item.employee.employeeId}
                       </div>
                     </td>
                     <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-900">
@@ -1099,8 +1099,8 @@ export function AdminAnalytics({
           <div className="inline-flex p-0.5 bg-slate-100 rounded-lg text-xs self-start sm:self-auto">
             {(
               [
-                ['saleAmt', 'By Sale Amt'],
-                ['saleQty', 'By Sale Qty'],
+                ['saleAmt', 'By Sale Amount'],
+                ['saleQty', 'By Sale Quantity'],
                 ['incentive', 'By Incentive'],
               ] as Array<[LeaderboardSort, string]>
             ).map(([k, lbl]) => (
@@ -1128,12 +1128,12 @@ export function AdminAnalytics({
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 font-semibold text-slate-600">
                   <th className="py-2.5 px-4 w-14">Rank</th>
-                  <th className="py-2.5 px-4">Sales Person / No</th>
+                  <th className="py-2.5 px-4">Employee Name &amp; ID</th>
                   <th className="py-2.5 px-4">Branch</th>
-                  <th className="py-2.5 px-4 text-right">Total Sale Amt</th>
-                  <th className="py-2.5 px-4 text-right">Total Sale Qty</th>
+                  <th className="py-2.5 px-4 text-right">Total Sale Amount</th>
+                  <th className="py-2.5 px-4 text-right">Total Sale Quantity</th>
                   <th className="py-2.5 px-4 text-right">Total Incentive</th>
-                  <th className="py-2.5 px-4 text-right">Inc % of Sale</th>
+                  <th className="py-2.5 px-4 text-right">Incentive % of Sale</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -1143,7 +1143,7 @@ export function AdminAnalytics({
                     <td className="py-3 px-4">
                       <div className="font-medium text-slate-900">{row.employeeName}</div>
                       <div className="font-mono text-[11px] text-slate-500">
-                        Salesman No: {row.employeeId}
+                        Employee ID: {row.employeeId}
                       </div>
                     </td>
                     <td className="py-3 px-4 text-slate-700">{row.branchName}</td>
@@ -1191,14 +1191,14 @@ export function AdminAnalytics({
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50 font-semibold text-slate-600">
                 <th className="py-2.5 px-3">Branch</th>
-                <th className="py-2.5 px-3 text-right">Staff</th>
-                <th className="py-2.5 px-3 text-right">Sale Amt</th>
-                <th className="py-2.5 px-3 text-right">Sale Qty</th>
-                <th className="py-2.5 px-3 text-right">Gross Inc</th>
-                <th className="py-2.5 px-3 text-right">Inc %</th>
+                <th className="py-2.5 px-3 text-right">Active Staff</th>
+                <th className="py-2.5 px-3 text-right">Sale Amount</th>
+                <th className="py-2.5 px-3 text-right">Sale Quantity</th>
+                <th className="py-2.5 px-3 text-right">Gross Incentive</th>
+                <th className="py-2.5 px-3 text-right">Incentive %</th>
                 <th className="py-2.5 px-3 text-right">Adjustments</th>
                 <th className="py-2.5 px-3 text-right">Net Payable</th>
-                <th className="py-2.5 px-3 text-right">Paid</th>
+                <th className="py-2.5 px-3 text-right">Paid Staff</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">

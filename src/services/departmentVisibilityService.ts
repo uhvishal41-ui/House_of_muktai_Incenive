@@ -17,14 +17,17 @@ import {
   computeDepartmentLeaderboardsAndRanks,
   getDepartmentById,
   isMonthVisibleToEmployees,
+  isSalarySlipMonthVisibleToEmployees,
 } from '../lib/departmentLeaderboardEngine';
+import { buildBirthdayProfileFromEmployee } from '../lib/birthdayEngine';
+import { buildActiveAuthUidRecord } from '../lib/employeeRecordHelpers';
 import { getOverlappingMonthKeys } from '../lib/incentiveEngine';
 import type {
-  ActiveAuthUidRecord,
   AuditLog,
   DepartmentId,
   DepartmentLeaderboard,
   Employee,
+  EmployeeColumnSettings,
   EmployeeDepartmentRank,
   PortalVisibilitySettings,
   PublishedIncentive,
@@ -35,6 +38,8 @@ export const DEFAULT_PORTAL_VISIBILITY: PortalVisibilitySettings = {
   settingId: 'visibility',
   mode: 'ALL',
   visibleMonths: [],
+  salarySlipMode: 'ALL',
+  salarySlipVisibleMonths: [],
   updatedByEmail: '',
   updatedAt: '',
 };
@@ -75,18 +80,36 @@ async function writeVisibilityAuditLog(params: {
 // 1. ADMIN-CONTROLLED EMPLOYEE MONTH VISIBILITY (portal_settings/visibility)
 // =========================================================================
 
+function normalizeVisibilityDoc(data: Partial<PortalVisibilitySettings>): PortalVisibilitySettings {
+  const mode: VisibilityMode = data.mode === 'SELECTED' ? 'SELECTED' : 'ALL';
+  const visibleMonths = Array.isArray(data.visibleMonths) ? data.visibleMonths : [];
+  const salarySlipMode: VisibilityMode =
+    data.salarySlipMode === 'SELECTED'
+      ? 'SELECTED'
+      : data.salarySlipMode === 'ALL'
+        ? 'ALL'
+        : mode;
+  const salarySlipVisibleMonths = Array.isArray(data.salarySlipVisibleMonths)
+    ? data.salarySlipVisibleMonths
+    : data.salarySlipMode
+      ? []
+      : visibleMonths;
+  return {
+    settingId: 'visibility',
+    mode,
+    visibleMonths,
+    salarySlipMode,
+    salarySlipVisibleMonths,
+    updatedByEmail: data.updatedByEmail || '',
+    updatedAt: data.updatedAt || '',
+  };
+}
+
 export async function fetchPortalVisibilitySettings(): Promise<PortalVisibilitySettings> {
   try {
     const snap = await getDoc(doc(db, 'portal_settings', 'visibility'));
     if (!snap.exists()) return { ...DEFAULT_PORTAL_VISIBILITY };
-    const data = snap.data() as PortalVisibilitySettings;
-    return {
-      settingId: 'visibility',
-      mode: data.mode === 'SELECTED' ? 'SELECTED' : 'ALL',
-      visibleMonths: Array.isArray(data.visibleMonths) ? data.visibleMonths : [],
-      updatedByEmail: data.updatedByEmail || '',
-      updatedAt: data.updatedAt || '',
-    };
+    return normalizeVisibilityDoc(snap.data() as Partial<PortalVisibilitySettings>);
   } catch {
     return { ...DEFAULT_PORTAL_VISIBILITY };
   }
@@ -103,20 +126,86 @@ export function subscribePortalVisibilitySettings(
         onData({ ...DEFAULT_PORTAL_VISIBILITY });
         return;
       }
-      const data = snap.data() as PortalVisibilitySettings;
-      onData({
-        settingId: 'visibility',
-        mode: data.mode === 'SELECTED' ? 'SELECTED' : 'ALL',
-        visibleMonths: Array.isArray(data.visibleMonths) ? data.visibleMonths : [],
-        updatedByEmail: data.updatedByEmail || '',
-        updatedAt: data.updatedAt || '',
-      });
+      onData(normalizeVisibilityDoc(snap.data() as Partial<PortalVisibilitySettings>));
     },
     () => {
       // Fallback cleanly to ALL if settings document is not yet provisioned
       onData({ ...DEFAULT_PORTAL_VISIBILITY });
     },
   );
+}
+
+// =========================================================================
+// 1b. ADMIN-ONLY EMPLOYEE MASTER CUSTOM COLUMNS (portal_settings/employee_columns)
+// =========================================================================
+
+export const DEFAULT_EMPLOYEE_COLUMN_SETTINGS: EmployeeColumnSettings = {
+  settingId: 'employee_columns',
+  customColumns: [],
+  visibleColumns: [],
+  updatedByEmail: '',
+  updatedAt: '',
+};
+
+function sanitizeStringList(list: unknown, maxItems: number, maxLen: number): string[] {
+  if (!Array.isArray(list)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    const clean = String(item || '').trim().slice(0, maxLen);
+    const norm = clean.toLowerCase();
+    if (!clean || seen.has(norm) || out.length >= maxItems) continue;
+    seen.add(norm);
+    out.push(clean);
+  }
+  return out;
+}
+
+export function subscribeEmployeeColumnSettings(
+  onData: (settings: EmployeeColumnSettings | null) => void,
+): Unsubscribe {
+  const ref = doc(db, 'portal_settings', 'employee_columns');
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (!snap.exists()) {
+        onData(null);
+        return;
+      }
+      const raw = snap.data() as Partial<EmployeeColumnSettings>;
+      onData({
+        settingId: 'employee_columns',
+        customColumns: sanitizeStringList(raw.customColumns, 25, 60),
+        visibleColumns: sanitizeStringList(raw.visibleColumns, 45, 70),
+        updatedByEmail: raw.updatedByEmail || '',
+        updatedAt: raw.updatedAt || '',
+      });
+    },
+    () => {
+      onData(null);
+    },
+  );
+}
+
+export async function saveEmployeeColumnSettings(params: {
+  customColumns: string[];
+  visibleColumns: string[];
+}): Promise<EmployeeColumnSettings> {
+  const actor = requireActor();
+  const now = new Date().toISOString();
+  const payload: EmployeeColumnSettings = {
+    settingId: 'employee_columns',
+    customColumns: sanitizeStringList(params.customColumns, 25, 60),
+    visibleColumns: sanitizeStringList(params.visibleColumns, 45, 70),
+    updatedByEmail: actor.email,
+    updatedAt: now,
+  };
+  try {
+    await setDoc(doc(db, 'portal_settings', 'employee_columns'), payload);
+    return payload;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'portal_settings/employee_columns');
+  }
 }
 
 const VISIBILITY_SCOPED_COLLECTIONS = [
@@ -136,43 +225,66 @@ export interface SaveVisibilityResult {
 }
 
 /**
- * Super Admin ONLY:
- * Updates `portal_settings/visibility` AND stamps `employeeVisible` across all 7 monthly
- * employee-readable collections so Firestore Rules enforce month visibility server-side
- * with zero downtime and zero deletion of Admin history.
+ * Admin & Main Owner:
+ * Updates `portal_settings/visibility` AND stamps `employeeVisible` independently across:
+ *   - 7 Incentive / Leaderboard / Payout collections (controlled by `mode` + `visibleMonths`)
+ *   - `salary_slips` collection (controlled by `salarySlipMode` + `salarySlipVisibleMonths`)
+ * so Firestore Rules enforce both gates server-side with zero deletion of history.
  */
 export async function savePortalVisibilitySettings(params: {
   mode: VisibilityMode;
   visibleMonths: string[];
+  salarySlipMode?: VisibilityMode;
+  salarySlipVisibleMonths?: string[];
 }): Promise<SaveVisibilityResult> {
   const actor = requireActor();
   const now = new Date().toISOString();
 
-  const normalizedMonths = Array.from(
-    new Set(
-      (params.visibleMonths || [])
-        .map((m) => String(m || '').trim())
-        .filter((m) => /^\d{4}-\d{2}$/.test(m)),
-    ),
-  )
-    .sort((a, b) => b.localeCompare(a))
-    .slice(0, 48);
+  const normalizeMonthList = (list: string[] | undefined): string[] =>
+    Array.from(
+      new Set(
+        (list || [])
+          .map((m) => String(m || '').trim())
+          .filter((m) => /^\d{4}-\d{2}$/.test(m)),
+      ),
+    )
+      .sort((a, b) => b.localeCompare(a))
+      .slice(0, 48);
+
+  const normalizedIncentiveMonths = normalizeMonthList(params.visibleMonths);
+  const nextIncentiveMode: VisibilityMode = params.mode === 'SELECTED' ? 'SELECTED' : 'ALL';
+  const nextSalarySlipMode: VisibilityMode =
+    params.salarySlipMode === 'SELECTED'
+      ? 'SELECTED'
+      : params.salarySlipMode === 'ALL'
+        ? 'ALL'
+        : nextIncentiveMode;
+  const normalizedSalarySlipMonths =
+    params.salarySlipVisibleMonths !== undefined
+      ? normalizeMonthList(params.salarySlipVisibleMonths)
+      : params.salarySlipMode !== undefined
+        ? []
+        : normalizedIncentiveMonths;
 
   const nextSettings: PortalVisibilitySettings = {
     settingId: 'visibility',
-    mode: params.mode === 'SELECTED' ? 'SELECTED' : 'ALL',
-    visibleMonths: normalizedMonths,
+    mode: nextIncentiveMode,
+    visibleMonths: normalizedIncentiveMonths,
+    salarySlipMode: nextSalarySlipMode,
+    salarySlipVisibleMonths: normalizedSalarySlipMonths,
     updatedByEmail: actor.email,
     updatedAt: now,
   };
 
+  const bothRelaxedToAll = nextIncentiveMode === 'ALL' && nextSalarySlipMode === 'ALL';
+
   try {
-    // When relaxing to ALL, write portal_settings first so active employees immediately unlock
-    if (nextSettings.mode === 'ALL') {
+    // When relaxing BOTH to ALL, write portal_settings first so active employees immediately unlock
+    if (bothRelaxedToAll) {
       await setDoc(doc(db, 'portal_settings', 'visibility'), nextSettings);
     }
 
-    // Stamp `employeeVisible` across all 8 monthly collections
+    // Stamp `employeeVisible` across all 8 monthly collections with independent Incentive vs Salary Slip gates
     const snaps = await Promise.all(
       VISIBILITY_SCOPED_COLLECTIONS.map((colName) => getDocs(collection(db, colName))),
     );
@@ -186,11 +298,13 @@ export async function savePortalVisibilitySettings(params: {
         const monthKey = typeof data.monthKey === 'string' ? data.monthKey : '';
         if (!monthKey) continue;
         const shouldBeVisible =
-          colName === 'published_incentives' && data.periodStart && data.periodEnd
-            ? getOverlappingMonthKeys(data as PublishedIncentive).some((m) =>
-                isMonthVisibleToEmployees(m, nextSettings),
-              )
-            : isMonthVisibleToEmployees(monthKey, nextSettings);
+          colName === 'salary_slips'
+            ? isSalarySlipMonthVisibleToEmployees(monthKey, nextSettings)
+            : colName === 'published_incentives' && data.periodStart && data.periodEnd
+              ? getOverlappingMonthKeys(data as PublishedIncentive).some((m) =>
+                  isMonthVisibleToEmployees(m, nextSettings),
+                )
+              : isMonthVisibleToEmployees(monthKey, nextSettings);
         if (data.employeeVisible !== shouldBeVisible) {
           pendingUpdates.push({ ref: d.ref, employeeVisible: shouldBeVisible });
         }
@@ -205,17 +319,25 @@ export async function savePortalVisibilitySettings(params: {
       await wb.commit();
     }
 
-    // When restricting to SELECTED, write portal_settings AFTER stamping docs so zero race window exists
-    if (nextSettings.mode === 'SELECTED') {
+    // Whenever either gate is SELECTED, write portal_settings AFTER stamping docs so zero race window exists
+    if (!bothRelaxedToAll) {
       await setDoc(doc(db, 'portal_settings', 'visibility'), nextSettings);
     }
 
-    const summaryText =
-      nextSettings.mode === 'ALL'
-        ? `Enabled ALL published months for employee visibility (${pendingUpdates.length} records synced).`
-        : nextSettings.visibleMonths.length === 0
-          ? `Temporarily hid all months from employee view (${pendingUpdates.length} records synced).`
-          : `Restricted employee visibility strictly to ${nextSettings.visibleMonths.join(', ')} (${pendingUpdates.length} records synced).`;
+    const incDesc =
+      nextIncentiveMode === 'ALL'
+        ? 'ALL months'
+        : normalizedIncentiveMonths.length === 0
+          ? 'NONE (hidden)'
+          : normalizedIncentiveMonths.join(', ');
+    const slipDesc =
+      nextSalarySlipMode === 'ALL'
+        ? 'ALL months'
+        : normalizedSalarySlipMonths.length === 0
+          ? 'NONE (hidden)'
+          : normalizedSalarySlipMonths.join(', ');
+
+    const summaryText = `Updated employee month visibility — Incentives: ${incDesc} | Payment Slips: ${slipDesc} (${pendingUpdates.length} records synced).`;
 
     await writeVisibilityAuditLog({
       action: 'UPDATE_MONTH_VISIBILITY',
@@ -256,9 +378,10 @@ export async function bulkUpdateEmployeeDepartments(params: {
 
   type Op =
     | { kind: 'update'; ref: ReturnType<typeof doc>; data: Record<string, unknown> }
-    | { kind: 'set'; ref: ReturnType<typeof doc>; data: Record<string, unknown> };
+    | { kind: 'set'; ref: ReturnType<typeof doc>; data: Record<string, unknown> }
+    | { kind: 'delete'; ref: ReturnType<typeof doc> };
 
-  const ops: Op[] = [];
+  const opUnits: Op[][] = [];
   let updatedCount = 0;
   let activeRegistrySynced = 0;
 
@@ -267,49 +390,84 @@ export async function bulkUpdateEmployeeDepartments(params: {
     const dept = getDepartmentById(item.departmentId);
     if (!emp || !dept) continue;
 
-    ops.push({
-      kind: 'update',
-      ref: doc(db, 'employees', emp.employeeId),
-      data: {
-        departmentId: dept.id,
-        departmentName: dept.name,
-        updatedAt: now,
+    const unit: Op[] = [
+      {
+        kind: 'update',
+        ref: doc(db, 'employees', emp.employeeId),
+        data: {
+          departmentId: dept.id,
+          departmentName: dept.name,
+          updatedAt: now,
+        },
       },
-    });
+    ];
     updatedCount += 1;
 
-    if (emp.status === 'ACTIVE' && emp.authUid) {
-      const activeEntry: ActiveAuthUidRecord = {
-        authUid: emp.authUid,
-        employeeId: emp.employeeId,
-        departmentId: dept.id,
-        active: true,
-        updatedAt: now,
-      };
-      ops.push({
-        kind: 'set',
-        ref: doc(db, 'active_auth_uids', emp.authUid),
-        data: activeEntry as unknown as Record<string, unknown>,
-      });
+    if (emp.authUid && emp.authUid.trim() !== '') {
+      if (emp.status === 'ACTIVE') {
+        const activeEntry = buildActiveAuthUidRecord({
+          authUid: emp.authUid,
+          employeeId: emp.employeeId,
+          departmentId: dept.id,
+          branchId: emp.branchId,
+          branchName: emp.branchName,
+          isBranchManager: emp.isBranchManager,
+          updatedAt: now,
+        });
+        unit.push({
+          kind: 'set',
+          ref: doc(db, 'active_auth_uids', emp.authUid),
+          data: activeEntry as unknown as Record<string, unknown>,
+        });
+      } else {
+        unit.push({ kind: 'delete', ref: doc(db, 'active_auth_uids', emp.authUid) });
+      }
       activeRegistrySynced += 1;
     }
+
+    const updatedBirthdayProfile = buildBirthdayProfileFromEmployee(
+      { ...emp, departmentId: dept.id, departmentName: dept.name },
+      now,
+    );
+    if (updatedBirthdayProfile) {
+      unit.push({
+        kind: 'set',
+        ref: doc(db, 'birthday_profiles', emp.employeeId),
+        data: updatedBirthdayProfile as unknown as Record<string, unknown>,
+      });
+    }
+
+    opUnits.push(unit);
   }
 
-  if (ops.length === 0) {
+  if (opUnits.length === 0) {
     return { updatedCount: 0, activeRegistrySynced: 0 };
   }
 
   try {
-    // Keep batches <= 350 ops so employee + active_auth_uids pairs never split across batches unnecessarily
-    for (let i = 0; i < ops.length; i += 350) {
-      const wb = writeBatch(db);
-      for (const op of ops.slice(i, i + 350)) {
+    // Never split an employee's atomic unit across batch boundaries (<= 300 ops per commit)
+    let wb = writeBatch(db);
+    let opsInBatch = 0;
+
+    for (const unit of opUnits) {
+      if (opsInBatch + unit.length > 300) {
+        await wb.commit();
+        wb = writeBatch(db);
+        opsInBatch = 0;
+      }
+      for (const op of unit) {
         if (op.kind === 'set') {
           wb.set(op.ref, op.data);
-        } else {
+        } else if (op.kind === 'update') {
           wb.update(op.ref, op.data);
+        } else {
+          wb.delete(op.ref);
         }
+        opsInBatch += 1;
       }
+    }
+
+    if (opsInBatch > 0) {
       await wb.commit();
     }
 

@@ -2,6 +2,7 @@ import { jsPDF } from 'jspdf';
 import { COMPANY_BRAND, DEFAULT_EMPLOYEE_PASSWORD } from './companyBrand';
 import { formatMonthLabel, formatQty, formatShortDate } from './format';
 import {
+  getSalarySlipDeductionBreakdown,
   getSalarySlipEarningBreakdown,
   paiseToIndianWords,
 } from './salarySlipEngine';
@@ -240,7 +241,7 @@ export async function downloadEmployeeIncentiveSlipPdf(
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.8);
   doc.setTextColor(71, 85, 105);
-  doc.text(`Salesman No: ${input.employeeId}`, margin + 4.5, y + 15);
+  doc.text(`Employee ID: ${input.employeeId}`, margin + 4.5, y + 15);
   doc.text(`Branch: ${input.branchName}`, margin + 4.5, y + 21.5);
 
   doc.setTextColor(15, 23, 42);
@@ -688,8 +689,14 @@ export async function downloadCredentialSheetPdf(params: {
   doc.save(`house-of-muktai-staff-logins-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
 
-export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<void> {
-  const logoDataUrl = await loadBrandLogoPngDataUrl();
+export async function loadBrandLogoPngDataUrlPublic(): Promise<string | null> {
+  return loadBrandLogoPngDataUrl();
+}
+
+export function buildEmployeeSalarySlipPdfDoc(
+  slip: SalarySlip,
+  logoDataUrl: string | null,
+): jsPDF {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
   const margin = 15;
@@ -705,8 +712,8 @@ export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<v
     margin,
   });
 
-  // 1. Employee & Statutory Identity Block (2-column executive card)
-  const boxH = 42;
+  // 1. Employee & Statutory Identity Block (2-column executive card; UAN No stacked above PF No)
+  const boxH = 46.5;
   doc.setDrawColor(203, 213, 225);
   doc.setFillColor(248, 250, 252);
   doc.roundedRect(margin, y, contentW, boxH, 2, 2, 'FD');
@@ -728,12 +735,13 @@ export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<v
     ['Account No', slip.bankAccountMasked || '—'],
     ['IFSC Code', slip.bankIfsc || '—'],
     ['PAN', slip.panNumber || '—'],
-    ['UAN / PF No', [slip.uanNumber, slip.pfNumber].filter(Boolean).join(' / ') || '—'],
+    ['UAN No', slip.uanNumber || '—'],
+    ['PF No', slip.pfNumber || '—'],
     ['ESIC No', slip.esicNumber || '—'],
   ];
 
   leftRows.forEach(([label, value], i) => {
-    const ry = y + 7 + i * 6;
+    const ry = y + 6.8 + i * 6.4;
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7.8);
     doc.setTextColor(100, 116, 139);
@@ -744,53 +752,66 @@ export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<v
   });
 
   rightRows.forEach(([label, value], i) => {
-    const ry = y + 7 + i * 6;
+    const ry = y + 6.6 + i * 5.8;
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7.8);
     doc.setTextColor(100, 116, 139);
     doc.text(label, midX, ry);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(15, 31, 61);
-    doc.text(String(value || '—').slice(0, 30), midX + 26, ry);
+    doc.text(String(value || '—').slice(0, 34), midX + 24, ry);
   });
 
-  y += boxH + 5;
+  y += boxH + 4;
 
   // 2. Attendance Summary Strip (6 clean cells)
+  const otDisplayLabel =
+    slip.overtimeDays && slip.overtimeDays > 0 && !slip.overtimeHours ? 'OT Days' : 'OT Hours';
+  const otDisplayValue =
+    slip.overtimeDays && slip.overtimeDays > 0 && !slip.overtimeHours
+      ? String(slip.overtimeDays)
+      : String(slip.overtimeHours);
   const attendanceCols = [
     { label: 'Total Days', value: String(slip.totalDays) },
     { label: 'Paid Days', value: String(slip.paidDays) },
     { label: 'LOP / Absent', value: String(slip.lopDays) },
     { label: 'Weekly Off', value: String(slip.weeklyOffDays) },
-    { label: 'Paid Leave', value: String(slip.paidLeaveDays) },
-    { label: 'OT Hours', value: String(slip.overtimeHours) },
+    {
+      label: slip.presentDays && slip.presentDays > 0 && !slip.paidLeaveDays ? 'Present Days' : 'Paid Leave',
+      value:
+        slip.presentDays && slip.presentDays > 0 && !slip.paidLeaveDays
+          ? String(slip.presentDays)
+          : String(slip.paidLeaveDays),
+    },
+    { label: otDisplayLabel, value: otDisplayValue },
   ];
   const attW = contentW / attendanceCols.length;
+  const attH = 13;
   doc.setDrawColor(203, 213, 225);
   doc.setFillColor(255, 255, 255);
-  doc.roundedRect(margin, y, contentW, 14, 1.5, 1.5, 'FD');
+  doc.roundedRect(margin, y, contentW, attH, 1.5, 1.5, 'FD');
 
   attendanceCols.forEach((col, i) => {
     const cx = margin + i * attW;
     if (i > 0) {
       doc.setDrawColor(226, 232, 240);
-      doc.line(cx, y, cx, y + 14);
+      doc.line(cx, y, cx, y + attH);
     }
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7);
     doc.setTextColor(100, 116, 139);
-    doc.text(col.label, cx + attW / 2, y + 5, { align: 'center' });
+    doc.text(col.label, cx + attW / 2, y + 4.7, { align: 'center' });
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9.2);
+    doc.setFontSize(9);
     doc.setTextColor(15, 31, 61);
-    doc.text(col.value, cx + attW / 2, y + 11, { align: 'center' });
+    doc.text(col.value, cx + attW / 2, y + 10.4, { align: 'center' });
   });
 
-  y += 20;
+  y += attH + 4;
 
   // 3. Side-by-Side Earnings & Deductions Table
   const halfW = contentW / 2;
-  const headerH = 8.5;
+  const headerH = 8;
 
   // Navy Header Bar
   doc.setFillColor(15, 31, 61);
@@ -798,10 +819,10 @@ export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<v
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.2);
-  doc.text('EARNINGS', margin + 4, y + 5.7);
-  doc.text('AMOUNT', margin + halfW - 4, y + 5.7, { align: 'right' });
-  doc.text('DEDUCTIONS', margin + halfW + 4, y + 5.7);
-  doc.text('AMOUNT', pageWidth - margin - 4, y + 5.7, { align: 'right' });
+  doc.text('EARNINGS', margin + 4, y + 5.4);
+  doc.text('AMOUNT', margin + halfW - 4, y + 5.4, { align: 'right' });
+  doc.text('DEDUCTIONS', margin + halfW + 4, y + 5.4);
+  doc.text('AMOUNT', pageWidth - margin - 4, y + 5.4, { align: 'right' });
 
   // Vertical gold divider in header
   doc.setDrawColor(184, 146, 58);
@@ -810,25 +831,16 @@ export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<v
   y += headerH;
 
   const earningsRows = getSalarySlipEarningBreakdown(slip, 'en');
-
-  const allDeductionRows: Array<[string, number]> = [
-    ['Provident Fund (PF)', slip.pfPaise],
-    ['ESIC Contribution', slip.esicPaise],
-    ['Professional Tax (PT)', slip.ptPaise],
-    ['Advance / Loan Recovery', slip.advanceRecoveryPaise],
-    ['Income Tax (TDS)', slip.tdsPaise],
-    ['Other Deductions', slip.otherDeductionPaise],
-  ];
-  const deductionRows = allDeductionRows.filter(([, amt]) => amt > 0);
+  const deductionRows = getSalarySlipDeductionBreakdown(slip, 'en');
 
   if (deductionRows.length === 0) {
     deductionRows.push(['No Deductions', 0]);
   }
 
   const maxLines = Math.max(earningsRows.length, deductionRows.length, 5);
-  const rowH = maxLines > 10 ? 5.6 : maxLines > 7 ? 6.4 : 7.4;
+  const rowH = maxLines > 12 ? 5.2 : maxLines > 9 ? 5.8 : maxLines > 7 ? 6.4 : 7.2;
   const textBaseline = rowH * 0.68;
-  const rowFontSize = maxLines > 10 ? 7.6 : 8.2;
+  const rowFontSize = maxLines > 12 ? 7.3 : maxLines > 9 ? 7.6 : 8.2;
 
   for (let i = 0; i < maxLines; i += 1) {
     if (i % 2 === 1) {
@@ -864,51 +876,53 @@ export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<v
   }
 
   // Gross & Total Deductions Footer Row
+  const footerRowH = 8.5;
   doc.setFillColor(241, 245, 249);
-  doc.rect(margin, y, contentW, 9, 'F');
+  doc.rect(margin, y, contentW, footerRowH, 'F');
   doc.setDrawColor(203, 213, 225);
-  doc.rect(margin, y, halfW, 9, 'S');
-  doc.rect(margin + halfW, y, halfW, 9, 'S');
+  doc.rect(margin, y, halfW, footerRowH, 'S');
+  doc.rect(margin + halfW, y, halfW, footerRowH, 'S');
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8.6);
+  doc.setFontSize(8.4);
   doc.setTextColor(15, 31, 61);
-  doc.text('GROSS EARNINGS (A)', margin + 4, y + 6);
-  doc.text(formatRsPdf(slip.grossEarningsPaise), margin + halfW - 4, y + 6, { align: 'right' });
+  doc.text('GROSS EARNINGS (A)', margin + 4, y + 5.7);
+  doc.text(formatRsPdf(slip.grossEarningsPaise), margin + halfW - 4, y + 5.7, { align: 'right' });
 
-  doc.text('TOTAL DEDUCTIONS (B)', margin + halfW + 4, y + 6);
-  doc.text(formatRsPdf(slip.totalDeductionsPaise), pageWidth - margin - 4, y + 6, {
+  doc.text('TOTAL DEDUCTIONS (B)', margin + halfW + 4, y + 5.7);
+  doc.text(formatRsPdf(slip.totalDeductionsPaise), pageWidth - margin - 4, y + 5.7, {
     align: 'right',
   });
 
-  y += 15;
+  y += footerRowH + 4;
 
   // 4. Net Payable Highlight Box (Corporate Navy + Heritage Gold)
+  const netBoxH = 23;
   doc.setFillColor(15, 31, 61);
-  doc.roundedRect(margin, y, contentW, 25, 2, 2, 'F');
+  doc.roundedRect(margin, y, contentW, netBoxH, 2, 2, 'F');
   doc.setFillColor(184, 146, 58);
   doc.rect(margin, y, contentW, 1.8, 'F');
 
   doc.setTextColor(223, 194, 125);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8.2);
-  doc.text('NET SALARY PAYABLE (A - B)', margin + 5, y + 8.5);
+  doc.setFontSize(8);
+  doc.text('NET SALARY PAYABLE (A - B)', margin + 5, y + 8);
 
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(15);
-  doc.text(formatRsPdf(slip.netPayablePaise), pageWidth - margin - 5, y + 10, {
+  doc.setFontSize(14.5);
+  doc.text(formatRsPdf(slip.netPayablePaise), pageWidth - margin - 5, y + 9.5, {
     align: 'right',
   });
 
   doc.setTextColor(226, 232, 240);
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.8);
+  doc.setFontSize(7.6);
   const wordsText = `In Words: ${paiseToIndianWords(slip.netPayablePaise)}`;
   const wrappedWords = doc.splitTextToSize(wordsText, contentW - 10);
-  doc.text(wrappedWords.slice(0, 2), margin + 5, y + 17.5);
+  doc.text(wrappedWords.slice(0, 2), margin + 5, y + 16);
 
-  y += 31;
+  y += netBoxH + 4;
 
   // 5. Settlement & Remarks Metadata Strip
   const settlementParts: string[] = [];
@@ -919,35 +933,35 @@ export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<v
   if (settlementParts.length > 0 || slip.remarks) {
     doc.setDrawColor(226, 232, 240);
     doc.setFillColor(248, 250, 252);
-    const metaH = slip.remarks ? 17 : 11;
+    const metaH = slip.remarks ? 15.5 : 10;
     doc.roundedRect(margin, y, contentW, metaH, 1.5, 1.5, 'FD');
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(7.8);
+    doc.setFontSize(7.7);
     doc.setTextColor(15, 31, 61);
     doc.text(
       settlementParts.length > 0
         ? `Settlement Details: ${settlementParts.join('   |   ')}`
         : 'Settlement Notes:',
       margin + 4,
-      y + 6.5,
+      y + 6,
     );
     if (slip.remarks) {
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(7.6);
+      doc.setFontSize(7.4);
       doc.setTextColor(71, 85, 105);
-      doc.text(`Remarks: ${slip.remarks.slice(0, 120)}`, margin + 4, y + 13);
+      doc.text(`Remarks: ${slip.remarks.slice(0, 120)}`, margin + 4, y + 12);
     }
-    y += metaH + 6;
+    y += metaH + 3.5;
   }
 
-  // Authorized computer-generated notice
+  // Authorized computer-generated notice (positioned safely above the corporate footer at y=280)
   doc.setFont('helvetica', 'italic');
-  doc.setFontSize(7.5);
+  doc.setFontSize(7.3);
   doc.setTextColor(100, 116, 139);
   doc.text(
     'This is a computer-generated confidential salary slip issued by SHRIMUKTAI MART PRIVATE LIMITED and does not require a physical signature.',
     margin,
-    Math.min(y + 4, 266),
+    Math.min(y + 3.5, 275),
   );
 
   drawCorporateFooter({
@@ -958,7 +972,22 @@ export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<v
     totalPages: 1,
   });
 
+  return doc;
+}
+
+export async function buildEmployeeSalarySlipPdfBytes(
+  slip: SalarySlip,
+  cachedLogoDataUrl?: string | null,
+): Promise<Uint8Array> {
+  const logoDataUrl =
+    cachedLogoDataUrl !== undefined ? cachedLogoDataUrl : await loadBrandLogoPngDataUrl();
+  const doc = buildEmployeeSalarySlipPdfDoc(slip, logoDataUrl);
+  return new Uint8Array(doc.output('arraybuffer'));
+}
+
+export async function downloadEmployeeSalarySlipPdf(slip: SalarySlip): Promise<void> {
+  const logoDataUrl = await loadBrandLogoPngDataUrl();
+  const doc = buildEmployeeSalarySlipPdfDoc(slip, logoDataUrl);
   const safeEmp = slip.employeeId.replace(/[^a-zA-Z0-9_-]/g, '_');
   doc.save(`house-of-muktai-salary-slip-${safeEmp}-${slip.monthKey}.pdf`);
 }
-

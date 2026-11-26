@@ -1016,7 +1016,7 @@ export function BranchTargetManager({
                             className="rounded border-slate-300 text-[#0F1F3D]"
                           />
                         </th>
-                        <th className="py-2.5 px-3 min-w-[175px]">Employee / Salesman No</th>
+                        <th className="py-2.5 px-3 min-w-[175px]">Employee Name &amp; ID</th>
                         <th className="py-2.5 px-3 text-right whitespace-nowrap">
                           {formatMonthLabel(baselineMonth)} Sale
                         </th>
@@ -1024,7 +1024,7 @@ export function BranchTargetManager({
                         <th className="py-2.5 px-3 text-right min-w-[135px]">
                           {formatMonthLabel(targetMonth)} Target (₹)
                         </th>
-                        <th className="py-2.5 px-3 text-right w-24">Target Qty</th>
+                        <th className="py-2.5 px-3 text-right w-24">Target Quantity</th>
                         <th className="py-2.5 px-3 text-right whitespace-nowrap">
                           Live Achieved ({formatMonthLabel(targetMonth)})
                         </th>

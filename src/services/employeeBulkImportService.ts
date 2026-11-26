@@ -1,5 +1,6 @@
-import { doc, writeBatch } from 'firebase/firestore';
+import { deleteField, doc, writeBatch } from 'firebase/firestore';
 import { buildBirthdayProfileFromEmployee } from '../lib/birthdayEngine';
+import { buildActiveAuthUidRecord } from '../lib/employeeRecordHelpers';
 import {
   db,
   handleFirestoreError,
@@ -10,7 +11,6 @@ import type { ParsedEmployeeMasterRow } from '../lib/employeeBulkImportEngine';
 import { recomputeAndSaveDepartmentRankings } from './departmentVisibilityService';
 import { recordAuditLog } from './incentiveService';
 import type {
-  ActiveAuthUidRecord,
   Employee,
   PortalVisibilitySettings,
   PublishedIncentive,
@@ -69,6 +69,7 @@ export async function commitEmployeeMasterBulkImport(params: {
 
     const empPayload: Employee = {
       employeeId: row.employeeId,
+      ...(row.saleId ? { saleId: row.saleId } : {}),
       loginId: row.loginId,
       authEmail: loginIdToAuthEmail(row.loginId),
       authUid: '',
@@ -76,6 +77,8 @@ export async function commitEmployeeMasterBulkImport(params: {
       branchId: row.branchId,
       branchName: row.branchName,
       designation: row.designation,
+      ...(row.gender ? { gender: row.gender } : {}),
+      ...(row.category ? { category: row.category } : {}),
       role: 'EMPLOYEE',
       status: row.employeeStatus,
       mustChangePassword: true,
@@ -98,6 +101,11 @@ export async function commitEmployeeMasterBulkImport(params: {
       ...(row.bankAccountMasked ? { bankAccountMasked: row.bankAccountMasked } : {}),
       ...(row.bankIfsc ? { bankIfsc: row.bankIfsc } : {}),
       ...(row.linkedGoogleEmail ? { linkedGoogleEmail: row.linkedGoogleEmail } : {}),
+      ...(row.address ? { address: row.address } : {}),
+      ...(row.emergencyContact ? { emergencyContact: row.emergencyContact } : {}),
+      ...(row.customFields && Object.keys(row.customFields).length > 0
+        ? { customFields: row.customFields }
+        : {}),
     };
 
     const unit: BatchOp[] = [
@@ -131,6 +139,7 @@ export async function commitEmployeeMasterBulkImport(params: {
 
     const mergedEmp: Employee = {
       ...existing,
+      ...(row.saleId ? { saleId: row.saleId } : {}),
       loginId: row.loginId,
       authEmail:
         row.loginId !== existing.loginId
@@ -140,6 +149,8 @@ export async function commitEmployeeMasterBulkImport(params: {
       branchId: row.branchId,
       branchName: row.branchName,
       designation: row.designation,
+      ...(row.gender ? { gender: row.gender } : {}),
+      ...(row.category ? { category: row.category } : {}),
       status: row.employeeStatus,
       role: 'EMPLOYEE',
       updatedAt: now,
@@ -163,6 +174,11 @@ export async function commitEmployeeMasterBulkImport(params: {
       ...(row.bankAccountMasked ? { bankAccountMasked: row.bankAccountMasked } : {}),
       ...(row.bankIfsc ? { bankIfsc: row.bankIfsc } : {}),
       ...(row.linkedGoogleEmail ? { linkedGoogleEmail: row.linkedGoogleEmail } : {}),
+      ...(row.address ? { address: row.address } : {}),
+      ...(row.emergencyContact ? { emergencyContact: row.emergencyContact } : {}),
+      ...(row.customFields && Object.keys(row.customFields).length > 0
+        ? { customFields: row.customFields }
+        : {}),
     };
 
     const updateFields: Record<string, unknown> = {
@@ -177,8 +193,11 @@ export async function commitEmployeeMasterBulkImport(params: {
       updatedAt: now,
     };
 
-    if (mergedEmp.departmentId) {
-      updateFields.departmentId = mergedEmp.departmentId;
+    if (mergedEmp.saleId) updateFields.saleId = mergedEmp.saleId;
+    if (mergedEmp.gender) updateFields.gender = mergedEmp.gender;
+    if (mergedEmp.category) updateFields.category = mergedEmp.category;
+    if (mergedEmp.departmentId || mergedEmp.departmentName) {
+      updateFields.departmentId = mergedEmp.departmentId || '';
       updateFields.departmentName = mergedEmp.departmentName || '';
     }
     if (mergedEmp.dateOfBirth) updateFields.dateOfBirth = mergedEmp.dateOfBirth;
@@ -192,6 +211,18 @@ export async function commitEmployeeMasterBulkImport(params: {
     if (mergedEmp.bankAccountMasked) updateFields.bankAccountMasked = mergedEmp.bankAccountMasked;
     if (mergedEmp.bankIfsc) updateFields.bankIfsc = mergedEmp.bankIfsc;
     if (mergedEmp.linkedGoogleEmail) updateFields.linkedGoogleEmail = mergedEmp.linkedGoogleEmail;
+    if (mergedEmp.address) updateFields.address = mergedEmp.address;
+    if (mergedEmp.emergencyContact) updateFields.emergencyContact = mergedEmp.emergencyContact;
+    if (mergedEmp.customFields && Object.keys(mergedEmp.customFields).length > 0) {
+      updateFields.customFields = mergedEmp.customFields;
+    } else if (
+      existing.customFields &&
+      Object.keys(existing.customFields).length > 0 &&
+      row.customFields &&
+      Object.keys(row.customFields).length === 0
+    ) {
+      updateFields.customFields = deleteField();
+    }
 
     const unit: BatchOp[] = [
       {
@@ -205,13 +236,15 @@ export async function commitEmployeeMasterBulkImport(params: {
     if (existing.authUid && existing.authUid.trim() !== '') {
       const activeRef = doc(db, 'active_auth_uids', existing.authUid);
       if (mergedEmp.status === 'ACTIVE') {
-        const activeRecord: ActiveAuthUidRecord = {
+        const activeRecord = buildActiveAuthUidRecord({
           authUid: existing.authUid,
           employeeId: existing.employeeId,
-          ...(mergedEmp.departmentId ? { departmentId: mergedEmp.departmentId } : {}),
-          active: true,
+          departmentId: mergedEmp.departmentId,
+          branchId: mergedEmp.branchId,
+          branchName: mergedEmp.branchName,
+          isBranchManager: mergedEmp.isBranchManager,
           updatedAt: now,
-        };
+        });
         unit.push({
           kind: 'set',
           ref: activeRef,

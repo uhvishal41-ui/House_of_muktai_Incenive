@@ -3,12 +3,14 @@ import {
   Award,
   BarChart3,
   Bell,
+  Building2,
   Cake,
   Calendar,
   Check,
   Eye,
   EyeOff,
   FileDown,
+  Flame,
   Home,
   Lock,
   LogOut,
@@ -68,6 +70,8 @@ import {
   subscribePortalVisibilitySettings,
 } from '../../services/departmentVisibilityService';
 import { subscribeOwnSalarySlips } from '../../services/salarySlipService';
+import { subscribeOwnEmployeeLoans } from '../../services/proFeaturesService';
+import { computePerformanceStreaksAndRetention } from '../../lib/proAnalyticsEngine';
 import {
   subscribeActiveBirthdayProfiles,
   subscribeReceivedBirthdayWishes,
@@ -78,12 +82,16 @@ import {
   getTodayIstParts,
   isBirthdayToday,
 } from '../../lib/birthdayEngine';
-import { isMonthVisibleToEmployees } from '../../lib/departmentLeaderboardEngine';
+import {
+  isMonthVisibleToEmployees,
+  isSalarySlipMonthVisibleToEmployees,
+} from '../../lib/departmentLeaderboardEngine';
 import type {
   BirthdayProfile,
   BirthdayWish,
   DepartmentLeaderboard,
   EmployeeDepartmentRank,
+  EmployeeLoan,
   EmployeeNotification,
   EmployeeQuery,
   IncentiveAdjustment,
@@ -100,6 +108,7 @@ import { BirthdayWishingCardModal } from '../common/BirthdayWishingCardModal';
 import { AnimatedCounter, PageTransition, WorkspaceSkeleton } from '../common/MotionPrimitives';
 import { OfflineIndicator } from '../common/OfflineIndicator';
 import { PWAInstallButton } from '../common/PWAInstallButton';
+import { BranchManagerFloorView } from './BranchManagerFloorView';
 import { DepartmentLeaderboardCard } from './DepartmentLeaderboardCard';
 import { EmployeeSettingsTab } from './EmployeeSettingsTab';
 import { SalarySlipFullList, SalarySlipHomeCard } from './SalarySlipSection';
@@ -109,7 +118,7 @@ const EmployeeReportsTab = lazy(() =>
   import('./EmployeeReportsTab').then((m) => ({ default: m.EmployeeReportsTab })),
 );
 
-type StaffTab = 'home' | 'statements' | 'reports' | 'profile' | 'settings';
+type StaffTab = 'home' | 'statements' | 'reports' | 'branch-floor' | 'profile' | 'settings';
 type ProfileSubView = 'details' | 'queries';
 type StatementsSubView = 'incentives' | 'salary';
 
@@ -232,6 +241,7 @@ export function EmployeePortal() {
   const [rawAdjustments, setRawAdjustments] = useState<IncentiveAdjustment[]>([]);
   const [rawSalesTargets, setRawSalesTargets] = useState<SalesTarget[]>([]);
   const [rawSalarySlips, setRawSalarySlips] = useState<SalarySlip[]>([]);
+  const [ownLoans, setOwnLoans] = useState<EmployeeLoan[]>([]);
   const [queries, setQueries] = useState<EmployeeQuery[]>([]);
   const [visibilitySettings, setVisibilitySettings] = useState<PortalVisibilitySettings>(
     DEFAULT_PORTAL_VISIBILITY,
@@ -319,30 +329,22 @@ export function EmployeePortal() {
 
     const uid = user.uid;
     const empId = employeeProfile?.employeeId;
-    const onlyEmployeeVisible = visibilitySettings.mode === 'SELECTED';
-    const allMonthsTemporarilyHidden =
-      onlyEmployeeVisible && visibilitySettings.visibleMonths.length === 0;
+    const onlyIncentiveVisible = visibilitySettings.mode === 'SELECTED';
+    const allIncentivesHidden =
+      onlyIncentiveVisible && visibilitySettings.visibleMonths.length === 0;
 
-    if (allMonthsTemporarilyHidden) {
-      setRawIncentives([]);
-      setRawSummaries([]);
-      setRawPayoutRecords([]);
-      setRawAdjustments([]);
-      setRawSalesTargets([]);
-      setRawSalarySlips([]);
-      setLoading(false);
-      const unsubs = [
-        subscribeOwnNotifications(uid, (list) => setNotifications(list)),
-        subscribeOwnEmployeeQueries(uid, (list) => setQueries(list)),
-      ];
-      return () => {
-        for (const unsub of unsubs) unsub();
-      };
-    }
+    const resolvedSlipMode =
+      visibilitySettings.salarySlipMode ?? visibilitySettings.mode ?? 'ALL';
+    const resolvedSlipMonths =
+      visibilitySettings.salarySlipVisibleMonths ??
+      (visibilitySettings.salarySlipMode ? [] : visibilitySettings.visibleMonths);
+    const onlySalarySlipVisible = resolvedSlipMode === 'SELECTED';
+    const allSalarySlipsHidden =
+      onlySalarySlipVisible && resolvedSlipMonths.length === 0;
 
-    setLoading(true);
-    let gotIncentives = false;
-    let gotSummaries = false;
+    setLoading(!allIncentivesHidden);
+    let gotIncentives = allIncentivesHidden;
+    let gotSummaries = allIncentivesHidden;
     const markReadyIfCoreLoaded = () => {
       if (gotIncentives && gotSummaries) {
         setLoading(false);
@@ -350,65 +352,90 @@ export function EmployeePortal() {
     };
 
     const fallbackTimer = window.setTimeout(() => setLoading(false), 3500);
+    const unsubs: Array<() => void> = [];
 
-    const unsubs = [
-      subscribeOwnPublishedIncentives(
-        uid,
-        (records) => {
-          setRawIncentives(records);
-          gotIncentives = true;
-          markReadyIfCoreLoaded();
-        },
-        onlyEmployeeVisible,
-      ),
-      subscribeOwnMonthlySummaries(
-        uid,
-        (list) => {
-          setRawSummaries(list);
-          gotSummaries = true;
-          markReadyIfCoreLoaded();
-        },
-        onlyEmployeeVisible,
-      ),
+    if (allIncentivesHidden) {
+      setRawIncentives([]);
+      setRawSummaries([]);
+      setRawPayoutRecords([]);
+      setRawAdjustments([]);
+      setRawSalesTargets([]);
+    } else {
+      unsubs.push(
+        subscribeOwnPublishedIncentives(
+          uid,
+          (records) => {
+            setRawIncentives(records);
+            gotIncentives = true;
+            markReadyIfCoreLoaded();
+          },
+          onlyIncentiveVisible,
+        ),
+        subscribeOwnMonthlySummaries(
+          uid,
+          (list) => {
+            setRawSummaries(list);
+            gotSummaries = true;
+            markReadyIfCoreLoaded();
+          },
+          onlyIncentiveVisible,
+        ),
+        subscribeOwnPayoutRecords(
+          uid,
+          (list) => {
+            setRawPayoutRecords(list);
+          },
+          empId,
+          onlyIncentiveVisible,
+        ),
+        subscribeOwnActiveAdjustments(
+          uid,
+          (list) => {
+            setRawAdjustments(list);
+          },
+          empId,
+          onlyIncentiveVisible,
+        ),
+        subscribeOwnRelevantSalesTargets(
+          uid,
+          (list) => {
+            setRawSalesTargets(list);
+          },
+          empId,
+          onlyIncentiveVisible,
+        ),
+      );
+    }
+
+    if (allSalarySlipsHidden) {
+      setRawSalarySlips([]);
+    } else {
+      unsubs.push(
+        subscribeOwnSalarySlips(
+          uid,
+          (list) => {
+            setRawSalarySlips(list);
+          },
+          empId,
+          onlySalarySlipVisible,
+        ),
+      );
+    }
+
+    unsubs.push(
+      subscribeOwnEmployeeLoans(uid, empId || '', (list) => {
+        setOwnLoans(list);
+      }),
+    );
+
+    unsubs.push(
       subscribeOwnNotifications(uid, (list) => {
         setNotifications(list);
       }),
-      subscribeOwnPayoutRecords(
-        uid,
-        (list) => {
-          setRawPayoutRecords(list);
-        },
-        empId,
-        onlyEmployeeVisible,
-      ),
-      subscribeOwnActiveAdjustments(
-        uid,
-        (list) => {
-          setRawAdjustments(list);
-        },
-        empId,
-        onlyEmployeeVisible,
-      ),
-      subscribeOwnRelevantSalesTargets(
-        uid,
-        (list) => {
-          setRawSalesTargets(list);
-        },
-        empId,
-        onlyEmployeeVisible,
-      ),
-      subscribeOwnSalarySlips(
-        uid,
-        (list) => {
-          setRawSalarySlips(list);
-        },
-        empId,
-        onlyEmployeeVisible,
-      ),
       subscribeOwnEmployeeQueries(uid, (list) => {
         setQueries(list);
       }),
-    ];
+    );
 
     return () => {
       window.clearTimeout(fallbackTimer);
@@ -424,6 +451,8 @@ export function EmployeePortal() {
     visibilityLoaded,
     visibilitySettings.mode,
     visibilitySettings.visibleMonths.join(','),
+    visibilitySettings.salarySlipMode,
+    (visibilitySettings.salarySlipVisibleMonths || []).join(','),
   ]);
 
   // 2b. Independent Real-Time 12-Branch Birthdays & Wishes Subscriptions
@@ -522,7 +551,10 @@ export function EmployeePortal() {
     [rawSalesTargets, visibilitySettings],
   );
   const salarySlips = useMemo(
-    () => rawSalarySlips.filter((s) => isMonthVisibleToEmployees(s.monthKey, visibilitySettings)),
+    () =>
+      rawSalarySlips.filter((s) =>
+        isSalarySlipMonthVisibleToEmployees(s.monthKey, visibilitySettings),
+      ),
     [rawSalarySlips, visibilitySettings],
   );
 
@@ -643,6 +675,26 @@ export function EmployeePortal() {
     [salarySlips, selectedMonth],
   );
 
+  // Auto-default Statements tab to Salary Slips when employee has salary slips but 0 incentive records (e.g. Non-Sales staff)
+  useEffect(() => {
+    if (salarySlips.length > 0 && incentives.length === 0) {
+      setStatementsSubView('salary');
+    }
+  }, [salarySlips.length, incentives.length]);
+
+  const handleRaiseSalarySlipQuery = (slip: SalarySlip) => {
+    setQueryMonth(slip.monthKey);
+    setQueryCategory('PAYOUT_STATUS');
+    setQuerySubject(
+      isMr
+        ? `${formatMonthLabel(slip.monthKey)} पगार स्लिप बाबत शंका`
+        : `${formatMonthLabel(slip.monthKey)} Salary Slip Query`,
+    );
+    setProfileSubView('queries');
+    setActiveTab('profile');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   // All months that have a Personal or Branch target for this employee
   const relevantTargetMonths = useMemo(() => {
     if (!employeeProfile) return [];
@@ -757,6 +809,21 @@ export function EmployeePortal() {
     const parts = (employeeProfile?.fullName || 'HM').trim().split(/\s+/);
     return ((parts[0]?.[0] || '') + (parts[1]?.[0] || parts[0]?.[1] || '')).toUpperCase();
   }, [employeeProfile?.fullName]);
+
+  const ownStreakInfo = useMemo(() => {
+    if (!employeeProfile) return null;
+    const res = computePerformanceStreaksAndRetention({
+      employees: [employeeProfile],
+      monthlySummaries: rawSummaries,
+      salesTargets: rawSalesTargets,
+    });
+    return res.streakByEmployeeId[employeeProfile.employeeId.toUpperCase()] || null;
+  }, [employeeProfile, rawSummaries, rawSalesTargets]);
+
+  const activeOwnLoans = useMemo(
+    () => ownLoans.filter((l) => l.status === 'ACTIVE' && l.remainingBalancePaise > 0),
+    [ownLoans],
+  );
 
   const handleDownloadMonthlyPdf = () => {
     if (!employeeProfile || !selectedMonthAgg) return;
@@ -927,9 +994,6 @@ export function EmployeePortal() {
       await changeOwnPassword(newPassword, wasFirstLogin ? DEFAULT_EMPLOYEE_PASSWORD : undefined);
       if (wasFirstLogin && employeeProfile) {
         await updateOwnEmployeeProfile(employeeProfile.employeeId, {
-          phone: employeeProfile.phone || '',
-          address: employeeProfile.address || '',
-          emergencyContact: employeeProfile.emergencyContact || '',
           mustChangePassword: false,
         });
         await refreshEmployeeProfile();
@@ -1247,10 +1311,13 @@ export function EmployeePortal() {
     },
   ];
 
+  const isBranchManager = Boolean(employeeProfile?.isBranchManager);
+
   const desktopTabs: Array<[StaffTab, string]> = [
     ['home', t.tabOverview],
     ['statements', t.tabStatements],
     ['reports', t.tabHistory],
+    ...(isBranchManager ? ([['branch-floor', isMr ? 'शाखा फ्लोर' : 'Branch Floor']] as Array<[StaffTab, string]>) : []),
     ['profile', t.tabProfile],
     ['settings', t.tabSettings],
   ];
@@ -1260,7 +1327,13 @@ export function EmployeePortal() {
   > = [
     ['home', t.tabOverview, Home, unreadCount > 0],
     ['statements', t.tabStatements, Calendar, false],
-    ['reports', t.tabHistory, BarChart3, false],
+    ...(isBranchManager
+      ? ([['branch-floor', isMr ? 'फ्लोर' : 'Floor', Building2, false]] as Array<
+          [StaffTab, string, React.ComponentType<{ className?: string }>, boolean]
+        >)
+      : ([['reports', t.tabHistory, BarChart3, false]] as Array<
+          [StaffTab, string, React.ComponentType<{ className?: string }>, boolean]
+        >)),
     ['profile', t.tabProfile, User, openQueriesCount > 0],
     ['settings', t.tabSettings, Settings, false],
   ];
@@ -1475,6 +1548,147 @@ export function EmployeePortal() {
                     </span>
                   </div>
                 )}
+
+                {/* Feature #7: Multi-Month Performance Streak Badge */}
+                {ownStreakInfo && ownStreakInfo.consecutiveTargetMetMonths >= 2 && (
+                  <div className="px-4 py-3 rounded-2xl bg-gradient-to-r from-[#FDF8EC] via-amber-50 to-emerald-50 border border-[#B8923A]/45 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-8 h-8 rounded-xl bg-[#0F1F3D] text-[#DFC27D] flex items-center justify-center shrink-0">
+                        <Flame className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-[#0F1F3D]">
+                          {ownStreakInfo.badge === 'STAR_PERFORMER'
+                            ? isMr
+                              ? `स्टार परफॉर्मर · सलग ${ownStreakInfo.consecutiveTargetMetMonths} महिने सातत्य!`
+                              : `Star Performer · ${ownStreakInfo.consecutiveTargetMetMonths}-Month Consistency Streak!`
+                            : isMr
+                              ? `उत्कृष्ट सातत्य · सलग ${ownStreakInfo.consecutiveTargetMetMonths} महिने प्रगती`
+                              : `Rising Streak · ${ownStreakInfo.consecutiveTargetMetMonths} Consecutive Months Strong`}
+                        </p>
+                        <p className="text-[11px] text-slate-600">
+                          {isMr
+                            ? 'तुमच्या सातत्यपूर्ण विक्री कामगिरीबद्दल अभिनंदन!'
+                            : 'Congratulations on maintaining consistent top sales momentum!'}
+                        </p>
+                      </div>
+                    </div>
+                    <Award className="w-5 h-5 text-[#B8923A] shrink-0" />
+                  </div>
+                )}
+
+                {/* Feature #6: Read-Only My Active Advances & Loans Card */}
+                {activeOwnLoans.length > 0 && (
+                  <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-xs font-bold text-[#0F1F3D] flex items-center gap-1.5">
+                        <Wallet className="w-4 h-4 text-[#B8923A]" />
+                        {isMr ? 'माझे अ‍ॅडव्हान्स / लोन (EMI ट्रॅकर)' : 'My Active Advances & Loans'}
+                      </h3>
+                      <span className="text-[11px] font-mono font-semibold text-amber-800">
+                        {isMr ? 'शिल्लक' : 'Balance'}:{' '}
+                        {formatINRFromPaise(
+                          activeOwnLoans.reduce((s, l) => s + l.remainingBalancePaise, 0),
+                        )}
+                      </span>
+                    </div>
+                    <div className="divide-y divide-slate-100">
+                      {activeOwnLoans.map((loan) => (
+                        <div
+                          key={loan.loanId}
+                          className="py-2 first:pt-0 last:pb-0 flex items-center justify-between gap-3 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <p className="font-semibold text-slate-800">
+                              {loan.loanType.replace('_', ' ')} · {loan.paidInstallments}/
+                              {loan.totalInstallments} EMIs
+                            </p>
+                            <p className="text-[11px] text-slate-500">
+                              {isMr ? 'मासिक EMI' : 'Monthly EMI'}:{' '}
+                              <span className="font-mono font-medium text-[#0F1F3D]">
+                                {formatINRFromPaise(loan.monthlyEmiPaise)}
+                              </span>
+                            </p>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="font-mono font-bold text-amber-800">
+                              {formatINRFromPaise(loan.remainingBalancePaise)}
+                            </p>
+                            <p className="text-[10px] text-slate-500">
+                              {isMr ? 'शिल्लक रक्कम' : 'Remaining'}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Combined Monthly Take-Home Summary Banner (when Salary Slip is published) */}
+                {(selectedMonthSalarySlip || salarySlips[0]) && (
+                  <div className="bg-gradient-to-r from-[#0F1F3D] via-[#162B50] to-[#1E3A5F] text-white rounded-2xl p-4 sm:p-5 border border-[#B8923A]/40 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <p className="text-[11px] font-semibold tracking-wide text-[#DFC27D] uppercase">
+                        {isMr
+                          ? `एकूण मासिक उत्पन्न (${formatMonthLabel((selectedMonthSalarySlip || salarySlips[0]).monthKey)})`
+                          : `Total Monthly Earnings (${formatMonthLabel((selectedMonthSalarySlip || salarySlips[0]).monthKey)})`}
+                      </p>
+                      <p className="text-2xl sm:text-3xl font-mono tabular-nums font-bold text-white">
+                        {formatINRFromPaise(
+                          (selectedMonthSalarySlip || salarySlips[0]).netPayablePaise +
+                            ((selectedMonthSalarySlip || salarySlips[0]).monthKey === selectedMonth
+                              ? netPayablePaise
+                              : 0),
+                        )}
+                      </p>
+                      <p className="text-xs text-slate-200 font-mono">
+                        {isMr ? 'निव्वळ पगार' : 'Net Salary'}:{' '}
+                        <strong className="text-[#DFC27D]">
+                          {formatINRFromPaise(
+                            (selectedMonthSalarySlip || salarySlips[0]).netPayablePaise,
+                          )}
+                        </strong>
+                        {((selectedMonthSalarySlip || salarySlips[0]).monthKey === selectedMonth
+                          ? netPayablePaise
+                          : 0) > 0 && (
+                          <>
+                            {' '}
+                            + {isMr ? 'निव्वळ इन्सेंटिव्ह' : 'Net Incentive'}:{' '}
+                            <strong className="text-emerald-300">
+                              {formatINRFromPaise(netPayablePaise)}
+                            </strong>
+                          </>
+                        )}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStatementsSubView('salary');
+                          setActiveTab('statements');
+                        }}
+                        className="min-h-[40px] px-3.5 rounded-xl bg-[#B8923A] hover:bg-[#A6812F] text-[#0F1F3D] text-xs font-bold cursor-pointer transition-colors"
+                      >
+                        {isMr ? 'सर्व पगार स्लिप्स पहा' : 'View Salary Slips'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Monthly Salary Slip Quick Card right at the top of Home for instant access */}
+                <SalarySlipHomeCard
+                  slip={selectedMonthSalarySlip}
+                  allSlips={salarySlips}
+                  monthKey={selectedMonth}
+                  isMr={isMr}
+                  onSelectMonth={(mk) => setSelectedMonth(mk)}
+                  onRaiseQuery={handleRaiseSalarySlipQuery}
+                  onViewAllSlips={() => {
+                    setStatementsSubView('salary');
+                    setActiveTab('statements');
+                  }}
+                />
 
                 {/* Executive Top Summary Strip: All-Time Published + Previous Month */}
                 <div className="grid grid-cols-2 gap-3 sm:gap-4">
@@ -1932,17 +2146,6 @@ export function EmployeePortal() {
                     </div>
                   )}
 
-                  {/* Monthly Salary Slip Quick Card (visible when Accounts publishes salary slip) */}
-                  <SalarySlipHomeCard
-                    slip={selectedMonthSalarySlip}
-                    monthKey={selectedMonth}
-                    isMr={isMr}
-                    onViewAllSlips={() => {
-                      setStatementsSubView('salary');
-                      setActiveTab('statements');
-                    }}
-                  />
-
                   {/* Latest Published Statement Card */}
                   <section className="lg:col-span-12 bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
                     <div className="px-4 sm:px-5 py-3.5 border-b border-slate-100 flex items-center justify-between gap-2">
@@ -2077,7 +2280,11 @@ export function EmployeePortal() {
                 </div>
 
                 {statementsSubView === 'salary' ? (
-                  <SalarySlipFullList slips={salarySlips} isMr={isMr} />
+                  <SalarySlipFullList
+                    slips={salarySlips}
+                    isMr={isMr}
+                    onRaiseQuery={handleRaiseSalarySlipQuery}
+                  />
                 ) : (
                   <>
                     <section className="bg-white border border-slate-200/90 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
@@ -2271,7 +2478,7 @@ export function EmployeePortal() {
                       </div>
                     )}
 
-                    <div className="grid grid-cols-2 gap-3 text-xs bg-[#F8FAFC] p-4 rounded-xl border border-slate-200/70">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs bg-[#F8FAFC] p-4 rounded-xl border border-slate-200/70">
                       <div>
                         <span className="text-slate-500">{t.salesmanNo}</span>
                         <p className="font-mono font-semibold text-[#0F1F3D] mt-0.5">
@@ -2284,19 +2491,111 @@ export function EmployeePortal() {
                           {employeeProfile!.loginId}
                         </p>
                       </div>
+                      {employeeProfile?.saleId && (
+                        <div>
+                          <span className="text-slate-500">
+                            {isMr ? 'सेल्स आयडी (Sales ID)' : 'Sales ID'}
+                          </span>
+                          <p className="font-mono font-semibold text-[#0F1F3D] mt-0.5">
+                            {employeeProfile.saleId}
+                          </p>
+                        </div>
+                      )}
                       <div>
                         <span className="text-slate-500">{isMr ? 'शाखा' : 'Branch'}</span>
                         <p className="font-semibold text-[#0F1F3D] mt-0.5 truncate">
                           {employeeProfile!.branchName}
                         </p>
                       </div>
+                      {employeeProfile?.departmentName && (
+                        <div>
+                          <span className="text-slate-500">{isMr ? 'विभाग' : 'Department'}</span>
+                          <p className="font-semibold text-[#0F1F3D] mt-0.5 truncate">
+                            {employeeProfile.departmentName}
+                          </p>
+                        </div>
+                      )}
                       <div>
                         <span className="text-slate-500">{isMr ? 'पद' : 'Designation'}</span>
                         <p className="font-semibold text-[#0F1F3D] mt-0.5 truncate">
                           {employeeProfile!.designation}
                         </p>
                       </div>
+                      {(employeeProfile?.dateOfJoining || salarySlips[0]?.dateOfJoining) && (
+                        <div>
+                          <span className="text-slate-500">
+                            {isMr ? 'रुजू दिनांक (DOJ)' : 'Date of Joining'}
+                          </span>
+                          <p className="font-mono font-semibold text-[#0F1F3D] mt-0.5">
+                            {employeeProfile?.dateOfJoining || salarySlips[0]?.dateOfJoining}
+                          </p>
+                        </div>
+                      )}
                     </div>
+
+                    {/* Read-Only Official Bank & Statutory Details Card (from Profile / Latest Salary Slip) */}
+                    {(employeeProfile?.bankName ||
+                      employeeProfile?.bankAccountMasked ||
+                      employeeProfile?.uanNumber ||
+                      employeeProfile?.pfNumber ||
+                      employeeProfile?.esicNumber ||
+                      employeeProfile?.panNumber ||
+                      salarySlips[0]?.bankName ||
+                      salarySlips[0]?.bankAccountMasked ||
+                      salarySlips[0]?.uanNumber ||
+                      salarySlips[0]?.pfNumber ||
+                      salarySlips[0]?.esicNumber ||
+                      salarySlips[0]?.panNumber) && (
+                      <div className="rounded-xl bg-[#FDF8EC]/70 border border-[#B8923A]/35 p-4 space-y-2.5 text-xs">
+                        <p className="font-bold text-[#0F1F3D]">
+                          {isMr
+                            ? 'माझी अधिकृत बँक व पीएफ/ईएसआयसी नोंद (Official Bank & Statutory Record)'
+                            : 'Official Bank & Statutory Record'}
+                        </p>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                          {[
+                            [
+                              isMr ? 'बँक (Bank)' : 'Bank Name',
+                              employeeProfile?.bankName || salarySlips[0]?.bankName,
+                            ],
+                            [
+                              isMr ? 'बँक खाते क्र.' : 'Bank A/c',
+                              employeeProfile?.bankAccountMasked ||
+                                salarySlips[0]?.bankAccountMasked,
+                            ],
+                            [
+                              'IFSC Code',
+                              employeeProfile?.bankIfsc || salarySlips[0]?.bankIfsc,
+                            ],
+                            [
+                              'UAN No',
+                              employeeProfile?.uanNumber || salarySlips[0]?.uanNumber,
+                            ],
+                            [
+                              'PF No',
+                              employeeProfile?.pfNumber || salarySlips[0]?.pfNumber,
+                            ],
+                            [
+                              'ESIC No',
+                              employeeProfile?.esicNumber || salarySlips[0]?.esicNumber,
+                            ],
+                            [
+                              'PAN',
+                              employeeProfile?.panNumber || salarySlips[0]?.panNumber,
+                            ],
+                          ]
+                            .filter(([, val]) => Boolean(val))
+                            .map(([label, val]) => (
+                              <div key={String(label)} className="min-w-0">
+                                <span className="text-[11px] text-slate-500">{label}</span>
+                                <p className="font-mono font-semibold text-[#0F1F3D] truncate mt-0.5">
+                                  {val}
+                                </p>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
 
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 mb-1.5">
@@ -2499,6 +2798,20 @@ export function EmployeePortal() {
                     </section>
                   </div>
                 )}
+              </PageTransition>
+            )}
+
+            {/* =============================================================== */}
+            {/* BRANCH MANAGER READ-ONLY FLOOR TAB (OWN BRANCH ONLY)            */}
+            {/* =============================================================== */}
+            {activeTab === 'branch-floor' && isBranchManager && employeeProfile && (
+              <PageTransition key="tab-branch-floor">
+                <BranchManagerFloorView
+                  branchId={employeeProfile.branchId}
+                  branchName={employeeProfile.branchName}
+                  onlyEmployeeVisible={visibilitySettings.mode === 'SELECTED'}
+                  isMr={isMr}
+                />
               </PageTransition>
             )}
 

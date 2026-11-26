@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import {
+  browserPopupRedirectResolver,
   EmailAuthProvider,
   onAuthStateChanged,
   reauthenticateWithCredential,
@@ -291,7 +292,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signInAdminWithGoogle = async () => {
     setAdminAccessBlockedReason(null);
-    await signInWithPopup(auth, googleProvider);
+    await signInWithPopup(auth, googleProvider, browserPopupRedirectResolver);
   };
 
   const signInAdminWithCredentials = async (username: string, password: string) => {
@@ -314,35 +315,60 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signInEmployeeWithGoogle = async () => {
     setAdminAccessBlockedReason(null);
-    await signInWithPopup(auth, googleProvider);
+    await signInWithPopup(auth, googleProvider, browserPopupRedirectResolver);
   };
 
   const signInEmployeeWithLoginId = async (loginId: string, password: string) => {
     setAdminAccessBlockedReason(null);
     const trimmed = loginId.trim();
-    const authEmail = loginIdToAuthEmail(trimmed);
-    try {
-      await signInWithEmailAndPassword(auth, authEmail, password);
-    } catch (err: unknown) {
-      const code = (err as { code?: string })?.code || '';
-      const cleanUpper = trimmed.toUpperCase().replace(/[^A-Z0-9_-]/g, '');
-      // Convenience fallback: if staff typed bare Employee ID (e.g. "459"), also try "HOM459"
-      if (
-        (code === 'auth/invalid-credential' || code === 'auth/user-not-found') &&
-        cleanUpper &&
-        !cleanUpper.startsWith('HOM')
-      ) {
-        await signInWithEmailAndPassword(auth, loginIdToAuthEmail(`HOM${cleanUpper}`), password);
-        return;
+    const cleanUpper = trimmed.toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+
+    // Build ordered candidate Login IDs:
+    // 1. Exact typed ID
+    // 2. If bare numeric/code (e.g. "459" or "0065"), try "HOM459" / "HOM0065"
+    // 3. If admin auto-reissued Login ID during auth/email-already-in-use recovery (e.g. "HOM0065A", "HOM0065B", "HOM0065_R1"), try those seamlessly
+    const candidates: string[] = [];
+    const pushUnique = (id: string) => {
+      if (id && !candidates.includes(id)) {
+        candidates.push(id);
       }
-      throw err;
+    };
+    pushUnique(trimmed);
+    if (cleanUpper) {
+      pushUnique(cleanUpper);
+      const homBase = cleanUpper.startsWith('HOM') ? cleanUpper : `HOM${cleanUpper}`;
+      pushUnique(homBase);
+      if (!/[A-Z]$/.test(homBase) && !/_R\d+$/.test(homBase)) {
+        pushUnique(`${homBase}A`);
+        pushUnique(`${homBase}B`);
+        pushUnique(`${homBase}_R1`);
+      }
     }
+
+    let firstError: unknown = null;
+    for (let i = 0; i < candidates.length; i++) {
+      const candidate = candidates[i];
+      try {
+        await signInWithEmailAndPassword(auth, loginIdToAuthEmail(candidate), password);
+        return;
+      } catch (err: unknown) {
+        if (i === 0) firstError = err;
+        const code = (err as { code?: string })?.code || '';
+        const canRetryNext =
+          code === 'auth/invalid-credential' || code === 'auth/user-not-found';
+        if (!canRetryNext) {
+          throw err;
+        }
+      }
+    }
+    throw firstError || new Error('Invalid Login ID or password.');
   };
 
   const changeOwnPassword = async (newPassword: string, fallbackCurrentPassword?: string) => {
     if (!auth.currentUser) throw new Error('Not signed in.');
     try {
       await updatePassword(auth.currentUser, newPassword);
+      await auth.currentUser.getIdToken(true);
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
       if (
@@ -353,6 +379,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const cred = EmailAuthProvider.credential(auth.currentUser.email, fallbackCurrentPassword);
         await reauthenticateWithCredential(auth.currentUser, cred);
         await updatePassword(auth.currentUser, newPassword);
+        await auth.currentUser.getIdToken(true);
         return;
       }
       throw err;
@@ -380,6 +407,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const cred = EmailAuthProvider.credential(currentUser.email, currentPassword);
     await reauthenticateWithCredential(currentUser, cred);
     await updatePassword(currentUser, newPassword);
+    await currentUser.getIdToken(true);
     const updatedAt = await markOwnAdminPasswordChanged();
     setAdminAccount((prev) =>
       prev

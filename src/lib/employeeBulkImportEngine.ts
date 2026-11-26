@@ -6,7 +6,12 @@ import {
 } from './departmentLeaderboardEngine';
 import { sanitizeId } from './format';
 import { resolveCanonicalBranchName } from './incentiveEngine';
-import { maskBankAccountNumber, normalizeDateCellToIso } from './salarySlipEngine';
+import {
+  cleanExcelTextCell,
+  maskBankAccountNumber,
+  normalizeDateCellToIso,
+  sanitizeSaleIdCell,
+} from './salarySlipEngine';
 import type { Branch, DepartmentId, Employee } from '../types/incentive';
 
 export type EmployeeImportRowStatus =
@@ -23,11 +28,14 @@ export interface EmployeeImportFieldError {
 
 export interface EmployeeFieldDiff {
   field:
+    | 'saleId'
     | 'fullName'
     | 'loginId'
     | 'branch'
     | 'department'
     | 'designation'
+    | 'gender'
+    | 'category'
     | 'status'
     | 'dateOfBirth'
     | 'dateOfJoining'
@@ -39,7 +47,10 @@ export interface EmployeeFieldDiff {
     | 'bankName'
     | 'bankAccountMasked'
     | 'bankIfsc'
-    | 'linkedGoogleEmail';
+    | 'linkedGoogleEmail'
+    | 'address'
+    | 'emergencyContact'
+    | `custom:${string}`;
   label: string;
   masterValue: string;
   fileValue: string;
@@ -50,16 +61,20 @@ export interface ParsedEmployeeMasterRow {
   rowNumber: number;
   status: EmployeeImportRowStatus;
   rawEmployeeId: string;
+  rawSaleId: string;
   rawLoginId: string;
   rawFullName: string;
   rawBranch: string;
   rawDepartment: string;
   rawDesignation: string;
+  rawGender: string;
+  rawCategory: string;
   rawStatus: string;
   rawDob: string;
   rawDoj: string;
   // Normalized / resolved values
   employeeId: string;
+  saleId: string;
   loginId: string;
   fullName: string;
   branchId: string;
@@ -67,6 +82,8 @@ export interface ParsedEmployeeMasterRow {
   departmentId: DepartmentId | '';
   departmentName: string;
   designation: string;
+  gender: string;
+  category: string;
   employeeStatus: 'ACTIVE' | 'INACTIVE';
   dateOfBirth: string;
   dateOfJoining: string;
@@ -79,6 +96,9 @@ export interface ParsedEmployeeMasterRow {
   bankAccountMasked: string;
   bankIfsc: string;
   linkedGoogleEmail: string;
+  address: string;
+  emergencyContact: string;
+  customFields: Record<string, string>;
   // Existing record context (for OVERLAP_CONFLICT / UNCHANGED)
   existingEmployee?: Employee;
   diffs: EmployeeFieldDiff[];
@@ -102,23 +122,28 @@ export interface EmployeeMasterParseSummary {
 
 export const EMPLOYEE_MASTER_TEMPLATE_HEADERS = [
   'Employee ID',
+  'Sale ID',
   'Login ID',
   'Full Name',
   'Branch',
   'Department',
   'Designation',
+  'Gender',
+  'Category',
   'Status',
   'Date of Birth',
   'Date of Joining',
-  'Phone',
-  'PAN',
-  'UAN',
-  'PF No',
-  'ESIC No',
+  'Mobile Number',
+  'PAN Number',
+  'UAN Number',
+  'PF Account Number',
+  'ESIC Number',
   'Bank Name',
-  'Account No',
-  'IFSC',
+  'Bank Account Number',
+  'Bank IFSC Code',
   'Google Email',
+  'Residential Address',
+  'Emergency Contact',
 ] as const;
 
 const OFFICIAL_DEPT_NAMES_LABEL = OFFICIAL_DEPARTMENTS.map((d) => d.name).join(', ');
@@ -268,6 +293,8 @@ const EMPLOYEE_HEADER_SIGNALS = [
   'employeeid',
   'empid',
   'empcode',
+  'saleid',
+  'sellid',
   'salesmanno',
   'staffid',
   'fullname',
@@ -280,6 +307,8 @@ const EMPLOYEE_HEADER_SIGNALS = [
   'department',
   'dept',
   'designation',
+  'gender',
+  'category',
   'post',
   'role',
   'loginid',
@@ -314,13 +343,36 @@ export function detectEmployeeHeaderRowIndex(matrix: unknown[][]): number {
 
 /**
  * Generates an official House of Muktai Employee Master CSV template (blank guide OR pre-filled export).
+ * Appends any custom columns created by Admin or present across Employee Master records.
  */
 export function buildEmployeeMasterCsvTemplate(
   branches: Branch[],
   employees: Employee[],
   mode: 'blank' | 'prefilled' = 'blank',
+  extraCustomColumns: string[] = [],
 ): string {
-  const lines: string[] = [EMPLOYEE_MASTER_TEMPLATE_HEADERS.join(',')];
+  const stdNormSet = new Set(EMPLOYEE_MASTER_TEMPLATE_HEADERS.map((h) => normalizeHeaderKey(h)));
+  const customColumnNames: string[] = [];
+  const seenCustomNorm = new Set<string>();
+
+  const registerCustomCol = (rawName: string) => {
+    const clean = String(rawName || '').trim().slice(0, 60);
+    const norm = normalizeHeaderKey(clean);
+    if (!clean || !norm || stdNormSet.has(norm) || seenCustomNorm.has(norm)) return;
+    if (customColumnNames.length >= 25) return;
+    seenCustomNorm.add(norm);
+    customColumnNames.push(clean);
+  };
+
+  for (const col of extraCustomColumns) registerCustomCol(col);
+  for (const emp of employees) {
+    for (const key of Object.keys(emp.customFields || {})) {
+      registerCustomCol(key);
+    }
+  }
+
+  const allHeaders = [...EMPLOYEE_MASTER_TEMPLATE_HEADERS, ...customColumnNames];
+  const lines: string[] = [allHeaders.map(escapeCsvCell).join(',')];
 
   if (mode === 'prefilled' && employees.length > 0) {
     const sorted = [...employees].sort(
@@ -328,14 +380,26 @@ export function buildEmployeeMasterCsvTemplate(
         a.branchName.localeCompare(b.branchName) || a.employeeId.localeCompare(b.employeeId),
     );
     for (const emp of sorted) {
+      const customFieldValues = customColumnNames.map((col) => {
+        const map = emp.customFields || {};
+        if (map[col] !== undefined) return map[col];
+        const colNorm = normalizeHeaderKey(col);
+        for (const [k, v] of Object.entries(map)) {
+          if (normalizeHeaderKey(k) === colNorm) return v;
+        }
+        return '';
+      });
       lines.push(
         [
           emp.employeeId,
+          emp.saleId || '',
           emp.loginId,
           emp.fullName,
           emp.branchName,
           emp.departmentName || '',
           emp.designation,
+          emp.gender || '',
+          emp.category || '',
           emp.status,
           emp.dateOfBirth || '',
           emp.dateOfJoining || '',
@@ -348,6 +412,9 @@ export function buildEmployeeMasterCsvTemplate(
           emp.bankAccountMasked || '',
           emp.bankIfsc || '',
           emp.linkedGoogleEmail || '',
+          emp.address || '',
+          emp.emergencyContact || '',
+          ...customFieldValues,
         ]
           .map(escapeCsvCell)
           .join(','),
@@ -358,14 +425,18 @@ export function buildEmployeeMasterCsvTemplate(
 
   const branch1 = branches[0]?.branchName || 'BARAMATI MIDC';
   const branch2 = branches[1]?.branchName || branches[0]?.branchName || 'BEED';
+  const blankCustomCells = customColumnNames.map(() => '');
   const sampleRows = [
     [
       'EMP901',
+      '101',
       'HOM901',
       'Snehal Deshmukh',
       branch1,
       'Saree Dept.',
       'Sales Executive',
+      'Female',
+      'Sales',
       'ACTIVE',
       '1996-05-14',
       '2024-04-01',
@@ -378,14 +449,20 @@ export function buildEmployeeMasterCsvTemplate(
       'XXXX5678',
       'SBIN0001234',
       '',
+      'Baramati, Dist. Pune',
+      '9876500001',
+      ...blankCustomCells,
     ],
     [
       'EMP902',
+      '',
       'HOM902',
       'Pratiksha Kulkarni',
       branch2,
-      'Ladies Wear Dept.',
-      'Senior Sales Executive',
+      'Accounts',
+      'Accountant',
+      'Female',
+      'Non-Sales',
       'ACTIVE',
       '1994-11-22',
       '2023-08-15',
@@ -398,6 +475,9 @@ export function buildEmployeeMasterCsvTemplate(
       'XXXX9012',
       'HDFC0000456',
       '',
+      'Beed City',
+      '9823000002',
+      ...blankCustomCells,
     ],
   ];
   for (const row of sampleRows) {
@@ -410,10 +490,16 @@ function pickCell(
   row: Record<string, unknown>,
   normalizedMap: Map<string, string>,
   aliases: string[],
+  excludeSubstrings: string[] = [],
+  claimedOrigKeys?: Set<string>,
 ): unknown {
+  const isExcluded = (normKey: string) =>
+    excludeSubstrings.length > 0 && excludeSubstrings.some((ex) => normKey.includes(ex));
+
   for (const alias of aliases) {
     const exactKey = normalizedMap.get(alias);
-    if (exactKey !== undefined) {
+    if (exactKey !== undefined && !isExcluded(alias)) {
+      claimedOrigKeys?.add(exactKey);
       const val = row[exactKey];
       if (val !== undefined && val !== null && String(val).trim() !== '') {
         return val;
@@ -421,7 +507,9 @@ function pickCell(
     }
   }
   for (const [normKey, origKey] of normalizedMap.entries()) {
+    if (isExcluded(normKey)) continue;
     if (aliases.some((alias) => normKey.includes(alias))) {
+      claimedOrigKeys?.add(origKey);
       const val = row[origKey];
       if (val !== undefined && val !== null && String(val).trim() !== '') {
         return val;
@@ -462,16 +550,21 @@ export function parseEmployeeMasterRows(
   existingEmployees: Employee[],
 ): EmployeeMasterParseSummary {
   const existingById = new Map<string, Employee>();
+  const existingBySaleId = new Map<string, Employee>();
   const existingByLoginId = new Map<string, Employee>();
 
   for (const emp of existingEmployees) {
     existingById.set(sanitizeId(emp.employeeId).toUpperCase(), emp);
+    if (emp.saleId && emp.saleId.trim()) {
+      existingBySaleId.set(sanitizeId(emp.saleId).toUpperCase(), emp);
+    }
     if (emp.loginId) {
       existingByLoginId.set(emp.loginId.trim().toUpperCase(), emp);
     }
   }
 
   const seenEmpIdRow = new Map<string, number>();
+  const seenSaleIdRow = new Map<string, number>();
   const seenLoginIdRow = new Map<string, number>();
 
   const validBranchNamesText =
@@ -491,75 +584,205 @@ export function parseEmployeeMasterRows(
       }
     }
 
-    const rawEmpIdVal = pickCell(data, normalizedMap, [
-      'employeeid',
-      'empid',
-      'empcode',
-      'salesmanno',
-      'staffid',
-      'id',
-    ]);
-    const rawLoginIdVal = pickCell(data, normalizedMap, ['loginid', 'userid', 'username', 'stafflogin']);
-    const rawFullNameVal = pickCell(data, normalizedMap, [
-      'fullname',
-      'employeename',
-      'empname',
-      'salesmanname',
-      'staffname',
-      'name',
-    ]);
-    const rawBranchVal = pickCell(data, normalizedMap, ['branchname', 'branch', 'branchcode', 'store', 'location']);
-    const rawDepartmentVal = pickCell(data, normalizedMap, ['departmentname', 'department', 'dept', 'section']);
-    const rawDesignationVal = pickCell(data, normalizedMap, [
-      'designation',
-      'desgination',
-      'jobtitle',
-      'position',
-      'post',
-      'title',
-    ]);
-    const rawStatusVal = pickCell(data, normalizedMap, ['status', 'employeestatus', 'active']);
-    const rawDobVal = pickCell(data, normalizedMap, ['dateofbirth', 'dob', 'birthdate', 'birthday']);
-    const rawDojVal = pickCell(data, normalizedMap, ['dateofjoining', 'doj', 'joiningdate', 'hiredate']);
-    const rawPhoneVal = pickCell(data, normalizedMap, ['phone', 'mobile', 'mobileno', 'contactno', 'contact']);
-    const rawPanVal = pickCell(data, normalizedMap, ['pannumber', 'panno', 'pan']);
-    const rawUanVal = pickCell(data, normalizedMap, ['uannumber', 'uanno', 'uan']);
-    const rawPfVal = pickCell(data, normalizedMap, ['pfnumber', 'pfno', 'epfno', 'epf']);
-    const rawEsicVal = pickCell(data, normalizedMap, ['esicnumber', 'esicno', 'esic', 'esino']);
-    const rawBankNameVal = pickCell(data, normalizedMap, ['bankname', 'bank']);
-    const rawAccountVal = pickCell(data, normalizedMap, [
-      'bankaccountmasked',
-      'accountnumber',
-      'accountno',
-      'bankaccount',
-      'accno',
-    ]);
-    const rawIfscVal = pickCell(data, normalizedMap, ['bankifsc', 'ifsccode', 'ifsc']);
-    const rawGoogleEmailVal = pickCell(data, normalizedMap, ['linkedgoogleemail', 'googleemail', 'gmail', 'email']);
+    const claimedOrigKeys = new Set<string>();
 
-    const rawEmployeeId = stringifyCell(rawEmpIdVal);
-    const rawLoginId = stringifyCell(rawLoginIdVal);
-    const rawFullName = stringifyCell(rawFullNameVal);
-    const rawBranch = stringifyCell(rawBranchVal);
-    const rawDepartment = stringifyCell(rawDepartmentVal);
-    const rawDesignation = stringifyCell(rawDesignationVal);
-    const rawStatus = stringifyCell(rawStatusVal);
-    const rawDob = stringifyCell(rawDobVal);
-    const rawDoj = stringifyCell(rawDojVal);
-    const phone = stringifyCell(rawPhoneVal).slice(0, 24);
-    const panNumber = stringifyCell(rawPanVal).toUpperCase().slice(0, 20);
-    const uanNumber = stringifyCell(rawUanVal).slice(0, 24);
-    const pfNumber = stringifyCell(rawPfVal).slice(0, 32);
-    const esicNumber = stringifyCell(rawEsicVal).slice(0, 32);
-    const bankName = stringifyCell(rawBankNameVal).slice(0, 80);
-    const rawAccount = stringifyCell(rawAccountVal);
+    const hasExplicitEmpIdCol =
+      normalizedMap.has('employeeid') ||
+      normalizedMap.has('empid') ||
+      normalizedMap.has('empcode') ||
+      normalizedMap.has('employeecode') ||
+      normalizedMap.has('staffid');
+
+    const rawEmpIdVal = pickCell(
+      data,
+      normalizedMap,
+      hasExplicitEmpIdCol
+        ? ['employeeid', 'empid', 'empcode', 'employeecode', 'staffid']
+        : ['employeeid', 'empid', 'empcode', 'employeecode', 'salesmanno', 'staffid'],
+      ['sell', 'saleid', 'salecode', 'login', 'user', 'branch', 'dept', 'department'],
+      claimedOrigKeys,
+    );
+    const rawSaleIdVal = pickCell(
+      data,
+      normalizedMap,
+      ['saleid', 'sellid', 'salecode', 'sellcode', 'salesmancode', 'posid', 'poscode'],
+      ['emp', 'login', 'branch', 'dept'],
+      claimedOrigKeys,
+    );
+    const rawLoginIdVal = pickCell(
+      data,
+      normalizedMap,
+      ['loginid', 'userid', 'username', 'stafflogin'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawFullNameVal = pickCell(
+      data,
+      normalizedMap,
+      ['fullname', 'employeename', 'empname', 'salesmanname', 'staffname', 'name'],
+      ['branch', 'dept', 'department', 'bank', 'father', 'mother', 'spouse', 'emergency', 'nominee'],
+      claimedOrigKeys,
+    );
+    const rawBranchVal = pickCell(
+      data,
+      normalizedMap,
+      ['branchname', 'branch', 'branchcode', 'store', 'location'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawDepartmentVal = pickCell(
+      data,
+      normalizedMap,
+      ['departmentname', 'department', 'dept', 'section'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawDesignationVal = pickCell(
+      data,
+      normalizedMap,
+      ['designation', 'desgination', 'jobtitle', 'position', 'post', 'title'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawGenderVal = pickCell(data, normalizedMap, ['gender', 'sex'], [], claimedOrigKeys);
+    const rawCategoryVal = pickCell(
+      data,
+      normalizedMap,
+      ['category', 'staffcategory', 'empcategory', 'employeecategory'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawStatusVal = pickCell(
+      data,
+      normalizedMap,
+      ['status', 'employeestatus', 'active'],
+      ['marital'],
+      claimedOrigKeys,
+    );
+    const rawDobVal = pickCell(
+      data,
+      normalizedMap,
+      ['dateofbirth', 'dob', 'birthdate', 'birthday'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawDojVal = pickCell(
+      data,
+      normalizedMap,
+      ['dateofjoining', 'doj', 'joiningdate', 'hiredate'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawPhoneVal = pickCell(
+      data,
+      normalizedMap,
+      ['mobilenumber', 'phonenumber', 'phone', 'mobile', 'mobileno', 'contactno', 'contact'],
+      ['emergency', 'alt', 'alternate'],
+      claimedOrigKeys,
+    );
+    const rawPanVal = pickCell(data, normalizedMap, ['pannumber', 'panno', 'pan'], ['company'], claimedOrigKeys);
+    const rawUanVal = pickCell(data, normalizedMap, ['uannumber', 'uanno', 'uan'], [], claimedOrigKeys);
+    const rawPfVal = pickCell(
+      data,
+      normalizedMap,
+      ['pfaccountnumber', 'providentfundnumber', 'pfnumber', 'pfno', 'epfno', 'epf'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawEsicVal = pickCell(
+      data,
+      normalizedMap,
+      ['esicnumber', 'esicno', 'esic', 'esino'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawBankNameVal = pickCell(data, normalizedMap, ['bankname', 'bank'], ['account', 'acc', 'ifsc'], claimedOrigKeys);
+    const rawAccountVal = pickCell(
+      data,
+      normalizedMap,
+      ['bankaccountnumber', 'bankaccountmasked', 'accountnumber', 'accountno', 'bankaccount', 'accno'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawIfscVal = pickCell(
+      data,
+      normalizedMap,
+      ['bankifsccode', 'bankifsc', 'ifsccode', 'ifsc'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawGoogleEmailVal = pickCell(
+      data,
+      normalizedMap,
+      ['linkedgoogleemail', 'googleemail', 'gmail', 'email'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawAddressVal = pickCell(
+      data,
+      normalizedMap,
+      ['address', 'residentialaddress', 'currentaddress', 'permanentaddress'],
+      ['email', 'ip'],
+      claimedOrigKeys,
+    );
+    const rawEmergencyContactVal = pickCell(
+      data,
+      normalizedMap,
+      ['emergencycontact', 'emergencyphone', 'emergencymobile', 'emergencyno'],
+      [],
+      claimedOrigKeys,
+    );
+
+    const rawEmployeeId = cleanExcelTextCell(stringifyCell(rawEmpIdVal));
+    const rawSaleId = sanitizeSaleIdCell(stringifyCell(rawSaleIdVal));
+    const rawLoginId = cleanExcelTextCell(stringifyCell(rawLoginIdVal));
+    const rawFullName = cleanExcelTextCell(stringifyCell(rawFullNameVal));
+    const rawBranch = cleanExcelTextCell(stringifyCell(rawBranchVal));
+    const rawDepartmentCandidate = cleanExcelTextCell(stringifyCell(rawDepartmentVal));
+    const rawDepartment =
+      rawDepartmentCandidate.toUpperCase() === 'LEFT' ? '' : rawDepartmentCandidate;
+    const rawDesignation = cleanExcelTextCell(stringifyCell(rawDesignationVal));
+    const rawGender = cleanExcelTextCell(stringifyCell(rawGenderVal));
+    const rawCategory = cleanExcelTextCell(stringifyCell(rawCategoryVal));
+    const rawStatus = cleanExcelTextCell(stringifyCell(rawStatusVal));
+    const rawDob = cleanExcelTextCell(stringifyCell(rawDobVal));
+    const rawDoj = cleanExcelTextCell(stringifyCell(rawDojVal));
+    const phone = cleanExcelTextCell(stringifyCell(rawPhoneVal)).slice(0, 24);
+    const panNumber = cleanExcelTextCell(stringifyCell(rawPanVal)).toUpperCase().slice(0, 20);
+    const uanNumber = cleanExcelTextCell(stringifyCell(rawUanVal)).slice(0, 24);
+    const pfNumber = cleanExcelTextCell(stringifyCell(rawPfVal)).slice(0, 32);
+    const esicNumber = cleanExcelTextCell(stringifyCell(rawEsicVal)).slice(0, 32);
+    const bankName = cleanExcelTextCell(stringifyCell(rawBankNameVal)).slice(0, 80);
+    const rawAccount = cleanExcelTextCell(stringifyCell(rawAccountVal));
     const bankAccountMasked = rawAccount ? maskBankAccountNumber(rawAccount).slice(0, 32) : '';
-    const bankIfsc = stringifyCell(rawIfscVal).toUpperCase().slice(0, 20);
-    const linkedGoogleEmail = stringifyCell(rawGoogleEmailVal).toLowerCase().slice(0, 180);
+    const bankIfsc = cleanExcelTextCell(stringifyCell(rawIfscVal)).toUpperCase().slice(0, 20);
+    const linkedGoogleEmail = cleanExcelTextCell(stringifyCell(rawGoogleEmailVal)).toLowerCase().slice(0, 180);
+    const address = cleanExcelTextCell(stringifyCell(rawAddressVal)).slice(0, 240);
+    const emergencyContact = cleanExcelTextCell(stringifyCell(rawEmergencyContactVal)).slice(0, 120);
+
+    // Collect any extra/custom columns not claimed by standard headers (excluding Sr No / S.No)
+    const IGNORED_EXTRA_NORMS = new Set(['srno', 'sno', 'serialno', 'serialnumber', 'sr', 'slno', '__rowNum__']);
+    const CLEAR_CUSTOM_TOKEN_RE = /^(\[CLEAR\]|CLEAR)$/i;
+    const fileCustomFields: Record<string, string> = {};
+    const clearedCustomFieldKeys: string[] = [];
+    for (const [origKey, val] of Object.entries(data)) {
+      if (claimedOrigKeys.has(origKey)) continue;
+      const cleanKey = String(origKey || '').trim().slice(0, 60);
+      const normKey = normalizeHeaderKey(cleanKey);
+      if (!cleanKey || !normKey || IGNORED_EXTRA_NORMS.has(normKey) || cleanKey.startsWith('__')) continue;
+      const strVal = stringifyCell(val).slice(0, 200);
+      if (!strVal) continue;
+      if (CLEAR_CUSTOM_TOKEN_RE.test(strVal)) {
+        clearedCustomFieldKeys.push(cleanKey);
+      } else if (Object.keys(fileCustomFields).length < 25) {
+        fileCustomFields[cleanKey] = strVal;
+      }
+    }
 
     // Skip completely blank lines
     if (
       !rawEmployeeId &&
+      !rawSaleId &&
       !rawFullName &&
       !rawBranch &&
       !rawDepartment &&
@@ -586,6 +809,61 @@ export function parseEmployeeMasterRows(
     }
 
     const existing = cleanEmpId ? existingById.get(cleanEmpId.toUpperCase()) : undefined;
+
+    // Merge existing customFields with fileCustomFields (and apply explicit CLEAR / [CLEAR] tokens)
+    const mergedCustomFields: Record<string, string> = {
+      ...(existing?.customFields || {}),
+    };
+    for (const clearKey of clearedCustomFieldKeys) {
+      const cNorm = normalizeHeaderKey(clearKey);
+      const existingMatchKey = Object.keys(mergedCustomFields).find(
+        (k) => normalizeHeaderKey(k) === cNorm,
+      );
+      if (existingMatchKey) {
+        delete mergedCustomFields[existingMatchKey];
+      }
+    }
+    for (const [cKey, cVal] of Object.entries(fileCustomFields)) {
+      const cNorm = normalizeHeaderKey(cKey);
+      const existingMatchKey = Object.keys(mergedCustomFields).find(
+        (k) => normalizeHeaderKey(k) === cNorm,
+      );
+      const targetKey = existingMatchKey || cKey;
+      if (mergedCustomFields[targetKey] !== undefined || Object.keys(mergedCustomFields).length < 25) {
+        mergedCustomFields[targetKey] = cVal;
+      }
+    }
+
+    // 1b. Validate optional unique Sale ID (POS Salesman Code for Sales Staff; leave blank for Non-Sales)
+    const normalizedSaleIdInput = rawSaleId
+      ? rawSaleId.trim().toUpperCase().replace(/\s+/g, '')
+      : '';
+    const cleanSaleId = normalizedSaleIdInput
+      ? sanitizeId(normalizedSaleIdInput).toUpperCase().slice(0, 40)
+      : '';
+    const resolvedSaleId = rawSaleId ? cleanSaleId : (existing?.saleId || '');
+    if (rawSaleId) {
+      if (!cleanSaleId || !/^[A-Z0-9_-]{1,40}$/.test(cleanSaleId)) {
+        errorDetails.push({
+          field: 'Sale ID',
+          reason: `Invalid Sale ID "${rawSaleId}". Use only letters, numbers, hyphens (-) or underscores (_), max 40 chars (or leave blank for Non-Sales staff).`,
+        });
+      } else {
+        const saleOwner = existingBySaleId.get(cleanSaleId.toUpperCase());
+        if (
+          saleOwner &&
+          saleOwner.employeeId.toUpperCase() !== (cleanEmpId || '').toUpperCase()
+        ) {
+          errorDetails.push({
+            field: 'Sale ID',
+            reason: `Sale ID "${cleanSaleId}" is already assigned to existing employee "${saleOwner.fullName}" (${saleOwner.employeeId}) in branch ${saleOwner.branchName}. Every Sale ID must be unique.`,
+          });
+        }
+      }
+    }
+
+    const resolvedGender = (rawGender || existing?.gender || '').trim().slice(0, 20);
+    const resolvedCategory = (rawCategory || existing?.category || '').trim().slice(0, 40);
 
     // 2. Validate / Derive Login ID
     let resolvedLoginId = rawLoginId
@@ -635,7 +913,7 @@ export function parseEmployeeMasterRows(
       }
     }
 
-    // 3. Check duplicate Employee ID / Login ID inside the same uploaded file
+    // 3. Check duplicate Employee ID / Sale ID / Login ID inside the same uploaded file
     let duplicateFirstRowNumber: number | undefined;
     let duplicateReason = '';
     if (cleanEmpId) {
@@ -645,6 +923,15 @@ export function parseEmployeeMasterRows(
         duplicateReason = `Duplicate Employee ID "${cleanEmpId}" inside this file — already appeared on Row ${firstEmpRow}. Remove the duplicate row so data does not overlap.`;
       } else {
         seenEmpIdRow.set(cleanEmpId.toUpperCase(), rowNumber);
+      }
+    }
+    if (!duplicateFirstRowNumber && cleanSaleId) {
+      const firstSaleRow = seenSaleIdRow.get(cleanSaleId.toUpperCase());
+      if (firstSaleRow !== undefined) {
+        duplicateFirstRowNumber = firstSaleRow;
+        duplicateReason = `Duplicate Sale ID "${cleanSaleId}" inside this file — already assigned on Row ${firstSaleRow}. Every Sales employee must have a unique Sale ID.`;
+      } else {
+        seenSaleIdRow.set(cleanSaleId.toUpperCase(), rowNumber);
       }
     }
     if (!duplicateFirstRowNumber && resolvedLoginId) {
@@ -779,15 +1066,19 @@ export function parseEmployeeMasterRows(
         rowNumber,
         status: 'DUPLICATE_IN_FILE',
         rawEmployeeId,
+        rawSaleId,
         rawLoginId,
         rawFullName,
         rawBranch,
         rawDepartment,
         rawDesignation,
+        rawGender,
+        rawCategory,
         rawStatus,
         rawDob,
         rawDoj,
         employeeId: cleanEmpId,
+        saleId: resolvedSaleId,
         loginId: resolvedLoginId,
         fullName: resolvedFullName,
         branchId: resolvedBranchId,
@@ -795,6 +1086,8 @@ export function parseEmployeeMasterRows(
         departmentId: resolvedDepartmentId,
         departmentName: resolvedDepartmentName,
         designation: resolvedDesignation,
+        gender: resolvedGender,
+        category: resolvedCategory,
         employeeStatus: resolvedStatus,
         dateOfBirth: resolvedDob,
         dateOfJoining: resolvedDoj,
@@ -807,6 +1100,9 @@ export function parseEmployeeMasterRows(
         bankAccountMasked,
         bankIfsc,
         linkedGoogleEmail,
+        address,
+        emergencyContact,
+        customFields: mergedCustomFields,
         existingEmployee: existing,
         diffs: [],
         hasOrgOverlap: false,
@@ -826,15 +1122,19 @@ export function parseEmployeeMasterRows(
         rowNumber,
         status: 'ERROR',
         rawEmployeeId,
+        rawSaleId,
         rawLoginId,
         rawFullName,
         rawBranch,
         rawDepartment,
         rawDesignation,
+        rawGender,
+        rawCategory,
         rawStatus,
         rawDob,
         rawDoj,
         employeeId: cleanEmpId,
+        saleId: resolvedSaleId,
         loginId: resolvedLoginId,
         fullName: resolvedFullName,
         branchId: resolvedBranchId,
@@ -842,6 +1142,8 @@ export function parseEmployeeMasterRows(
         departmentId: resolvedDepartmentId,
         departmentName: resolvedDepartmentName,
         designation: resolvedDesignation,
+        gender: resolvedGender,
+        category: resolvedCategory,
         employeeStatus: resolvedStatus,
         dateOfBirth: resolvedDob,
         dateOfJoining: resolvedDoj,
@@ -854,6 +1156,9 @@ export function parseEmployeeMasterRows(
         bankAccountMasked,
         bankIfsc,
         linkedGoogleEmail,
+        address,
+        emergencyContact,
+        customFields: mergedCustomFields,
         existingEmployee: existing,
         diffs: [],
         hasOrgOverlap: false,
@@ -865,19 +1170,24 @@ export function parseEmployeeMasterRows(
     }
 
     if (!existing) {
+      const customCount = Object.keys(fileCustomFields).length;
       parsed.push({
         rowNumber,
         status: 'NEW_READY',
         rawEmployeeId,
+        rawSaleId,
         rawLoginId,
         rawFullName,
         rawBranch,
         rawDepartment,
         rawDesignation,
+        rawGender,
+        rawCategory,
         rawStatus,
         rawDob,
         rawDoj,
         employeeId: cleanEmpId,
+        saleId: resolvedSaleId,
         loginId: resolvedLoginId,
         fullName: resolvedFullName,
         branchId: resolvedBranchId,
@@ -885,6 +1195,8 @@ export function parseEmployeeMasterRows(
         departmentId: resolvedDepartmentId,
         departmentName: resolvedDepartmentName,
         designation: resolvedDesignation,
+        gender: resolvedGender,
+        category: resolvedCategory,
         employeeStatus: resolvedStatus,
         dateOfBirth: resolvedDob,
         dateOfJoining: resolvedDoj,
@@ -897,11 +1209,14 @@ export function parseEmployeeMasterRows(
         bankAccountMasked,
         bankIfsc,
         linkedGoogleEmail,
+        address,
+        emergencyContact,
+        customFields: fileCustomFields,
         diffs: [],
         hasOrgOverlap: false,
         overlapSummary: '',
         errorDetails: [],
-        summaryMessage: `New employee ready to create in ${resolvedBranchName}${resolvedDepartmentName ? ` · ${resolvedDepartmentName}` : ''} (${resolvedDesignation}).`,
+        summaryMessage: `New employee ready to create in ${resolvedBranchName}${resolvedDepartmentName ? ` · ${resolvedDepartmentName}` : ''}${resolvedSaleId ? ` · Sale ID ${resolvedSaleId}` : ''}${customCount > 0 ? ` · +${customCount} custom column(s)` : ''} (${resolvedDesignation}).`,
       });
       continue;
     }
@@ -926,6 +1241,9 @@ export function parseEmployeeMasterRows(
       }
     };
 
+    if (rawSaleId && resolvedSaleId !== (existing.saleId || '')) {
+      pushDiff('saleId', 'Sale ID', existing.saleId || '', resolvedSaleId, false);
+    }
     if (rawBranch && resolvedBranchId !== existing.branchId) {
       pushDiff('branch', 'Branch', existing.branchName, resolvedBranchName, true);
     }
@@ -944,6 +1262,12 @@ export function parseEmployeeMasterRows(
     }
     if (rawDesignation && resolvedDesignation !== existing.designation) {
       pushDiff('designation', 'Designation', existing.designation, resolvedDesignation, true);
+    }
+    if (rawGender && resolvedGender !== (existing.gender || '')) {
+      pushDiff('gender', 'Gender', existing.gender || '', resolvedGender, false);
+    }
+    if (rawCategory && resolvedCategory !== (existing.category || '')) {
+      pushDiff('category', 'Category', existing.category || '', resolvedCategory, false);
     }
     if (rawFullName && resolvedFullName !== existing.fullName) {
       pushDiff('fullName', 'Full Name', existing.fullName, resolvedFullName, false);
@@ -999,21 +1323,55 @@ export function parseEmployeeMasterRows(
         false,
       );
     }
+    if (address && address !== (existing.address || '')) {
+      pushDiff('address', 'Address', existing.address || '', address, false);
+    }
+    if (emergencyContact && emergencyContact !== (existing.emergencyContact || '')) {
+      pushDiff(
+        'emergencyContact',
+        'Emergency Contact',
+        existing.emergencyContact || '',
+        emergencyContact,
+        false,
+      );
+    }
+    for (const [cKey, cVal] of Object.entries(fileCustomFields)) {
+      const existingCustomMap = existing.customFields || {};
+      const cNorm = normalizeHeaderKey(cKey);
+      const matchKey = Object.keys(existingCustomMap).find((k) => normalizeHeaderKey(k) === cNorm);
+      const existingVal = matchKey ? existingCustomMap[matchKey] : '';
+      if (cVal && cVal !== existingVal) {
+        pushDiff(`custom:${cKey}`, cKey, existingVal || '', cVal, false);
+      }
+    }
+    for (const clearKey of clearedCustomFieldKeys) {
+      const existingCustomMap = existing.customFields || {};
+      const cNorm = normalizeHeaderKey(clearKey);
+      const matchKey = Object.keys(existingCustomMap).find((k) => normalizeHeaderKey(k) === cNorm);
+      const existingVal = matchKey ? existingCustomMap[matchKey] : '';
+      if (existingVal) {
+        pushDiff(`custom:${matchKey || clearKey}`, matchKey || clearKey, existingVal, '(Cleared)', false);
+      }
+    }
 
     if (diffs.length === 0) {
       parsed.push({
         rowNumber,
         status: 'UNCHANGED',
         rawEmployeeId,
+        rawSaleId,
         rawLoginId,
         rawFullName,
         rawBranch,
         rawDepartment,
         rawDesignation,
+        rawGender,
+        rawCategory,
         rawStatus,
         rawDob,
         rawDoj,
         employeeId: existing.employeeId,
+        saleId: existing.saleId || '',
         loginId: existing.loginId,
         fullName: existing.fullName,
         branchId: existing.branchId,
@@ -1021,6 +1379,8 @@ export function parseEmployeeMasterRows(
         departmentId: existing.departmentId || '',
         departmentName: existing.departmentName || '',
         designation: existing.designation,
+        gender: existing.gender || '',
+        category: existing.category || '',
         employeeStatus: existing.status,
         dateOfBirth: existing.dateOfBirth || '',
         dateOfJoining: existing.dateOfJoining || '',
@@ -1033,6 +1393,9 @@ export function parseEmployeeMasterRows(
         bankAccountMasked: existing.bankAccountMasked || '',
         bankIfsc: existing.bankIfsc || '',
         linkedGoogleEmail: existing.linkedGoogleEmail || '',
+        address: existing.address || '',
+        emergencyContact: existing.emergencyContact || '',
+        customFields: existing.customFields || {},
         existingEmployee: existing,
         diffs: [],
         hasOrgOverlap: false,
@@ -1052,15 +1415,19 @@ export function parseEmployeeMasterRows(
       rowNumber,
       status: 'OVERLAP_CONFLICT',
       rawEmployeeId,
+      rawSaleId,
       rawLoginId,
       rawFullName,
       rawBranch,
       rawDepartment,
       rawDesignation,
+      rawGender,
+      rawCategory,
       rawStatus,
       rawDob,
       rawDoj,
       employeeId: existing.employeeId,
+      saleId: resolvedSaleId,
       loginId: resolvedLoginId,
       fullName: resolvedFullName,
       branchId: resolvedBranchId,
@@ -1068,6 +1435,8 @@ export function parseEmployeeMasterRows(
       departmentId: resolvedDepartmentId,
       departmentName: resolvedDepartmentName,
       designation: resolvedDesignation,
+      gender: resolvedGender,
+      category: resolvedCategory,
       employeeStatus: resolvedStatus,
       dateOfBirth: resolvedDob,
       dateOfJoining: resolvedDoj,
@@ -1080,6 +1449,9 @@ export function parseEmployeeMasterRows(
       bankAccountMasked: bankAccountMasked || existing.bankAccountMasked || '',
       bankIfsc: bankIfsc || existing.bankIfsc || '',
       linkedGoogleEmail: linkedGoogleEmail || existing.linkedGoogleEmail || '',
+      address: address || existing.address || '',
+      emergencyContact: emergencyContact || existing.emergencyContact || '',
+      customFields: mergedCustomFields,
       existingEmployee: existing,
       diffs,
       hasOrgOverlap,
@@ -1153,6 +1525,7 @@ export function buildEmployeeImportDiagnosticsCsv(rows: ParsedEmployeeMasterRow[
     'Diagnostic Category',
     'Why Error / Overlap Occurred',
     'Employee ID',
+    'Sale ID',
     'Login ID',
     'Full Name',
     'Branch (Master)',
@@ -1192,6 +1565,7 @@ export function buildEmployeeImportDiagnosticsCsv(rows: ParsedEmployeeMasterRow[
         categoryLabel,
         reasonText,
         r.rawEmployeeId || r.employeeId,
+        r.rawSaleId || r.saleId || '-',
         r.rawLoginId || r.loginId,
         r.rawFullName || r.fullName,
         r.existingEmployee?.branchName || '-',

@@ -37,9 +37,11 @@ import {
   downloadEmployeeIncentiveSlipPdf,
   downloadManagementBranchSummaryPdf,
 } from '../../lib/pdfGenerator';
+import { auth, MAIN_OWNER_EMAIL } from '../../lib/firebase';
 import {
   approveImportBatch,
   BACKUP_COLLECTION_NAMES,
+  cleanResetUploadedRecords,
   deleteImportBatch,
   exportFullFirestoreBackup,
   listBatchRows,
@@ -66,6 +68,7 @@ import type {
   PayoutRecord,
   PortalVisibilitySettings,
   PublishedIncentive,
+  SalarySlip,
 } from '../../types/incentive';
 
 interface Props {
@@ -78,6 +81,7 @@ interface Props {
   auditLogs: AuditLog[];
   payoutRecords?: PayoutRecord[];
   adjustments?: IncentiveAdjustment[];
+  salarySlips?: SalarySlip[];
   visibilitySettings?: PortalVisibilitySettings;
   onRefresh: () => Promise<void>;
 }
@@ -94,6 +98,7 @@ export function HistoryAndReports({
   auditLogs,
   payoutRecords = [],
   adjustments = [],
+  salarySlips = [],
   visibilitySettings = DEFAULT_PORTAL_VISIBILITY,
   onRefresh,
 }: Props) {
@@ -133,6 +138,19 @@ export function HistoryAndReports({
   const [purgingMonth, setPurgingMonth] = useState<string | null>(null);
   const [purgeReason, setPurgeReason] = useState('');
   const [purgingInFlight, setPurgingInFlight] = useState(false);
+
+  // Main Owner ONLY: Safe Fresh Start / Clean Reset drawer state
+  const isMainOwner = Boolean(
+    auth.currentUser?.emailVerified &&
+      (auth.currentUser?.email || '').trim().toLowerCase() === MAIN_OWNER_EMAIL.toLowerCase(),
+  );
+  const [showCleanResetPanel, setShowCleanResetPanel] = useState(false);
+  const [resetIncludeEmployees, setResetIncludeEmployees] = useState(true);
+  const [resetConfirmWord, setResetConfirmWord] = useState('');
+  const [resetReason, setResetReason] = useState(
+    'Fresh payroll setup after verified full JSON backup',
+  );
+  const [resettingInFlight, setResettingInFlight] = useState(false);
 
   const employeesById = useMemo(() => {
     const map: Record<string, Employee> = {};
@@ -591,12 +609,67 @@ export function HistoryAndReports({
     }
   };
 
+  const handleExecuteCleanReset = async () => {
+    if (!isMainOwner) return;
+    if (resetConfirmWord.trim().toUpperCase() !== 'RESET') {
+      setMessage('Type RESET in uppercase to confirm the Fresh Start Clean Reset.');
+      return;
+    }
+    if (resetReason.trim().length < 4) {
+      setMessage('Enter a short audit reason (at least 4 characters) before resetting.');
+      return;
+    }
+
+    setResettingInFlight(true);
+    setMessage(null);
+    try {
+      // Step 1: ALWAYS download a verified Full JSON Backup BEFORE deleting anything
+      const { snapshot, serializedJson, fileSha256, fileSizeBytes } =
+        await exportFullFirestoreBackup();
+      const count = snapshot.manifest.collectionCount;
+      const fileName = `house-of-muktai-PRE-RESET-backup-${count}-collections-${getTodayIST()}.json`;
+      const blob = new Blob([serializedJson], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      setBackupReceipt({
+        fileName,
+        fileSizeBytes,
+        fileSha256,
+        manifest: snapshot.manifest,
+      });
+
+      // Step 2: Safely wipe transactional records (and optionally old Employee Master)
+      const res = await cleanResetUploadedRecords({
+        includeEmployees: resetIncludeEmployees,
+        reason: resetReason.trim(),
+      });
+
+      setShowCleanResetPanel(false);
+      setResetConfirmWord('');
+      setMessage(
+        `Fresh Start Clean Reset complete: Pre-reset backup (${fileName}) downloaded, ${res.totalDeleted} old document(s) cleared (${resetIncludeEmployees ? 'including old Employee Master for Dual-ID upload' : 'Employee Master preserved'}). 12 Branches, Admin/Owner Accounts, Portal Settings & Audit Logs are 100% intact.`,
+      );
+      await onRefresh();
+    } catch (err) {
+      setMessage(
+        err instanceof Error ? err.message : 'Unable to complete Clean Reset.',
+      );
+    } finally {
+      setResettingInFlight(false);
+    }
+  };
+
   const handleExportCsvLedger = async () => {
     const header = [
       'Month',
       'NAME',
-      'Sales Person Name',
-      'Salesman No',
+      'Employee Name',
+      'Employee ID',
       'Sale Amt (New Items Sale)',
       'Sale Qty (New Items Sale)',
       'New Items Sale Incentive',
@@ -880,7 +953,9 @@ export function HistoryAndReports({
         <MonthVisibilityControlCard
           visibilitySettings={visibilitySettings}
           incentives={incentives}
+          salarySlips={salarySlips}
           availableMonths={availableMonths}
+          defaultFocus="incentives"
           onSaved={async () => {
             await onRefresh();
           }}
@@ -913,23 +988,6 @@ export function HistoryAndReports({
         </div>
 
         <div className="inline-flex flex-wrap items-center gap-1.5 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80 self-start lg:self-auto">
-          {allStoredMonthKeys.some((mk) => mk.endsWith('-11')) && (
-            <button
-              type="button"
-              onClick={() => {
-                const novKey = allStoredMonthKeys.find((mk) => mk.endsWith('-11')) || '';
-                if (novKey) {
-                  setSubTab('reports');
-                  setPurgingMonth(novKey);
-                  setPurgeReason('Remove November records');
-                }
-              }}
-              className="h-8 px-3 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-xs font-semibold text-red-700 inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              Delete Nov Data
-            </button>
-          )}
           <button
             type="button"
             disabled={exportingBackup}
@@ -939,8 +997,125 @@ export function HistoryAndReports({
             <Download className="w-3.5 h-3.5" />
             {exportingBackup ? 'Exporting...' : 'Backup JSON'}
           </button>
+          {isMainOwner && (
+            <button
+              type="button"
+              onClick={() => {
+                setShowCleanResetPanel((v) => !v);
+                setResetConfirmWord('');
+              }}
+              className="h-8 px-3 rounded-lg border border-rose-300 bg-rose-50 hover:bg-rose-100 text-xs font-semibold text-rose-800 inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Fresh Start Reset
+            </button>
+          )}
         </div>
       </div>
+
+      {isMainOwner && showCleanResetPanel && (
+        <div className="bg-white border-2 border-rose-300 rounded-xl p-5 space-y-4 shadow-xs">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-bold text-rose-900 flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                Main Owner · Fresh Start Clean Reset
+              </h3>
+              <p className="text-xs text-slate-600 mt-1">
+                Downloads a <strong>verified Full JSON Backup</strong> first, then clears transactional records.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowCleanResetPanel(false)}
+              className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
+              aria-label="Close clean reset panel"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-950">
+              <p className="font-semibold">Preserved:</p>
+              <p className="text-[11px] mt-1">
+                12 Branches · Owner &amp; Admin Accounts · Portal Settings · Audit Logs
+              </p>
+            </div>
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-950">
+              <p className="font-semibold">Cleared After Auto-Backup:</p>
+              <p className="text-[11px] mt-1">
+                Incentives, Monthly Summaries, Batches, Salary Slips, Targets, Payouts, Loans, Queries &amp; Alerts
+              </p>
+            </div>
+          </div>
+
+          <label className="flex items-start gap-2.5 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-950 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={resetIncludeEmployees}
+              onChange={(e) => setResetIncludeEmployees(e.target.checked)}
+              className="mt-0.5 rounded border-amber-400 text-rose-700 focus:ring-rose-600"
+            />
+            <span>
+              <strong>Also clear Employee Master &amp; Auth Registry</strong> (Use when re-importing a fresh Employee Master sheet).
+            </span>
+          </label>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Audit Reason (Logged Permanently)
+              </label>
+              <input
+                type="text"
+                value={resetReason}
+                onChange={(e) => setResetReason(e.target.value)}
+                placeholder="e.g. Fresh payroll setup"
+                className="w-full h-9 px-3 rounded-lg border border-slate-300 text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Type <span className="font-mono font-bold text-rose-700">RESET</span> to unlock
+              </label>
+              <input
+                type="text"
+                value={resetConfirmWord}
+                onChange={(e) => setResetConfirmWord(e.target.value)}
+                placeholder="Type RESET"
+                className="w-full h-9 px-3 rounded-lg border border-rose-300 text-xs font-mono uppercase"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-slate-100">
+            <button
+              type="button"
+              onClick={() => setShowCleanResetPanel(false)}
+              disabled={resettingInFlight}
+              className="h-9 px-3.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={
+                resettingInFlight ||
+                resetConfirmWord.trim().toUpperCase() !== 'RESET' ||
+                resetReason.trim().length < 4
+              }
+              onClick={() => void handleExecuteCleanReset()}
+              className="h-9 px-4 rounded-lg bg-rose-700 hover:bg-rose-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Download className="w-3.5 h-3.5" />
+              {resettingInFlight
+                ? 'Backing up & Resetting...'
+                : 'Auto-Backup JSON & Execute Clean Reset'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {message && (
         <div className="p-3.5 rounded-lg bg-slate-900 text-white text-sm">{message}</div>
@@ -1168,7 +1343,7 @@ export function HistoryAndReports({
                       maxLength={300}
                       value={editNote}
                       onChange={(e) => setEditNote(e.target.value)}
-                      placeholder="e.g. Corrected Salesman No 459 Old Items Sale incentive"
+                      placeholder="e.g. Corrected Employee ID 459 Old Items Sale incentive"
                       className="w-full h-9 px-3 rounded-lg border border-slate-300 text-sm"
                     />
                   </div>
@@ -1238,7 +1413,7 @@ export function HistoryAndReports({
                       type="text"
                       value={editSearch}
                       onChange={(e) => setEditSearch(e.target.value)}
-                      placeholder="Filter by Salesman No, Name, Branch..."
+                      placeholder="Filter by Employee ID, Name, Branch..."
                       className="w-full h-9 pl-8 pr-3 rounded-lg border border-slate-300 text-xs"
                     />
                   </div>
@@ -1268,18 +1443,18 @@ export function HistoryAndReports({
                     <table className="w-full text-left border-collapse text-xs">
                       <thead className="sticky top-0 z-10 bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
                         <tr>
-                          <th className="py-2.5 px-3 min-w-[165px]">Sales Person / Branch</th>
+                          <th className="py-2.5 px-3 min-w-[165px]">Employee / Branch</th>
                           <th className="py-2.5 px-2 min-w-[185px]">
-                            New Items Sale (Amt / Qty / Inc ₹)
+                            New Items Sale (Amount / Quantity / Incentive ₹)
                           </th>
                           <th className="py-2.5 px-2 min-w-[185px]">
-                            Old Items Sale (Amt / Qty / Inc ₹)
+                            Old Items Sale (Amount / Quantity / Incentive ₹)
                           </th>
                           <th className="py-2.5 px-2 min-w-[185px]">
-                            Other Items Sale (Amt / Qty / Inc ₹)
+                            Other Items Sale (Amount / Quantity / Incentive ₹)
                           </th>
                           <th className="py-2.5 px-3 text-right min-w-[115px]">Row Total</th>
-                          <th className="py-2.5 px-2 text-right">Row</th>
+                          <th className="py-2.5 px-2 text-right">Action</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
@@ -1296,10 +1471,10 @@ export function HistoryAndReports({
                             >
                               <td className="py-2.5 px-3 align-top">
                                 <div className="font-medium text-slate-900">
-                                  {row.employeeName || `Salesman ${row.employeeId}`}
+                                  {row.employeeName || `Employee ${row.employeeId}`}
                                 </div>
                                 <div className="text-[11px] font-mono text-slate-500">
-                                  No: {row.employeeId} · {row.branchName || row.branchId || '—'}
+                                  ID: {row.employeeId} · {row.branchName || row.branchId || '—'}
                                 </div>
                                 {row.resolution === 'SKIP' && (
                                   <span className="text-[10px] font-semibold text-amber-700">
@@ -1579,7 +1754,7 @@ export function HistoryAndReports({
                     <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
                       <th className="py-3 px-4">Batch / File</th>
                       <th className="py-3 px-4">Type &amp; Period</th>
-                      <th className="py-3 px-4 text-right">Rows (Valid / Corr / Err)</th>
+                      <th className="py-3 px-4 text-right">Rows (Valid / Corrected / Errors)</th>
                       <th className="py-3 px-4 text-right">Incentive &amp; Sales</th>
                       <th className="py-3 px-4">Status</th>
                       <th className="py-3 px-4 text-right">Actions</th>
@@ -1959,15 +2134,15 @@ export function HistoryAndReports({
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="border-b border-slate-200 bg-slate-50 font-semibold text-slate-600">
-                      <th className="py-3 px-3">Branch (NAME)</th>
-                      <th className="py-3 px-3">Sales Person / No</th>
+                      <th className="py-3 px-3">Branch Name</th>
+                      <th className="py-3 px-3">Employee Name &amp; ID</th>
                       <th className="py-3 px-3">Source</th>
-                      <th className="py-3 px-3 text-right">New Items Sale (Amt / Qty / Inc)</th>
-                      <th className="py-3 px-3 text-right">Old Items Sale (Amt / Qty / Inc)</th>
-                      <th className="py-3 px-3 text-right">Other Items Sale (Amt / Qty / Inc)</th>
-                      <th className="py-3 px-3 text-right">Total Sale Amt / Qty</th>
+                      <th className="py-3 px-3 text-right">New Items Sale (Amount / Quantity / Incentive)</th>
+                      <th className="py-3 px-3 text-right">Old Items Sale (Amount / Quantity / Incentive)</th>
+                      <th className="py-3 px-3 text-right">Other Items Sale (Amount / Quantity / Incentive)</th>
+                      <th className="py-3 px-3 text-right">Total Sale Amount &amp; Quantity</th>
                       <th className="py-3 px-3 text-right">Total Incentive</th>
-                      <th className="py-3 px-3 text-right">Slip</th>
+                      <th className="py-3 px-3 text-right">Incentive Slip</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -1993,7 +2168,7 @@ export function HistoryAndReports({
                           <td className="py-3 px-3">
                             <div className="font-medium text-slate-900">{s.employeeName}</div>
                             <div className="text-[11px] font-mono text-slate-500">
-                              Salesman No: {s.employeeId}
+                              Employee ID: {s.employeeId}
                             </div>
                           </td>
                           <td className="py-3 px-3 text-slate-600 whitespace-nowrap">
@@ -2123,7 +2298,7 @@ export function HistoryAndReports({
                       <th className="py-3 px-4 text-right">Published Months</th>
                       <th className="py-3 px-4 text-right">Active Staff</th>
                       <th className="py-3 px-4 text-right">Total Sale Amount</th>
-                      <th className="py-3 px-4 text-right">Total Sale Qty</th>
+                      <th className="py-3 px-4 text-right">Total Sale Quantity</th>
                       <th className="py-3 px-4">Peak Month</th>
                       <th className="py-3 px-4 text-right">Yearly Published Incentive</th>
                     </tr>

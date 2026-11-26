@@ -5,6 +5,7 @@ import {
   Check,
   Crown,
   FileSpreadsheet,
+  FolderDown,
   History,
   KeyRound,
   LayoutDashboard,
@@ -15,6 +16,7 @@ import {
   RefreshCw,
   Search,
   Smartphone,
+  Sparkles,
   Users,
   Wallet,
   X,
@@ -44,15 +46,22 @@ import {
   fetchPortalVisibilitySettings,
 } from '../../services/departmentVisibilityService';
 import { listAllSalarySlips } from '../../services/salarySlipService';
+import {
+  DEFAULT_PAYROLL_LOCKS,
+  fetchPayrollLockSettings,
+  listAllEmployeeLoans,
+} from '../../services/proFeaturesService';
 import type {
   AuditLog,
   Branch,
   Employee,
+  EmployeeLoan,
   EmployeeQuery,
   ImportBatch,
   IncentiveAdjustment,
   IncentiveVersion,
   MonthlySummary,
+  PayrollLockSettings,
   PayoutRecord,
   PortalVisibilitySettings,
   PublishedIncentive,
@@ -80,6 +89,9 @@ const AdminPayoutsAndQueries = lazy(() =>
 const BranchMaster = lazy(() =>
   import('./BranchMaster').then((m) => ({ default: m.BranchMaster })),
 );
+const BranchReportsHub = lazy(() =>
+  import('./BranchReportsHub').then((m) => ({ default: m.BranchReportsHub })),
+);
 const EmployeeMaster = lazy(() =>
   import('./EmployeeMaster').then((m) => ({ default: m.EmployeeMaster })),
 );
@@ -95,6 +107,9 @@ const OwnerAdminAccessManager = lazy(() =>
 const SalarySlipsManager = lazy(() =>
   import('./SalarySlipsManager').then((m) => ({ default: m.SalarySlipsManager })),
 );
+const ProExecutiveSuite = lazy(() =>
+  import('./ProExecutiveSuite').then((m) => ({ default: m.ProExecutiveSuite })),
+);
 
 const NAV_ITEMS: Array<{
   id: AdminNavTab;
@@ -107,7 +122,9 @@ const NAV_ITEMS: Array<{
   { id: 'branches', label: 'Branches', icon: Building2 },
   { id: 'payouts', label: 'Payouts & Queries', icon: Wallet },
   { id: 'salary', label: 'Salary Slips', icon: ReceiptIndianRupee },
+  { id: 'branch-reports', label: 'Branch Reports', icon: FolderDown },
   { id: 'analytics', label: 'Analytics & Targets', icon: BarChart3 },
+  { id: 'pro-suite', label: 'Pro Insights & Loans', icon: Sparkles },
   { id: 'history', label: 'Approvals & Reports', icon: History },
 ];
 
@@ -131,8 +148,12 @@ export function AdminShell() {
   const [salesTargets, setSalesTargets] = useState<SalesTarget[]>([]);
   const [employeeQueries, setEmployeeQueries] = useState<EmployeeQuery[]>([]);
   const [salarySlips, setSalarySlips] = useState<SalarySlip[]>([]);
+  const [employeeLoans, setEmployeeLoans] = useState<EmployeeLoan[]>([]);
   const [visibilitySettings, setVisibilitySettings] = useState<PortalVisibilitySettings>(
     DEFAULT_PORTAL_VISIBILITY,
+  );
+  const [payrollLockSettings, setPayrollLockSettings] = useState<PayrollLockSettings>(
+    DEFAULT_PAYROLL_LOCKS,
   );
   const [loadingData, setLoadingData] = useState(true);
   const [syncWarning, setSyncWarning] = useState<string | null>(null);
@@ -188,13 +209,15 @@ export function AdminShell() {
         listAuditLogs(),
       ]);
 
-      const [pr, adj, tgt, qry, vis, sl] = await Promise.all([
+      const [pr, adj, tgt, qry, vis, sl, loans, locks] = await Promise.all([
         listAllPayoutRecords().catch(() => [] as PayoutRecord[]),
         listAllAdjustments().catch(() => [] as IncentiveAdjustment[]),
         listAllSalesTargets().catch(() => [] as SalesTarget[]),
         listAllEmployeeQueries().catch(() => [] as EmployeeQuery[]),
         fetchPortalVisibilitySettings().catch(() => ({ ...DEFAULT_PORTAL_VISIBILITY })),
         listAllSalarySlips().catch(() => [] as SalarySlip[]),
+        listAllEmployeeLoans().catch(() => [] as EmployeeLoan[]),
+        fetchPayrollLockSettings().catch(() => ({ ...DEFAULT_PAYROLL_LOCKS })),
       ]);
 
       // Automatically link the 12 official branches & clean legacy placeholders/alias duplicates once on load
@@ -237,6 +260,8 @@ export function AdminShell() {
       setEmployeeQueries(qry);
       setVisibilitySettings(vis);
       setSalarySlips(sl);
+      setEmployeeLoans(loans);
+      setPayrollLockSettings(locks);
     } finally {
       setLoadingData(false);
     }
@@ -716,15 +741,46 @@ export function AdminShell() {
                     />
                   </Suspense>
                 )}
+                {safeActiveTab === 'pro-suite' && (
+                  <Suspense fallback={<WorkspaceSkeleton />}>
+                    <ProExecutiveSuite
+                      branches={branches}
+                      employees={employees}
+                      monthlySummaries={monthlySummaries}
+                      salarySlips={salarySlips}
+                      salesTargets={salesTargets}
+                      employeeLoans={employeeLoans}
+                      payrollLockSettings={payrollLockSettings}
+                      isMainOwner={isMainOwner}
+                      onRefresh={refreshAll}
+                    />
+                  </Suspense>
+                )}
                 {safeActiveTab === 'salary' && (
                   <Suspense fallback={<WorkspaceSkeleton />}>
                     <SalarySlipsManager
                       branches={branches}
                       employees={employees}
                       incentives={incentives}
+                      adjustments={adjustments}
+                      employeeLoans={employeeLoans}
                       salarySlips={salarySlips}
                       visibilitySettings={visibilitySettings}
+                      payrollLockSettings={payrollLockSettings}
                       onRefresh={refreshAll}
+                    />
+                  </Suspense>
+                )}
+                {safeActiveTab === 'branch-reports' && (
+                  <Suspense fallback={<WorkspaceSkeleton />}>
+                    <BranchReportsHub
+                      branches={branches}
+                      employees={employees}
+                      salarySlips={salarySlips}
+                      monthlySummaries={monthlySummaries}
+                      payoutRecords={payoutRecords}
+                      adjustments={adjustments}
+                      payrollLockSettings={payrollLockSettings}
                     />
                   </Suspense>
                 )}
@@ -754,6 +810,7 @@ export function AdminShell() {
                       branches={branches}
                       employees={employees}
                       publishedIncentives={incentives}
+                      payrollLockSettings={payrollLockSettings}
                       onRefresh={refreshAll}
                     />
                   </Suspense>
@@ -770,6 +827,7 @@ export function AdminShell() {
                       auditLogs={auditLogs}
                       payoutRecords={payoutRecords}
                       adjustments={adjustments}
+                      salarySlips={salarySlips}
                       visibilitySettings={visibilitySettings}
                       onRefresh={refreshAll}
                     />

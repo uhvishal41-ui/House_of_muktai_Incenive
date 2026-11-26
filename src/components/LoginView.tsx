@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { ArrowRight, Crown, Eye, EyeOff, KeyRound, ShieldCheck } from 'lucide-react';
+import { ArrowRight, Crown, Eye, EyeOff, KeyRound, Languages, ShieldCheck } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { useAuth } from '../context/AuthContext';
 import { COMPANY_BRAND } from '../lib/companyBrand';
+import { getSavedLang, saveLang, type AppLang } from '../lib/i18n';
 import { BrandLogo } from './common/BrandLogo';
 import {
   AutoMixGoogleButton,
@@ -19,6 +20,15 @@ export function LoginView() {
     signInEmployeeWithLoginId,
   } = useAuth();
 
+  const [lang, setLang] = useState<AppLang>(() => getSavedLang());
+  const isMr = lang === 'mr';
+
+  const toggleLang = () => {
+    const next: AppLang = lang === 'mr' ? 'en' : 'mr';
+    setLang(next);
+    saveLang(next);
+  };
+
   const [adminUsername, setAdminUsername] = useState('');
   const [adminPassword, setAdminPassword] = useState('');
   const [showAdminPassword, setShowAdminPassword] = useState(false);
@@ -34,12 +44,39 @@ export function LoginView() {
 
   const handleMainOwnerGoogleLogin = async () => {
     setError(null);
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setError(
+        'No internet connection detected. Connect to the internet and try Main Owner Sign In again.',
+      );
+      return;
+    }
     setBusy(true);
     try {
       await signInAdminWithGoogle();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Unable to complete Main Owner Google sign-in.';
-      setError(msg);
+      const code = (err as { code?: string })?.code || '';
+      if (code === 'auth/network-request-failed') {
+        setError(
+          'Google Sign-In network request failed (auth/network-request-failed). Please check your internet connection, disable any Ad-Blocker / VPN / Brave Shields, use a regular browser window (not Incognito with blocked third-party cookies), and try again.',
+        );
+      } else if (code === 'auth/popup-blocked') {
+        setError(
+          'Browser blocked the Google Sign-In popup. Please allow popups for this site and click Sign In again.',
+        );
+      } else if (
+        code === 'auth/popup-closed-by-user' ||
+        code === 'auth/cancelled-popup-request'
+      ) {
+        setError('Google Sign-In popup was closed before signing in. Please try again.');
+      } else if (code === 'auth/unauthorized-domain') {
+        setError(
+          'This domain is not allowlisted for Google Sign-In in Firebase Console -> Authentication -> Settings -> Authorized domains.',
+        );
+      } else {
+        const msg =
+          err instanceof Error ? err.message : 'Unable to complete Main Owner Google sign-in.';
+        setError(msg);
+      }
     } finally {
       setBusy(false);
     }
@@ -80,7 +117,11 @@ export function LoginView() {
   const handleEmployeeLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!loginId.trim() || !password) {
-      setError('Enter both your assigned Login ID and password.');
+      setError(
+        isMr
+          ? 'कृपया तुमचा Employee ID / Login ID आणि पासवर्ड दोन्ही टाका.'
+          : 'Enter both your assigned Login ID and password.',
+      );
       return;
     }
     setError(null);
@@ -98,7 +139,11 @@ export function LoginView() {
         code === 'auth/user-not-found' ||
         code === 'auth/wrong-password'
       ) {
-        setError('Invalid Login ID or password. Contact your House of Muktai administrator.');
+        setError(
+          isMr
+            ? 'तुमचा Login ID किंवा पासवर्ड चुकीचा आहे. अडचण आल्यास तुमच्या House of Muktai Admin शी संपर्क साधा.'
+            : 'Invalid Login ID or password. Contact your House of Muktai administrator.',
+        );
       } else {
         setError(err instanceof Error ? err.message : 'Sign-in failed. Please try again.');
       }
@@ -120,10 +165,20 @@ export function LoginView() {
               className="text-base whitespace-nowrap"
             />
           </div>
-          <div className="text-xs text-slate-500 hidden sm:flex items-center gap-2 whitespace-nowrap">
-            <span className="font-semibold text-[#0F1F3D]">{COMPANY_BRAND.legalName}</span>
-            <span aria-hidden="true">·</span>
-            <span>{COMPANY_BRAND.branchCountLabel}</span>
+          <div className="flex items-center gap-3">
+            <div className="text-xs text-slate-500 hidden sm:flex items-center gap-2 whitespace-nowrap">
+              <span className="font-semibold text-[#0F1F3D]">{COMPANY_BRAND.legalName}</span>
+              <span aria-hidden="true">·</span>
+              <span>{COMPANY_BRAND.branchCountLabel}</span>
+            </div>
+            <button
+              type="button"
+              onClick={toggleLang}
+              className="h-8 px-2.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+            >
+              <Languages className="w-3.5 h-3.5 text-[#B8923A]" />
+              <span>{isMr ? 'EN' : 'मराठी'}</span>
+            </button>
           </div>
         </div>
       </header>
@@ -196,17 +251,23 @@ export function LoginView() {
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  Employee Portal
+                  {isMr ? 'कर्मचारी पोर्टल (Employee)' : 'Employee Portal'}
                 </button>
               </div>
 
               <h2 className="text-lg font-semibold text-[#0F1F3D]">
-                {portalMode === 'admin' ? 'Admin & Main Owner Sign In' : 'Employee Sign In'}
+                {portalMode === 'admin'
+                  ? 'Admin & Main Owner Sign In'
+                  : isMr
+                    ? 'कर्मचारी लॉगिन (Employee Sign In)'
+                    : 'Employee Sign In'}
               </h2>
               <p className="text-xs text-slate-500 mt-1">
                 {portalMode === 'admin'
                   ? 'Admin signs in with Username & Password · Main Owner signs in with Registered Gmail.'
-                  : 'Sign in with your Employee ID / Login ID and personal password.'}
+                  : isMr
+                    ? 'तुमचा Employee ID / Login ID आणि पासवर्ड टाकून पगार स्लिप व इन्सेंटिव्ह पहा.'
+                    : 'Sign in with your Employee ID / Login ID and personal password.'}
               </p>
             </div>
 
@@ -322,29 +383,34 @@ export function LoginView() {
               <form onSubmit={handleEmployeeLogin} className="space-y-3.5">
                 <div>
                   <label htmlFor="loginId" className="block text-xs font-semibold text-slate-700 mb-1">
-                    Login ID / Employee ID
+                    {isMr ? 'तुमचा Login ID किंवा Employee ID' : 'Login ID / Employee ID'}
                   </label>
                   <input
                     id="loginId"
                     type="text"
                     autoComplete="username"
-                    placeholder="e.g. HOM459 or 459"
+                    placeholder={isMr ? 'उदा. HOM459 किंवा 459' : 'e.g. HOM459 or 459'}
                     value={loginId}
                     onChange={(e) => setLoginId(e.target.value.toUpperCase())}
                     className="w-full h-11 px-3.5 rounded-xl border border-slate-300 bg-white text-sm text-slate-900 font-mono placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
                   />
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    {isMr
+                      ? 'टीप: फक्त तुमचा नंबर (उदा. 459 किंवा 0065) टाकला तरी चालेल.'
+                      : 'Tip: You can enter either your bare Employee ID (e.g. 459) or full Login ID (HOM459).'}
+                  </p>
                 </div>
 
                 <div>
                   <label htmlFor="password" className="block text-xs font-semibold text-slate-700 mb-1">
-                    Password
+                    {isMr ? 'पासवर्ड (Password)' : 'Password'}
                   </label>
                   <div className="relative">
                     <input
                       id="password"
                       type={showPassword ? 'text' : 'password'}
                       autoComplete="current-password"
-                      placeholder="Enter password"
+                      placeholder={isMr ? 'पासवर्ड टाका' : 'Enter password'}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       className="w-full h-11 pl-3.5 pr-11 rounded-xl border border-slate-300 bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
@@ -366,7 +432,15 @@ export function LoginView() {
                     disabled={busy}
                     className="w-full h-11 px-4 rounded-xl bg-[#0F1F3D] hover:bg-[#162B50] active:scale-[0.99] text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all disabled:opacity-60 cursor-pointer"
                   >
-                    <span>{busy ? 'Signing in...' : 'Sign In'}</span>
+                    <span>
+                      {busy
+                        ? isMr
+                          ? 'लॉगिन होत आहे...'
+                          : 'Signing in...'
+                        : isMr
+                          ? 'लॉगिन करा (Sign In)'
+                          : 'Sign In'}
+                    </span>
                     <ArrowRight className="w-4 h-4" />
                   </button>
                 </div>
@@ -378,3 +452,4 @@ export function LoginView() {
     </div>
   );
 }
+

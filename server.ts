@@ -14,9 +14,9 @@ import {
   type AuthenticatedRequest,
 } from './server/authMiddleware.ts';
 import {
+  buildDateColumnTemplateWorkbook,
   buildErrorReportWorkbook,
   buildManagementReportWorkbook,
-  buildSampleTemplateWorkbook,
   formatDateIST,
   parseExcelBuffer,
 } from './server/excelEngine.ts';
@@ -139,6 +139,7 @@ const validateImportSchema = z.object({
   mapping: z.object({
     businessDate: z.string().max(80),
     employeeId: z.string().max(80),
+    saleId: z.string().max(80).optional(),
     employeeName: z.string().max(80),
     branchCode: z.string().max(80),
     component1: z.string().max(80),
@@ -151,10 +152,49 @@ const validateImportSchema = z.object({
     saleAmt3: z.string().max(80).optional(),
     saleQty3: z.string().max(80).optional(),
   }),
-  rows: z.array(z.any()).max(5000),
-  branches: z.array(z.any()).max(500),
-  employees: z.array(z.any()).max(5000),
-  publishedIncentives: z.array(z.any()).max(20000),
+  rows: z
+    .array(
+      z
+        .object({
+          rowNumber: z.number().int().min(1),
+          raw: z.record(z.string(), z.union([z.string(), z.number(), z.null()])),
+        })
+        .passthrough(),
+    )
+    .max(5000),
+  branches: z
+    .array(
+      z
+        .object({
+          branchId: z.string().min(1).max(64),
+          branchCode: z.string().min(1).max(24),
+          branchName: z.string().min(1).max(120),
+        })
+        .passthrough(),
+    )
+    .max(500),
+  employees: z
+    .array(
+      z
+        .object({
+          employeeId: z.string().min(1).max(64),
+          fullName: z.string().min(1).max(120),
+          branchId: z.string().min(1).max(64),
+        })
+        .passthrough(),
+    )
+    .max(5000),
+  publishedIncentives: z
+    .array(
+      z
+        .object({
+          recordId: z.string().min(1).max(128),
+          employeeId: z.string().min(1).max(64),
+          businessDate: z.string().min(1).max(20),
+        })
+        .passthrough(),
+    )
+    .max(20000),
   overlapResolutionMode: z.enum(['BLOCK', 'SKIP_OVERLAP', 'RECONCILE_SUPERSEDE']).optional(),
   overlapReconcileReason: z.string().max(240).optional(),
   overrides: z.record(
@@ -293,9 +333,9 @@ export function createApiRouter(authMiddleware = verifyFirebaseBearerToken) {
           skippedSummaryRows: body.skippedSummaryRows,
           mapping: body.mapping as ExcelColumnMapping,
           rows: body.rows as ParsedExcelRow[],
-          branches: body.branches as Branch[],
-          employees: body.employees as Employee[],
-          publishedIncentives: body.publishedIncentives as PublishedIncentive[],
+          branches: body.branches as unknown as Branch[],
+          employees: body.employees as unknown as Employee[],
+          publishedIncentives: body.publishedIncentives as unknown as PublishedIncentive[],
           overlapResolutionMode: body.overlapResolutionMode,
           overlapReconcileReason: body.overlapReconcileReason,
           overrides: numericOverrides,
@@ -414,14 +454,14 @@ export function createApiRouter(authMiddleware = verifyFirebaseBearerToken) {
                 },
               ];
 
-        const buffer = await buildSampleTemplateWorkbook(startStr, baseRows, endStr);
+        const buffer = await buildDateColumnTemplateWorkbook(startStr, baseRows);
         res.setHeader(
           'Content-Type',
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         );
         res.setHeader(
           'Content-Disposition',
-          `attachment; filename="house-of-muktai-incentives-${startStr}-to-${endStr}.xlsx"`,
+          `attachment; filename="house-of-muktai-incentive-template-${startStr}.xlsx"`,
         );
         res.send(buffer);
       } catch (err) {
@@ -491,6 +531,10 @@ export function createExpressApp(authMiddleware = verifyFirebaseBearerToken) {
     helmet({
       contentSecurityPolicy: false,
       crossOriginEmbedderPolicy: false,
+      crossOriginResourcePolicy: false,
+      frameguard: false,
+      // Send origin referrer to Google / Firebase Auth endpoints instead of stripping with no-referrer
+      referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
       // Allow Firebase Auth Google Sign-In popup to communicate back on HTTPS custom domains
       crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
     }),

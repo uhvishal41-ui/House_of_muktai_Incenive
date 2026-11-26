@@ -17,6 +17,7 @@ import {
   parseDobToIso,
   type BulkDobParseRow,
 } from '../lib/birthdayEngine';
+import { buildActiveAuthUidRecord } from '../lib/employeeRecordHelpers';
 import type { BirthdayProfile, BirthdayWish, Employee } from '../types/incentive';
 
 function requireActor() {
@@ -265,41 +266,97 @@ export async function bulkUpdateEmployeeDobs(
     return { updatedCount: 0, syncedProfiles: 0 };
   }
 
-  const empMap = new Map<string, Employee>(employees.map((e) => [e.employeeId, e]));
+  const empMap = new Map<string, Employee>(
+    employees.map((e) => [e.employeeId.trim().toUpperCase(), e]),
+  );
   const now = new Date().toISOString();
-  const CHUNK_SIZE = 180; // 2 writes per employee => 360 ops < 500 batch limit
+
+  type BatchOp =
+    | { kind: 'set'; ref: ReturnType<typeof doc>; data: Record<string, unknown> }
+    | { kind: 'update'; ref: ReturnType<typeof doc>; data: Record<string, unknown> }
+    | { kind: 'delete'; ref: ReturnType<typeof doc> };
+
+  const opUnits: BatchOp[][] = [];
   let updatedCount = 0;
   let syncedProfiles = 0;
 
-  try {
-    for (let i = 0; i < cleanRows.length; i += CHUNK_SIZE) {
-      const slice = cleanRows.slice(i, i + CHUNK_SIZE);
-      const wb = writeBatch(db);
+  for (const row of cleanRows) {
+    const emp = empMap.get(row.employeeId.trim().toUpperCase());
+    if (!emp) continue;
+    const normalized = parseDobToIso(row.normalizedDob);
+    if (!normalized) continue;
 
-      for (const row of slice) {
-        const emp = empMap.get(row.employeeId);
-        if (!emp) continue;
-        const normalized = parseDobToIso(row.normalizedDob);
-        if (!normalized) continue;
-
-        wb.update(doc(db, 'employees', emp.employeeId), {
+    const unit: BatchOp[] = [
+      {
+        kind: 'update',
+        ref: doc(db, 'employees', emp.employeeId),
+        data: {
           dateOfBirth: normalized,
           updatedAt: now,
+        },
+      },
+    ];
+    updatedCount += 1;
+
+    // Pillar 7 atomicity: keep active_auth_uids synced inside the EXACT same batch unit
+    if (emp.authUid && emp.authUid.trim() !== '') {
+      const activeRef = doc(db, 'active_auth_uids', emp.authUid);
+      if (emp.status === 'ACTIVE') {
+        unit.push({
+          kind: 'set',
+          ref: activeRef,
+          data: buildActiveAuthUidRecord({
+            authUid: emp.authUid,
+            employeeId: emp.employeeId,
+            departmentId: emp.departmentId,
+            branchId: emp.branchId,
+            branchName: emp.branchName,
+            isBranchManager: emp.isBranchManager,
+            updatedAt: now,
+          }) as unknown as Record<string, unknown>,
         });
-        updatedCount += 1;
-
-        const profile = buildBirthdayProfileFromEmployee(
-          { ...emp, dateOfBirth: normalized },
-          now,
-        );
-        if (profile) {
-          wb.set(doc(db, 'birthday_profiles', emp.employeeId), profile);
-          syncedProfiles += 1;
-        } else {
-          wb.delete(doc(db, 'birthday_profiles', emp.employeeId));
-        }
+      } else {
+        unit.push({ kind: 'delete', ref: activeRef });
       }
+    }
 
+    const profile = buildBirthdayProfileFromEmployee(
+      { ...emp, dateOfBirth: normalized },
+      now,
+    );
+    if (profile) {
+      unit.push({
+        kind: 'set',
+        ref: doc(db, 'birthday_profiles', emp.employeeId),
+        data: profile as unknown as Record<string, unknown>,
+      });
+      syncedProfiles += 1;
+    } else {
+      unit.push({ kind: 'delete', ref: doc(db, 'birthday_profiles', emp.employeeId) });
+    }
+
+    opUnits.push(unit);
+  }
+
+  try {
+    let wb = writeBatch(db);
+    let opsInBatch = 0;
+
+    for (const unit of opUnits) {
+      if (opsInBatch + unit.length > 300) {
+        await wb.commit();
+        wb = writeBatch(db);
+        opsInBatch = 0;
+      }
+      for (const op of unit) {
+        if (op.kind === 'set') wb.set(op.ref, op.data);
+        else if (op.kind === 'update') wb.update(op.ref, op.data);
+        else wb.delete(op.ref);
+        opsInBatch += 1;
+      }
+    }
+
+    if (opsInBatch > 0) {
       await wb.commit();
     }
 

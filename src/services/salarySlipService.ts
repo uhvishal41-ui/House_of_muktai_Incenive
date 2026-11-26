@@ -14,7 +14,7 @@ import {
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
 import {
-  isMonthVisibleToEmployees,
+  isSalarySlipMonthVisibleToEmployees,
   resolveCanonicalDepartment,
 } from '../lib/departmentLeaderboardEngine';
 import {
@@ -23,9 +23,9 @@ import {
   normalizeSalaryPaymentMode,
   type ParsedSalaryRow,
 } from '../lib/salarySlipEngine';
+import { buildActiveAuthUidRecord } from '../lib/employeeRecordHelpers';
 import { recomputeAndSaveDepartmentRankings } from './departmentVisibilityService';
 import type {
-  ActiveAuthUidRecord,
   AuditLog,
   DepartmentId,
   Employee,
@@ -262,8 +262,12 @@ export async function publishSalarySlipsBatch(params: {
   }
 
   const empById = new Map<string, Employee>();
+  const saleIdOwnerMap = new Map<string, string>();
   for (const e of params.allEmployees) {
     empById.set(e.employeeId.trim().toUpperCase(), e);
+    if (e.saleId && e.saleId.trim()) {
+      saleIdOwnerMap.set(e.saleId.trim().toUpperCase(), e.employeeId.trim().toUpperCase());
+    }
   }
 
   // Merge in-memory existingSlips with fresh Firestore docs for all affected months
@@ -323,7 +327,7 @@ export async function publishSalarySlipsBatch(params: {
       emp.departmentName ||
       ''
     ).trim();
-    const employeeVisible = isMonthVisibleToEmployees(row.monthKey, params.visibilitySettings);
+    const employeeVisible = isSalarySlipMonthVisibleToEmployees(row.monthKey, params.visibilitySettings);
 
     // Guarantee exact integer paise & exact sums required by Firestore Security Rules
     const basicPaise = toSafeNonNegInt(row.basicPaise);
@@ -335,12 +339,14 @@ export async function publishSalarySlipsBatch(params: {
     const medicalAllowancePaise = toSafeNonNegInt(row.medicalAllowancePaise);
     const leaveTravelAllowancePaise = toSafeNonNegInt(row.leaveTravelAllowancePaise);
     const communicationExpensesPaise = toSafeNonNegInt(row.communicationExpensesPaise);
+    const healthClubAllowancePaise = toSafeNonNegInt(row.healthClubAllowancePaise);
     const adhocAllowancePaise = toSafeNonNegInt(row.adhocAllowancePaise);
     const travelingAllowancePaise = toSafeNonNegInt(row.travelingAllowancePaise);
     const salesCommissionPaise = toSafeNonNegInt(row.salesCommissionPaise);
     const specialAllowancePaise = toSafeNonNegInt(row.specialAllowancePaise);
     const overtimePaise = toSafeNonNegInt(row.overtimePaise);
     const incentivePaise = toSafeNonNegInt(row.incentivePaise);
+    const arrearsPaise = toSafeNonNegInt(row.arrearsPaise);
     const otherEarningsPaise = toSafeNonNegInt(row.otherEarningsPaise);
 
     const grossEarningsPaise =
@@ -353,30 +359,52 @@ export async function publishSalarySlipsBatch(params: {
       medicalAllowancePaise +
       leaveTravelAllowancePaise +
       communicationExpensesPaise +
+      healthClubAllowancePaise +
       adhocAllowancePaise +
       travelingAllowancePaise +
       salesCommissionPaise +
       specialAllowancePaise +
       overtimePaise +
       incentivePaise +
+      arrearsPaise +
       otherEarningsPaise;
 
     const pfPaise = toSafeNonNegInt(row.pfPaise);
     const esicPaise = toSafeNonNegInt(row.esicPaise);
     const ptPaise = toSafeNonNegInt(row.ptPaise);
+    const lwfPaise = toSafeNonNegInt(row.lwfPaise);
     const advanceRecoveryPaise = toSafeNonNegInt(row.advanceRecoveryPaise);
     const tdsPaise = toSafeNonNegInt(row.tdsPaise);
+    const penaltyPaise = toSafeNonNegInt(row.penaltyPaise);
+    const insurancePaise = toSafeNonNegInt(row.insurancePaise);
     const otherDeductionPaise = toSafeNonNegInt(row.otherDeductionPaise);
 
     const totalDeductionsPaise =
-      pfPaise + esicPaise + ptPaise + advanceRecoveryPaise + tdsPaise + otherDeductionPaise;
+      pfPaise +
+      esicPaise +
+      ptPaise +
+      lwfPaise +
+      advanceRecoveryPaise +
+      tdsPaise +
+      penaltyPaise +
+      insurancePaise +
+      otherDeductionPaise;
 
     const netPayablePaise = grossEarningsPaise - totalDeductionsPaise;
+
+    const cleanSaleId = (row.saleId || emp.saleId || '').trim().toUpperCase().slice(0, 40);
+    const cleanGender = (row.gender || emp.gender || '').trim().slice(0, 20);
+    const cleanCategory = (row.category || emp.category || '').trim().slice(0, 40);
+    const presentDays = toSafeAttendanceNumber(row.presentDays, 31);
+    const overtimeDays = toSafeAttendanceNumber(row.overtimeDays, 31);
+    const monthlySalaryRatePaise = toSafeNonNegInt(row.monthlySalaryRatePaise);
+    const monthlyGrossRatePaise = toSafeNonNegInt(row.monthlyGrossRatePaise);
 
     const slipDoc: SalarySlip = {
       slipId,
       monthKey: row.monthKey.trim(),
       employeeId: cleanEmployeeId,
+      ...(cleanSaleId ? { saleId: cleanSaleId } : {}),
       authUid: String(emp.authUid || '').trim().slice(0, 128),
       employeeName: (emp.fullName || row.employeeName || cleanEmployeeId).trim().slice(0, 120),
       branchId: cleanBranchId,
@@ -384,6 +412,8 @@ export async function publishSalarySlipsBatch(params: {
       departmentId: effectiveDeptId,
       departmentName: effectiveDeptName.slice(0, 80),
       designation: (row.designation || emp.designation || 'Employee').trim().slice(0, 80),
+      ...(cleanGender ? { gender: cleanGender } : {}),
+      ...(cleanCategory ? { category: cleanCategory } : {}),
       dateOfJoining: (row.dateOfJoining || emp.dateOfJoining || '').trim().slice(0, 20),
       panNumber: (row.panNumber || emp.panNumber || '').trim().slice(0, 20),
       uanNumber: (row.uanNumber || emp.uanNumber || '').trim().slice(0, 24),
@@ -393,11 +423,15 @@ export async function publishSalarySlipsBatch(params: {
       bankAccountMasked: (row.bankAccountMasked || emp.bankAccountMasked || '').trim().slice(0, 32),
       bankIfsc: (row.bankIfsc || emp.bankIfsc || '').trim().slice(0, 20),
       totalDays: toSafeAttendanceNumber(row.totalDays, 31),
+      ...(presentDays > 0 ? { presentDays } : {}),
       paidDays: toSafeAttendanceNumber(row.paidDays, 31),
       lopDays: toSafeAttendanceNumber(row.lopDays, 31),
       weeklyOffDays: toSafeAttendanceNumber(row.weeklyOffDays, 31),
       paidLeaveDays: toSafeAttendanceNumber(row.paidLeaveDays, 31),
+      ...(overtimeDays > 0 ? { overtimeDays } : {}),
       overtimeHours: toSafeAttendanceNumber(row.overtimeHours, 500),
+      ...(monthlySalaryRatePaise > 0 ? { monthlySalaryRatePaise } : {}),
+      ...(monthlyGrossRatePaise > 0 ? { monthlyGrossRatePaise } : {}),
       basicPaise,
       dearnessAllowancePaise,
       hraPaise,
@@ -407,19 +441,24 @@ export async function publishSalarySlipsBatch(params: {
       medicalAllowancePaise,
       leaveTravelAllowancePaise,
       communicationExpensesPaise,
+      healthClubAllowancePaise,
       adhocAllowancePaise,
       travelingAllowancePaise,
       salesCommissionPaise,
       specialAllowancePaise,
       overtimePaise,
       incentivePaise,
+      arrearsPaise,
       otherEarningsPaise,
       grossEarningsPaise,
       pfPaise,
       esicPaise,
       ptPaise,
+      lwfPaise,
       advanceRecoveryPaise,
       tdsPaise,
+      penaltyPaise,
+      insurancePaise,
       otherDeductionPaise,
       totalDeductionsPaise,
       netPayablePaise,
@@ -468,6 +507,21 @@ export async function publishSalarySlipsBatch(params: {
       if (row.designation && row.designation.trim() && row.designation.trim() !== emp.designation) {
         empPatch.designation = row.designation.trim().slice(0, 80);
       }
+      if (row.gender && row.gender.trim() && row.gender.trim() !== (emp.gender || '')) {
+        empPatch.gender = row.gender.trim().slice(0, 20);
+      }
+      if (row.category && row.category.trim() && row.category.trim() !== (emp.category || '')) {
+        empPatch.category = row.category.trim().slice(0, 40);
+      }
+      // Safely auto-link Sale ID onto Employee Master only if employee has none and no other employee owns it
+      if (row.saleId && !emp.saleId) {
+        const candidateSaleId = row.saleId.trim().toUpperCase().slice(0, 40);
+        const ownerEmpId = saleIdOwnerMap.get(candidateSaleId);
+        if (!ownerEmpId || ownerEmpId === cleanEmployeeId.toUpperCase()) {
+          empPatch.saleId = candidateSaleId;
+          saleIdOwnerMap.set(candidateSaleId, cleanEmployeeId.toUpperCase());
+        }
+      }
       if (row.dateOfJoining && row.dateOfJoining !== (emp.dateOfJoining || '')) {
         empPatch.dateOfJoining = row.dateOfJoining.slice(0, 20);
       }
@@ -499,9 +553,9 @@ export async function publishSalarySlipsBatch(params: {
     }
   }
 
-  // 1. Commit Salary Slips in safe 100-doc chunks with automatic per-slip self-healing fallback
-  for (let i = 0; i < slipOps.length; i += 100) {
-    const chunk = slipOps.slice(i, i + 100);
+  // 1. Commit Salary Slips in safe 40-doc chunks with automatic per-slip self-healing fallback
+  for (let i = 0; i < slipOps.length; i += 40) {
+    const chunk = slipOps.slice(i, i + 40);
     try {
       const wb = writeBatch(db);
       for (const op of chunk) {
@@ -509,7 +563,7 @@ export async function publishSalarySlipsBatch(params: {
       }
       await wb.commit();
     } catch {
-      // Self-heal per slip: re-read exact live uploadedAt if the doc already exists in Firestore,
+      // Self-heal per slip: re-read exact live immutable fields if the doc already exists in Firestore,
       // and isolate any single offending slip with crystal-clear diagnostics.
       for (const op of chunk) {
         let payload = op.data;
@@ -517,8 +571,8 @@ export async function publishSalarySlipsBatch(params: {
           const liveSnap = await getDoc(op.ref);
           if (liveSnap.exists()) {
             const liveData = liveSnap.data() as Partial<SalarySlip>;
-            if (typeof liveData.uploadedAt === 'string' && liveData.uploadedAt.trim()) {
-              payload = { ...payload, uploadedAt: liveData.uploadedAt.trim().slice(0, 40) };
+            if (typeof liveData.uploadedAt === 'string' && liveData.uploadedAt.length > 0 && liveData.uploadedAt.length <= 40) {
+              payload = { ...payload, uploadedAt: liveData.uploadedAt };
             }
           }
           await setDoc(op.ref, payload);
@@ -545,13 +599,15 @@ export async function publishSalarySlipsBatch(params: {
     if (cleanUid && VALID_ID_RE.test(cleanUid)) {
       if (item.emp.status === 'ACTIVE') {
         const safeDept = sanitizeDepartmentId(item.nextDeptId ?? item.emp.departmentId ?? '');
-        const activeDoc: ActiveAuthUidRecord = {
+        const activeDoc = buildActiveAuthUidRecord({
           authUid: cleanUid,
           employeeId: item.emp.employeeId,
-          ...(safeDept ? { departmentId: safeDept } : { departmentId: '' }),
-          active: true,
+          departmentId: safeDept,
+          branchId: item.emp.branchId,
+          branchName: item.emp.branchName,
+          isBranchManager: item.emp.isBranchManager,
           updatedAt: now,
-        };
+        });
         wb.set(doc(db, 'active_auth_uids', cleanUid), activeDoc);
       } else {
         wb.delete(doc(db, 'active_auth_uids', cleanUid));
@@ -578,13 +634,15 @@ export async function publishSalarySlipsBatch(params: {
         if (cleanUid && VALID_ID_RE.test(cleanUid)) {
           if (item.emp.status === 'ACTIVE') {
             const safeDept = sanitizeDepartmentId(item.nextDeptId ?? item.emp.departmentId ?? '');
-            const activeDoc: ActiveAuthUidRecord = {
+            const activeDoc = buildActiveAuthUidRecord({
               authUid: cleanUid,
               employeeId: item.emp.employeeId,
-              ...(safeDept ? { departmentId: safeDept } : { departmentId: '' }),
-              active: true,
+              departmentId: safeDept,
+              branchId: item.emp.branchId,
+              branchName: item.emp.branchName,
+              isBranchManager: item.emp.isBranchManager,
               updatedAt: now,
-            };
+            });
             wb.set(doc(db, 'active_auth_uids', cleanUid), activeDoc);
           } else {
             wb.delete(doc(db, 'active_auth_uids', cleanUid));
@@ -669,3 +727,187 @@ export async function deleteSalarySlip(slip: SalarySlip): Promise<void> {
     handleFirestoreError(error, OperationType.DELETE, `salary_slips/${slip.slipId}`);
   }
 }
+
+/**
+ * Super Admin ONLY: Bulk deletes an array of SalarySlip documents in safe 200-doc batches
+ * and writes an immutable audit log entry.
+ */
+export async function deleteSalarySlipsBatch(params: {
+  slips: SalarySlip[];
+  scopeLabel?: string;
+}): Promise<number> {
+  const { slips, scopeLabel } = params;
+  if (slips.length === 0) return 0;
+
+  requireActor();
+  for (let i = 0; i < slips.length; i += 200) {
+    const chunk = slips.slice(i, i + 200);
+    const wb = writeBatch(db);
+    for (const s of chunk) {
+      wb.delete(doc(db, 'salary_slips', s.slipId));
+    }
+    try {
+      await wb.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, 'salary_slips');
+      throw error;
+    }
+  }
+
+  const months = Array.from(new Set(slips.map((s) => s.monthKey))).sort();
+  try {
+    await writeSalaryAuditLog({
+      action: 'BULK_DELETE_SALARY_SLIPS',
+      targetType: 'salary_slips',
+      targetId: months.join('_') || `BULK_DEL_${Date.now()}`,
+      summary: `Bulk deleted ${slips.length} salary slip(s) (${scopeLabel || months.join(', ')}).`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
+  }
+
+  return slips.length;
+}
+
+/**
+ * Super Admin ONLY: Moves/Reassigns an array of SalarySlips from their current monthKey
+ * to `targetMonthKey` (e.g. Nov 2026 -> Oct 2026), creating/updating the target
+ * `{targetMonthKey}__{employeeId}` documents with exact rule-valid fields and deleting
+ * the old wrong-month documents atomically in batches.
+ */
+export async function moveSalarySlipsToMonthBatch(params: {
+  slips: SalarySlip[];
+  targetMonthKey: string;
+  existingSlips: SalarySlip[];
+  visibilitySettings?: PortalVisibilitySettings | null;
+}): Promise<{ movedCount: number; deletedOldCount: number }> {
+  const { slips, targetMonthKey, existingSlips, visibilitySettings } = params;
+  const cleanTargetMonth = targetMonthKey.trim();
+  if (!VALID_MONTH_KEY_RE.test(cleanTargetMonth)) {
+    throw new Error('Select a valid target month (YYYY-MM).');
+  }
+
+  const movable = slips.filter((s) => s.monthKey !== cleanTargetMonth);
+  if (movable.length === 0) {
+    throw new Error(`All selected slips are already in ${cleanTargetMonth}.`);
+  }
+
+  const actor = requireActor();
+  const now = new Date().toISOString();
+  const targetVisible = isSalarySlipMonthVisibleToEmployees(cleanTargetMonth, visibilitySettings);
+
+  // Build map of existing target-month slips so we preserve immutable uploadedAt if target doc already exists
+  const existingById = new Map<string, SalarySlip>();
+  for (const s of existingSlips) {
+    existingById.set(s.slipId, s);
+  }
+  try {
+    const snap = await getDocs(
+      query(collection(db, 'salary_slips'), where('monthKey', '==', cleanTargetMonth)),
+    );
+    for (const d of snap.docs) {
+      const rec = d.data() as SalarySlip;
+      existingById.set(d.id, rec);
+      if (rec.slipId) existingById.set(rec.slipId, rec);
+    }
+  } catch {
+    // Fallback to in-memory existingSlips
+  }
+
+  let movedCount = 0;
+  let deletedOldCount = 0;
+
+  for (let i = 0; i < movable.length; i += 80) {
+    const chunk = movable.slice(i, i + 80);
+    const preparedOps: Array<{
+      oldSlip: SalarySlip;
+      newSlipId: string;
+      newSlipDoc: SalarySlip;
+    }> = [];
+
+    const wb = writeBatch(db);
+    for (const oldSlip of chunk) {
+      const cleanEmpId = oldSlip.employeeId.trim();
+      const newSlipId = buildSalarySlipId(cleanTargetMonth, cleanEmpId);
+      const existingTarget = existingById.get(newSlipId);
+
+      const newSlipDoc: SalarySlip = {
+        ...oldSlip,
+        slipId: newSlipId,
+        monthKey: cleanTargetMonth,
+        employeeVisible: targetVisible,
+        uploadedByEmail: actor.email,
+        uploadedAt: (existingTarget?.uploadedAt || oldSlip.uploadedAt || now).slice(0, 40),
+        updatedAt: now,
+      };
+
+      const preflightErr = validateSalarySlipDocForRules(newSlipDoc);
+      if (preflightErr) {
+        throw new Error(preflightErr);
+      }
+
+      preparedOps.push({ oldSlip, newSlipId, newSlipDoc });
+      wb.set(doc(db, 'salary_slips', newSlipId), newSlipDoc);
+      if (oldSlip.slipId !== newSlipId) {
+        wb.delete(doc(db, 'salary_slips', oldSlip.slipId));
+      }
+    }
+
+    try {
+      await wb.commit();
+      for (const op of preparedOps) {
+        movedCount += 1;
+        if (op.oldSlip.slipId !== op.newSlipId) {
+          deletedOldCount += 1;
+        }
+      }
+    } catch {
+      // Self-heal per slip: re-read exact live immutable uploadedAt if target doc already exists
+      for (const op of preparedOps) {
+        let payload = op.newSlipDoc;
+        try {
+          const targetRef = doc(db, 'salary_slips', op.newSlipId);
+          const liveSnap = await getDoc(targetRef);
+          if (liveSnap.exists()) {
+            const liveData = liveSnap.data() as Partial<SalarySlip>;
+            if (
+              typeof liveData.uploadedAt === 'string' &&
+              liveData.uploadedAt.length > 0 &&
+              liveData.uploadedAt.length <= 40
+            ) {
+              payload = { ...payload, uploadedAt: liveData.uploadedAt };
+            }
+          }
+          const singleWb = writeBatch(db);
+          singleWb.set(targetRef, payload);
+          if (op.oldSlip.slipId !== op.newSlipId) {
+            singleWb.delete(doc(db, 'salary_slips', op.oldSlip.slipId));
+          }
+          await singleWb.commit();
+          movedCount += 1;
+          if (op.oldSlip.slipId !== op.newSlipId) {
+            deletedOldCount += 1;
+          }
+        } catch (error) {
+          handleFirestoreError(error, OperationType.WRITE, `salary_slips/${op.newSlipId}`);
+          throw error;
+        }
+      }
+    }
+  }
+
+  const sourceMonths = Array.from(new Set(movable.map((s) => s.monthKey))).sort();
+  try {
+    await writeSalaryAuditLog({
+      action: 'MOVE_SALARY_SLIPS_MONTH',
+      targetType: 'salary_slips',
+      targetId: `${sourceMonths.join('_')}__TO__${cleanTargetMonth}`,
+      summary: `Moved ${movedCount} salary slip(s) from [${sourceMonths.join(', ')}] to ${cleanTargetMonth} and removed ${deletedOldCount} old slip(s).`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
+  }
+
+  return { movedCount, deletedOldCount };
+}
+

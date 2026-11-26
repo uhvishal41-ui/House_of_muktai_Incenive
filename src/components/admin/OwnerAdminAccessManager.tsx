@@ -253,21 +253,15 @@ export function OwnerAdminAccessManager({ onRefreshShell }: Props) {
               <Crown className="w-6 h-6" />
             </div>
             <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-lg sm:text-xl font-bold tracking-tight text-white">
-                  Main Owner · Admin Access Control
-                </h2>
-                <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded-md bg-[#B8923A]/25 border border-[#DFC27D]/45 text-[#DFC27D]">
-                  Registered Gmail Exclusive
-                </span>
-              </div>
-              <p className="text-xs sm:text-sm text-slate-300 mt-1">
-                Only the registered Main Owner Gmail (
+              <h2 className="text-lg sm:text-xl font-bold tracking-tight text-white">
+                Main Owner · Admin Access Control
+              </h2>
+              <p className="text-xs text-slate-300 mt-1">
+                Signed in as{' '}
                 <span className="font-mono text-[#DFC27D] font-semibold">
                   {user?.email || MAIN_OWNER_EMAIL}
-                </span>
-                ) can view this screen, provision Admin Username &amp; Passwords, or suspend Admin
-                access.
+                </span>{' '}
+                · Create, suspend, or remove Admin accounts.
               </p>
             </div>
           </div>

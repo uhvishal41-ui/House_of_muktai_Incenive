@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Cake,
   Camera,
+  ChevronDown,
+  Columns,
   Download,
   Edit3,
   FileSpreadsheet,
@@ -45,6 +47,8 @@ import {
 import {
   bulkUpdateEmployeeDepartments,
   recomputeAndSaveDepartmentRankings,
+  saveEmployeeColumnSettings,
+  subscribeEmployeeColumnSettings,
 } from '../../services/departmentVisibilityService';
 import {
   backfillAuthUidAndActiveRegistry,
@@ -72,6 +76,49 @@ interface Props {
   onRefresh: () => Promise<void>;
 }
 
+const CUSTOM_COLUMNS_STORAGE_KEY = 'hom_emp_master_custom_columns';
+const VISIBLE_COLUMNS_STORAGE_KEY = 'hom_emp_master_visible_columns';
+
+const BUILTIN_EXTRA_TABLE_COLUMNS: Array<{ id: string; label: string }> = [
+  { id: 'saleId', label: 'Sales ID (POS Code)' },
+  { id: 'gender', label: 'Gender' },
+  { id: 'category', label: 'Category' },
+  { id: 'phone', label: 'Mobile Number' },
+  { id: 'dateOfJoining', label: 'Date of Joining' },
+  { id: 'dateOfBirth', label: 'Date of Birth' },
+  { id: 'panNumber', label: 'PAN Number' },
+  { id: 'uanNumber', label: 'UAN Number' },
+  { id: 'pfNumber', label: 'Provident Fund Number' },
+  { id: 'esicNumber', label: 'ESIC Number' },
+  { id: 'bankName', label: 'Bank Name' },
+  { id: 'bankAccountMasked', label: 'Bank Account Number' },
+  { id: 'bankIfsc', label: 'Bank IFSC Code' },
+  { id: 'address', label: 'Residential Address' },
+  { id: 'emergencyContact', label: 'Emergency Contact' },
+];
+
+const QUICK_CUSTOM_COLUMN_SUGGESTIONS = [
+  'Aadhaar Card Number',
+  'Blood Group',
+  'Weekly Off Day',
+  'Base Salary',
+  'Qualification',
+  'Uniform Size',
+];
+
+function loadSavedStringArray(key: string): string[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.map((x) => String(x || '').trim()).filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 export function EmployeeMaster({
   branches,
   employees,
@@ -90,6 +137,7 @@ export function EmployeeMaster({
   const [editing, setEditing] = useState<Employee | null>(null);
 
   const [employeeId, setEmployeeId] = useState('');
+  const [saleId, setSaleId] = useState('');
   const [loginId, setLoginId] = useState('');
   const [fullName, setFullName] = useState('');
   const [branchId, setBranchId] = useState('');
@@ -98,6 +146,8 @@ export function EmployeeMaster({
   const [photoDataUrl, setPhotoDataUrl] = useState('');
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [designation, setDesignation] = useState('');
+  const [gender, setGender] = useState('');
+  const [category, setCategory] = useState('');
   const [dateOfBirth, setDateOfBirth] = useState('');
   const [dateOfJoining, setDateOfJoining] = useState('');
   const [panNumber, setPanNumber] = useState('');
@@ -108,10 +158,14 @@ export function EmployeeMaster({
   const [bankAccountMasked, setBankAccountMasked] = useState('');
   const [bankIfsc, setBankIfsc] = useState('');
   const [phone, setPhone] = useState('');
+  const [address, setAddress] = useState('');
+  const [emergencyContact, setEmergencyContact] = useState('');
+  const [customFields, setCustomFields] = useState<Record<string, string>>({});
   const [linkedGoogleEmail, setLinkedGoogleEmail] = useState('');
   const [initialPassword, setInitialPassword] = useState<string>(DEFAULT_EMPLOYEE_PASSWORD);
   const [status, setStatus] = useState<'ACTIVE' | 'INACTIVE'>('ACTIVE');
   const [mustChangePassword, setMustChangePassword] = useState(true);
+  const [isBranchManager, setIsBranchManager] = useState(false);
   const [saving, setSaving] = useState(false);
   const [syncingBackfill, setSyncingBackfill] = useState(false);
   const [bulkProvisioning, setBulkProvisioning] = useState(false);
@@ -128,6 +182,169 @@ export function EmployeeMaster({
   const [confirmToggle, setConfirmToggle] = useState<Employee | null>(null);
   const [toggleReason, setToggleReason] = useState('');
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'warn' | 'err'; text: string } | null>(null);
+
+  // Custom & Extra Table Columns + Bulk Menu state
+  const [showColumnManager, setShowColumnManager] = useState(false);
+  const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
+  const bulkMenuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!bulkMenuOpen) return;
+    const onDocClick = (ev: MouseEvent) => {
+      if (bulkMenuRef.current && !bulkMenuRef.current.contains(ev.target as Node)) {
+        setBulkMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [bulkMenuOpen]);
+  const [savedCustomColumns, setSavedCustomColumns] = useState<string[]>(() =>
+    loadSavedStringArray(CUSTOM_COLUMNS_STORAGE_KEY),
+  );
+  const [visibleExtraColumns, setVisibleExtraColumns] = useState<string[]>(() =>
+    loadSavedStringArray(VISIBLE_COLUMNS_STORAGE_KEY),
+  );
+  const [newColumnInput, setNewColumnInput] = useState('');
+  const [inlineFormColumnInput, setInlineFormColumnInput] = useState('');
+  const latestCustomColsRef = useRef<string[]>(savedCustomColumns);
+  const latestVisibleColsRef = useRef<string[]>(visibleExtraColumns);
+
+  latestCustomColsRef.current = savedCustomColumns;
+  latestVisibleColsRef.current = visibleExtraColumns;
+
+  const persistColumnConfigToCloud = (nextCustom: string[], nextVisible: string[]) => {
+    try {
+      localStorage.setItem(CUSTOM_COLUMNS_STORAGE_KEY, JSON.stringify(nextCustom));
+      localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(nextVisible));
+    } catch {
+      // Ignore storage error
+    }
+    void saveEmployeeColumnSettings({
+      customColumns: nextCustom,
+      visibleColumns: nextVisible,
+    }).catch(() => {
+      // Non-blocking: localStorage retains changes if offline
+    });
+  };
+
+  useEffect(() => {
+    const unsub = subscribeEmployeeColumnSettings((cloud) => {
+      if (!cloud) {
+        // First-time migration: push any locally saved columns to Firestore so all devices stay synced
+        const localCustom = latestCustomColsRef.current;
+        const localVisible = latestVisibleColsRef.current;
+        if (localCustom.length > 0 || localVisible.length > 0) {
+          void saveEmployeeColumnSettings({
+            customColumns: localCustom,
+            visibleColumns: localVisible,
+          }).catch(() => {
+            // Non-blocking
+          });
+        }
+        return;
+      }
+      setSavedCustomColumns(cloud.customColumns);
+      setVisibleExtraColumns(cloud.visibleColumns);
+      try {
+        localStorage.setItem(CUSTOM_COLUMNS_STORAGE_KEY, JSON.stringify(cloud.customColumns));
+        localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(cloud.visibleColumns));
+      } catch {
+        // Ignore storage error
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // Merge user-defined custom columns with any customFields keys present on existing employees
+  const allCustomColumnNames = useMemo(() => {
+    const names: string[] = [];
+    const seen = new Set<string>();
+    const addName = (raw: string) => {
+      const clean = String(raw || '').trim().slice(0, 60);
+      const norm = clean.toLowerCase();
+      if (!clean || seen.has(norm) || names.length >= 25) return;
+      seen.add(norm);
+      names.push(clean);
+    };
+    for (const c of savedCustomColumns) addName(c);
+    for (const emp of employees) {
+      for (const k of Object.keys(emp.customFields || {})) {
+        addName(k);
+      }
+    }
+    for (const k of Object.keys(customFields)) {
+      addName(k);
+    }
+    return names;
+  }, [savedCustomColumns, employees, customFields]);
+
+  const handleToggleExtraColumn = (colId: string) => {
+    const prev = latestVisibleColsRef.current;
+    const nextVisible = prev.includes(colId)
+      ? prev.filter((x) => x !== colId)
+      : [...prev, colId];
+    setVisibleExtraColumns(nextVisible);
+    persistColumnConfigToCloud(latestCustomColsRef.current, nextVisible);
+  };
+
+  const handleAddCustomColumn = (rawName: string) => {
+    const clean = String(rawName || '').trim().slice(0, 60);
+    if (!clean) return;
+    const norm = clean.toLowerCase();
+    const existingBuiltin = BUILTIN_EXTRA_TABLE_COLUMNS.find(
+      (b) => b.label.toLowerCase() === norm || b.id.toLowerCase() === norm,
+    );
+    if (existingBuiltin) {
+      if (!visibleExtraColumns.includes(existingBuiltin.id)) {
+        handleToggleExtraColumn(existingBuiltin.id);
+      }
+      setNewColumnInput('');
+      setInlineFormColumnInput('');
+      setFeedback({
+        type: 'ok',
+        text: `Built-in column "${existingBuiltin.label}" is now enabled in the Employee Master table.`,
+      });
+      return;
+    }
+
+    if (allCustomColumnNames.length >= 25 && !allCustomColumnNames.some((c) => c.toLowerCase() === norm)) {
+      setFeedback({
+        type: 'warn',
+        text: 'Maximum 25 custom columns are supported in Employee Master.',
+      });
+      return;
+    }
+
+    const canonicalName =
+      allCustomColumnNames.find((c) => c.toLowerCase() === norm) || clean;
+
+    const prevCustom = latestCustomColsRef.current;
+    const nextCustom = prevCustom.some((c) => c.toLowerCase() === norm)
+      ? prevCustom
+      : [...prevCustom, canonicalName];
+
+    const colId = `custom:${canonicalName}`;
+    const prevVisible = latestVisibleColsRef.current;
+    const nextVisible = prevVisible.includes(colId)
+      ? prevVisible
+      : [...prevVisible, colId];
+
+    setSavedCustomColumns(nextCustom);
+    setVisibleExtraColumns(nextVisible);
+    persistColumnConfigToCloud(nextCustom, nextVisible);
+
+    setNewColumnInput('');
+    setInlineFormColumnInput('');
+  };
+
+  const handleRemoveSavedCustomColumn = (colName: string) => {
+    const norm = colName.toLowerCase();
+    const nextCustom = latestCustomColsRef.current.filter((c) => c.toLowerCase() !== norm);
+    const colId = `custom:${colName}`;
+    const nextVisible = latestVisibleColsRef.current.filter((x) => x !== colId);
+    setSavedCustomColumns(nextCustom);
+    setVisibleExtraColumns(nextVisible);
+    persistColumnConfigToCloud(nextCustom, nextVisible);
+  };
 
   // Bulk Employee Master Upload state (Zero Silent Overlap Guard)
   const [showBulkMaster, setShowBulkMaster] = useState(false);
@@ -169,13 +386,23 @@ export function EmployeeMaster({
       (authFilter === 'PENDING' && isPendingAuth) ||
       (authFilter === 'ACTIVE' && !isPendingAuth);
     const q = search.toLowerCase();
+    const matchesCustomFields =
+      q &&
+      e.customFields &&
+      Object.values(e.customFields).some((v) => String(v || '').toLowerCase().includes(q));
     const matchesQuery =
       !q ||
       e.employeeId.toLowerCase().includes(q) ||
+      (e.saleId || '').toLowerCase().includes(q) ||
       e.loginId.toLowerCase().includes(q) ||
       e.fullName.toLowerCase().includes(q) ||
       e.branchName.toLowerCase().includes(q) ||
-      (e.departmentName || '').toLowerCase().includes(q);
+      (e.departmentName || '').toLowerCase().includes(q) ||
+      (e.designation || '').toLowerCase().includes(q) ||
+      (e.phone || '').toLowerCase().includes(q) ||
+      (e.panNumber || '').toLowerCase().includes(q) ||
+      (e.uanNumber || '').toLowerCase().includes(q) ||
+      Boolean(matchesCustomFields);
     return matchesBranch && matchesDept && matchesStatus && matchesAuth && matchesQuery;
   });
 
@@ -183,6 +410,7 @@ export function EmployeeMaster({
     const nextNum = String(employees.length + 1).padStart(3, '0');
     setEditing(null);
     setEmployeeId(`EMP${nextNum}`);
+    setSaleId('');
     setLoginId(`HOM${nextNum}`);
     setFullName('');
     setBranchId(branches[0]?.branchId || '');
@@ -191,6 +419,8 @@ export function EmployeeMaster({
     setPhotoDataUrl('');
     setPhotoError(null);
     setDesignation('');
+    setGender('');
+    setCategory('');
     setDateOfBirth('');
     setDateOfJoining('');
     setPanNumber('');
@@ -201,10 +431,14 @@ export function EmployeeMaster({
     setBankAccountMasked('');
     setBankIfsc('');
     setPhone('');
+    setAddress('');
+    setEmergencyContact('');
+    setCustomFields({});
     setLinkedGoogleEmail('');
     setInitialPassword(DEFAULT_EMPLOYEE_PASSWORD);
     setStatus('ACTIVE');
     setMustChangePassword(true);
+    setIsBranchManager(false);
     setShowForm(true);
     setFeedback(null);
   };
@@ -212,6 +446,7 @@ export function EmployeeMaster({
   const openEdit = (emp: Employee) => {
     setEditing(emp);
     setEmployeeId(emp.employeeId);
+    setSaleId(emp.saleId || '');
     setLoginId(emp.loginId);
     setFullName(emp.fullName);
     setBranchId(emp.branchId);
@@ -220,6 +455,8 @@ export function EmployeeMaster({
     setPhotoDataUrl(emp.photoDataUrl || '');
     setPhotoError(null);
     setDesignation(emp.designation);
+    setGender(emp.gender || '');
+    setCategory(emp.category || '');
     setDateOfBirth(emp.dateOfBirth || '');
     setDateOfJoining(emp.dateOfJoining || '');
     setPanNumber(emp.panNumber || '');
@@ -230,10 +467,14 @@ export function EmployeeMaster({
     setBankAccountMasked(emp.bankAccountMasked || '');
     setBankIfsc(emp.bankIfsc || '');
     setPhone(emp.phone || '');
+    setAddress(emp.address || '');
+    setEmergencyContact(emp.emergencyContact || '');
+    setCustomFields({ ...(emp.customFields || {}) });
     setLinkedGoogleEmail(emp.linkedGoogleEmail || '');
     setInitialPassword(emp.credentialsProvisioned ? '' : DEFAULT_EMPLOYEE_PASSWORD);
     setStatus(emp.status);
     setMustChangePassword(emp.credentialsProvisioned ? emp.mustChangePassword : true);
+    setIsBranchManager(Boolean(emp.isBranchManager));
     setShowForm(true);
     setFeedback(null);
   };
@@ -609,7 +850,7 @@ export function EmployeeMaster({
     setActivatingEmployeeId(emp.employeeId);
     setFeedback(null);
     try {
-      const res = await provisionSingleEmployeeDefaultLogin(emp);
+      const res = await provisionSingleEmployeeDefaultLogin(emp, employees);
       setFeedback({ type: res.ok ? 'ok' : 'warn', text: res.message });
       if (res.ok) {
         setFailedProvisionItems((prev) =>
@@ -700,6 +941,7 @@ export function EmployeeMaster({
     try {
       const result = await saveEmployee({
         employeeId,
+        saleId,
         loginId,
         fullName,
         branchId: branch.branchId,
@@ -708,6 +950,8 @@ export function EmployeeMaster({
         departmentName: departmentId ? undefined : customDepartmentName.trim(),
         photoDataUrl,
         designation,
+        gender,
+        category,
         dateOfBirth,
         dateOfJoining,
         panNumber,
@@ -718,8 +962,12 @@ export function EmployeeMaster({
         bankAccountMasked,
         bankIfsc,
         phone,
+        address,
+        emergencyContact,
+        customFields,
         linkedGoogleEmail,
         role: 'EMPLOYEE',
+        isBranchManager,
         status,
         mustChangePassword,
         initialPassword: initialPassword || undefined,
@@ -788,122 +1036,161 @@ export function EmployeeMaster({
             </span>
           </div>
 
-          <div className="inline-flex flex-wrap items-center gap-1.5 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80 self-start xl:self-auto">
+          <div className="flex flex-wrap items-center gap-2 self-start xl:self-auto">
             {pendingProvisionCount > 0 && (
-              <>
+              <button
+                type="button"
+                disabled={bulkProvisioning}
+                onClick={handleBulkProvisionLogins}
+                className="h-9 px-3 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50 cursor-pointer transition-colors"
+                title="Create Firebase Auth logins for all pending employees"
+              >
+                <KeyRound className="w-3.5 h-3.5 text-amber-700" />
+                {bulkProvisioning && bulkProgress
+                  ? `Activating ${bulkProgress.processed}/${bulkProgress.total}...`
+                  : bulkProvisioning
+                    ? 'Activating...'
+                    : `Activate Pending (${pendingProvisionCount})`}
+              </button>
+            )}
+
+            <div className="inline-flex flex-wrap items-center gap-1 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80">
+              {/* Grouped Bulk Uploads Dropdown */}
+              <div className="relative" ref={bulkMenuRef}>
                 <button
                   type="button"
-                  onClick={() => setAuthFilter(authFilter === 'PENDING' ? 'ALL' : 'PENDING')}
-                  className={`h-8 px-2.5 rounded-lg border text-xs font-medium whitespace-nowrap cursor-pointer transition-colors ${
-                    authFilter === 'PENDING'
-                      ? 'border-amber-500 bg-amber-50 text-amber-900'
-                      : 'border-slate-200 bg-white hover:bg-amber-50 text-amber-900'
+                  onClick={() => setBulkMenuOpen((prev) => !prev)}
+                  aria-expanded={bulkMenuOpen}
+                  className={`h-8 px-2.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
+                    showBulkMaster || showBulkDept || showBulkDob || bulkMenuOpen
+                      ? 'border-[#0F1F3D] bg-[#0F1F3D] text-white'
+                      : 'border-[#B8923A]/50 bg-[#FDF8EC] hover:bg-[#B8923A]/20 text-[#0F1F3D]'
                   }`}
                 >
-                  Pending ({pendingProvisionCount})
+                  <Upload
+                    className={`w-3.5 h-3.5 ${
+                      showBulkMaster || showBulkDept || showBulkDob || bulkMenuOpen
+                        ? 'text-[#DFC27D]'
+                        : 'text-[#B8923A]'
+                    }`}
+                  />
+                  <span>Bulk Upload</span>
+                  <ChevronDown className="w-3.5 h-3.5 opacity-80" />
                 </button>
-                <button
-                  type="button"
-                  disabled={bulkProvisioning}
-                  onClick={handleBulkProvisionLogins}
-                  className="h-8 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50 cursor-pointer transition-colors"
-                >
-                  <KeyRound className="w-3.5 h-3.5" />
-                  {bulkProvisioning && bulkProgress
-                    ? `Activating ${bulkProgress.processed}/${bulkProgress.total}...`
-                    : bulkProvisioning
-                      ? 'Activating...'
-                      : `Activate Pending (${pendingProvisionCount})`}
-                </button>
-              </>
-            )}
-            <button
-              type="button"
-              disabled={syncingBackfill}
-              onClick={handleBackfillAuthSync}
-              className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50 cursor-pointer transition-colors"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${syncingBackfill ? 'animate-spin' : ''}`} />
-              {syncingBackfill ? 'Syncing...' : 'Sync Auth'}
-            </button>
-            <button
-              type="button"
-              disabled={filtered.length === 0}
-              onClick={() => {
-                const branchLabel =
-                  branchFilter === 'ALL'
-                    ? `All Branches (${branches.length})`
-                    : branches.find((b) => b.branchId === branchFilter)?.branchName || branchFilter;
-                void downloadCredentialSheetPdf({
-                  employees: filtered,
-                  branchFilterLabel: branchLabel,
-                  portalUrl: getShareableStaffAppUrl(),
-                });
-              }}
-              className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50 transition-colors"
-            >
-              <FileText className="w-3.5 h-3.5 text-[#0F1F3D]" />
-              Credentials PDF
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setShowBulkMaster((prev) => !prev);
-                setShowBulkDept(false);
-                setShowBulkDob(false);
-              }}
-              className={`h-8 px-2.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
-                showBulkMaster
-                  ? 'border-[#0F1F3D] bg-[#0F1F3D] text-white'
-                  : 'border-[#B8923A]/50 bg-[#B8923A]/10 hover:bg-[#B8923A]/20 text-[#0F1F3D]'
-              }`}
-            >
-              <Upload className={`w-3.5 h-3.5 ${showBulkMaster ? 'text-[#DFC27D]' : 'text-[#B8923A]'}`} />
-              Bulk Master Upload
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setShowBulkDept((prev) => !prev);
-                setShowBulkMaster(false);
-                setShowBulkDob(false);
-                setBulkDeptParse(null);
-                setBulkDeptFileName('');
-              }}
-              className={`h-8 px-2.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
-                showBulkDept
-                  ? 'border-[#B8923A] bg-[#B8923A]/15 text-[#0F1F3D]'
-                  : 'border-slate-200 bg-white hover:bg-slate-50 text-[#0F1F3D]'
-              }`}
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-[#B8923A]" />
-              Bulk Dept. Upload
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setShowBulkDob((prev) => !prev);
-                setShowBulkMaster(false);
-                setShowBulkDept(false);
-                setBulkDobParse(null);
-                setBulkDobFileName('');
-              }}
-              className={`h-8 px-2.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
-                showBulkDob
-                  ? 'border-[#B8923A] bg-[#B8923A]/15 text-[#0F1F3D]'
-                  : 'border-slate-200 bg-white hover:bg-slate-50 text-[#0F1F3D]'
-              }`}
-            >
-              <Cake className="w-3.5 h-3.5 text-[#B8923A]" />
-              Bulk Birthdays (DOB)
-            </button>
+                {bulkMenuOpen && (
+                  <div className="absolute right-0 sm:left-0 mt-1.5 w-52 rounded-xl bg-white border border-slate-200 shadow-lg py-1 z-30">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowBulkMaster((prev) => !prev);
+                        setShowBulkDept(false);
+                        setShowBulkDob(false);
+                        setBulkMenuOpen(false);
+                      }}
+                      className={`w-full px-3 py-2 text-left text-xs font-medium flex items-center gap-2 cursor-pointer transition-colors ${
+                        showBulkMaster
+                          ? 'bg-[#FDF8EC] text-[#0F1F3D] font-semibold'
+                          : 'text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      <Upload className="w-3.5 h-3.5 text-[#B8923A]" />
+                      <span>Bulk Master Upload</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowBulkDept((prev) => !prev);
+                        setShowBulkMaster(false);
+                        setShowBulkDob(false);
+                        setBulkDeptParse(null);
+                        setBulkDeptFileName('');
+                        setBulkMenuOpen(false);
+                      }}
+                      className={`w-full px-3 py-2 text-left text-xs font-medium flex items-center gap-2 cursor-pointer transition-colors ${
+                        showBulkDept
+                          ? 'bg-[#FDF8EC] text-[#0F1F3D] font-semibold'
+                          : 'text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5 text-[#B8923A]" />
+                      <span>Bulk Department Upload</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowBulkDob((prev) => !prev);
+                        setShowBulkMaster(false);
+                        setShowBulkDept(false);
+                        setBulkDobParse(null);
+                        setBulkDobFileName('');
+                        setBulkMenuOpen(false);
+                      }}
+                      className={`w-full px-3 py-2 text-left text-xs font-medium flex items-center gap-2 cursor-pointer transition-colors ${
+                        showBulkDob
+                          ? 'bg-[#FDF8EC] text-[#0F1F3D] font-semibold'
+                          : 'text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      <Cake className="w-3.5 h-3.5 text-[#B8923A]" />
+                      <span>Bulk Birthdays (DOB)</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowColumnManager((prev) => !prev)}
+                className={`h-8 px-2.5 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
+                  showColumnManager
+                    ? 'border-[#0F1F3D] bg-[#0F1F3D] text-white'
+                    : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-800'
+                }`}
+              >
+                <Columns
+                  className={`w-3.5 h-3.5 ${showColumnManager ? 'text-[#DFC27D]' : 'text-[#0F1F3D]'}`}
+                />
+                Columns ({visibleExtraColumns.length})
+              </button>
+
+              <button
+                type="button"
+                disabled={filtered.length === 0}
+                onClick={() => {
+                  const branchLabel =
+                    branchFilter === 'ALL'
+                      ? `All Branches (${branches.length})`
+                      : branches.find((b) => b.branchId === branchFilter)?.branchName || branchFilter;
+                  void downloadCredentialSheetPdf({
+                    employees: filtered,
+                    branchFilterLabel: branchLabel,
+                    portalUrl: getShareableStaffAppUrl(),
+                  });
+                }}
+                className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50 transition-colors"
+              >
+                <FileText className="w-3.5 h-3.5 text-[#0F1F3D]" />
+                Credentials PDF
+              </button>
+
+              <button
+                type="button"
+                disabled={syncingBackfill}
+                onClick={handleBackfillAuthSync}
+                className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50 cursor-pointer transition-colors"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${syncingBackfill ? 'animate-spin' : ''}`} />
+                {syncingBackfill ? 'Syncing...' : 'Sync Auth'}
+              </button>
+            </div>
+
             <button
               type="button"
               onClick={openCreate}
               disabled={branches.length === 0}
-              className="h-8 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50 transition-colors"
+              className="h-9 px-3.5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50 transition-colors shadow-2xs"
             >
-              <Plus className="w-3.5 h-3.5" />
+              <Plus className="w-3.5 h-3.5 text-[#DFC27D]" />
               Add Employee
             </button>
           </div>
@@ -914,7 +1201,7 @@ export function EmployeeMaster({
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search ID, Login ID, name, dept..."
+              placeholder="Search ID, Sale ID, name, phone, custom column..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full h-9 pl-9 pr-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
@@ -975,6 +1262,203 @@ export function EmployeeMaster({
         </div>
       </div>
 
+      {/* Add & Manage Employee Master Columns Drawer */}
+      {showColumnManager && (
+        <div className="bg-white border border-[#0F1F3D]/25 rounded-xl overflow-hidden shadow-xs">
+          <div className="px-4 sm:px-5 py-3.5 bg-[#0F1F3D] text-white flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold flex items-center gap-2">
+                <Columns className="w-4 h-4 text-[#DFC27D]" />
+                <span>Manage Table Columns</span>
+              </h3>
+              <p className="text-[11px] text-slate-300 mt-0.5">
+                Add custom fields or toggle HR &amp; Statutory columns across the table, forms, and templates.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowColumnManager(false)}
+              className="p-1.5 text-slate-300 hover:text-white cursor-pointer"
+              aria-label="Close column manager"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="p-4 sm:p-5 space-y-4">
+            {/* Create New Custom Column */}
+            <div className="p-3.5 rounded-xl bg-[#FDF8EC]/70 border border-[#B8923A]/40 space-y-2.5">
+              <p className="text-xs font-semibold text-[#0F1F3D]">
+                Add Custom Column
+              </p>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="text"
+                  value={newColumnInput}
+                  onChange={(e) => setNewColumnInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddCustomColumn(newColumnInput);
+                    }
+                  }}
+                  placeholder="Enter new column name (e.g. Aadhar No, Blood Group, Base Salary, Weekly Off)..."
+                  maxLength={60}
+                  className="flex-1 h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs text-slate-900"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleAddCustomColumn(newColumnInput)}
+                  disabled={!newColumnInput.trim()}
+                  className="h-9 px-4 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <Plus className="w-3.5 h-3.5 text-[#DFC27D]" />
+                  Add Column
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                <span className="text-[11px] text-slate-500 mr-1">Quick Add:</span>
+                {QUICK_CUSTOM_COLUMN_SUGGESTIONS.map((sug) => {
+                  const alreadyAdded = allCustomColumnNames.some(
+                    (c) => c.toLowerCase() === sug.toLowerCase(),
+                  );
+                  return (
+                    <button
+                      key={sug}
+                      type="button"
+                      disabled={alreadyAdded}
+                      onClick={() => handleAddCustomColumn(sug)}
+                      className={`px-2 py-0.5 rounded border text-[11px] font-medium transition-colors ${
+                        alreadyAdded
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-700 opacity-75 cursor-default'
+                          : 'bg-white border-slate-300 hover:border-[#0F1F3D] text-slate-700 cursor-pointer'
+                      }`}
+                    >
+                      {alreadyAdded ? `✓ ${sug}` : `+ ${sug}`}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Custom Columns List */}
+            {allCustomColumnNames.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-[#0F1F3D]">
+                  2 · Custom Columns ({allCustomColumnNames.length} / 25) — Tick to Show in Table
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {allCustomColumnNames.map((colName) => {
+                    const colId = `custom:${colName}`;
+                    const isChecked = visibleExtraColumns.includes(colId);
+                    const hasDataOnEmployees = employees.some(
+                      (emp) => emp.customFields && emp.customFields[colName],
+                    );
+                    return (
+                      <div
+                        key={colName}
+                        className={`inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-xs ${
+                          isChecked
+                            ? 'bg-[#0F1F3D]/5 border-[#0F1F3D] text-[#0F1F3D] font-semibold'
+                            : 'bg-white border-slate-200 text-slate-700'
+                        }`}
+                      >
+                        <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => handleToggleExtraColumn(colId)}
+                            className="rounded border-slate-300 text-[#0F1F3D] focus:ring-[#0F1F3D]"
+                          />
+                          <span>{colName}</span>
+                        </label>
+                        {!hasDataOnEmployees && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveSavedCustomColumn(colName)}
+                            title={`Remove empty custom column "${colName}"`}
+                            className="text-slate-400 hover:text-rose-600 cursor-pointer"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Built-in Extra HR / Statutory / Bank Table Columns */}
+            <div className="space-y-2 pt-2 border-t border-slate-100">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-[#0F1F3D]">
+                  3 · Built-In HR, Statutory &amp; Bank Columns — Tick to Show in Employee Master Table
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const allIds = [
+                        ...BUILTIN_EXTRA_TABLE_COLUMNS.map((b) => b.id),
+                        ...allCustomColumnNames.map((c) => `custom:${c}`),
+                      ];
+                      setVisibleExtraColumns(allIds);
+                      try {
+                        localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(allIds));
+                      } catch {
+                        // Ignore
+                      }
+                    }}
+                    className="text-[11px] font-semibold text-[#0F1F3D] hover:underline cursor-pointer"
+                  >
+                    Show All
+                  </button>
+                  <span className="text-slate-300">|</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVisibleExtraColumns([]);
+                      try {
+                        localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify([]));
+                      } catch {
+                        // Ignore
+                      }
+                    }}
+                    className="text-[11px] font-medium text-slate-500 hover:underline cursor-pointer"
+                  >
+                    Reset to Default Compact View
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+                {BUILTIN_EXTRA_TABLE_COLUMNS.map((col) => {
+                  const isChecked = visibleExtraColumns.includes(col.id);
+                  return (
+                    <label
+                      key={col.id}
+                      className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-xs cursor-pointer select-none transition-colors ${
+                        isChecked
+                          ? 'bg-[#0F1F3D]/5 border-[#0F1F3D] text-[#0F1F3D] font-semibold'
+                          : 'bg-slate-50/70 border-slate-200 text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => handleToggleExtraColumn(col.id)}
+                        className="rounded border-slate-300 text-[#0F1F3D] focus:ring-[#0F1F3D]"
+                      />
+                      <span className="truncate">{col.label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Bulk Employee Master Upload Drawer (Zero Silent Overlap Guard) */}
       {showBulkMaster && (
         <BulkEmployeeMasterDrawer
@@ -982,6 +1466,7 @@ export function EmployeeMaster({
           employees={employees}
           incentives={incentives}
           visibilitySettings={visibilitySettings}
+          customColumns={allCustomColumnNames}
           onClose={() => setShowBulkMaster(false)}
           onSuccess={async (message) => {
             setShowBulkMaster(false);
@@ -1110,7 +1595,7 @@ export function EmployeeMaster({
                       <table className="w-full text-left border-collapse text-xs">
                         <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
                           <tr>
-                            <th className="py-2 px-3">Emp ID</th>
+                            <th className="py-2 px-3">Employee ID</th>
                             <th className="py-2 px-3">Employee Name</th>
                             <th className="py-2 px-3">Branch</th>
                             <th className="py-2 px-3">Assigned Department</th>
@@ -1278,7 +1763,7 @@ export function EmployeeMaster({
                       <table className="w-full text-left border-collapse text-xs">
                         <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
                           <tr>
-                            <th className="py-2 px-3">Emp ID</th>
+                            <th className="py-2 px-3">Employee ID</th>
                             <th className="py-2 px-3">Employee Name</th>
                             <th className="py-2 px-3">Branch</th>
                             <th className="py-2 px-3">Date of Birth</th>
@@ -1378,19 +1863,36 @@ export function EmployeeMaster({
                   <th className="py-2 px-3">Branch</th>
                   <th className="py-2 px-3">Error Code</th>
                   <th className="py-2 px-3">Reason</th>
+                  <th className="py-2 px-3 text-right">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {failedProvisionItems.map((item) => (
-                  <tr key={item.employeeId} className="hover:bg-slate-50">
-                    <td className="py-2 px-3 font-mono text-slate-900">{item.employeeId}</td>
-                    <td className="py-2 px-3 font-mono text-slate-700">{item.loginId}</td>
-                    <td className="py-2 px-3 font-medium text-slate-900">{item.fullName}</td>
-                    <td className="py-2 px-3 text-slate-600">{item.branchName}</td>
-                    <td className="py-2 px-3 font-mono text-amber-800">{item.errorCode}</td>
-                    <td className="py-2 px-3 text-slate-600">{item.reason}</td>
-                  </tr>
-                ))}
+                {failedProvisionItems.map((item) => {
+                  const matchedEmp = employees.find((e) => e.employeeId === item.employeeId);
+                  const isBusy = activatingEmployeeId === item.employeeId;
+                  return (
+                    <tr key={item.employeeId} className="hover:bg-slate-50">
+                      <td className="py-2 px-3 font-mono text-slate-900">{item.employeeId}</td>
+                      <td className="py-2 px-3 font-mono text-slate-700">{item.loginId}</td>
+                      <td className="py-2 px-3 font-medium text-slate-900">{item.fullName}</td>
+                      <td className="py-2 px-3 text-slate-600">{item.branchName}</td>
+                      <td className="py-2 px-3 font-mono text-amber-800">{item.errorCode}</td>
+                      <td className="py-2 px-3 text-slate-600">{item.reason}</td>
+                      <td className="py-2 px-3 text-right whitespace-nowrap">
+                        {matchedEmp && (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void handleActivateSingleEmployee(matchedEmp)}
+                            className="h-7 px-2.5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                          >
+                            {isBusy ? 'Fixing...' : 'Auto-Fix & Activate'}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1473,7 +1975,7 @@ export function EmployeeMaster({
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">
-                Employee ID <span className="text-slate-400 font-normal">(Emp Code / ERP No)</span>
+                Employee ID <span className="text-slate-400 font-normal">(Official Master EMP ID)</span>
               </label>
               <input
                 type="text"
@@ -1481,8 +1983,21 @@ export function EmployeeMaster({
                 disabled={Boolean(editing)}
                 value={employeeId}
                 onChange={(e) => setEmployeeId(e.target.value.toUpperCase())}
-                placeholder="e.g. 1131 or EMP001"
+                placeholder="e.g. EMP001"
                 className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm font-mono disabled:bg-slate-50"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Sale ID <span className="text-slate-400 font-normal">(POS Code · Sales Staff Only)</span>
+              </label>
+              <input
+                type="text"
+                value={saleId}
+                onChange={(e) => setSaleId(e.target.value.toUpperCase())}
+                placeholder="Blank for Non-Sales staff"
+                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm font-mono"
               />
             </div>
 
@@ -1588,6 +2103,32 @@ export function EmployeeMaster({
                 value={designation}
                 onChange={(e) => setDesignation(e.target.value)}
                 placeholder="e.g. Sales Executive, Accountant, Cashier, HR, Store Manager"
+                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Gender</label>
+              <select
+                value={gender}
+                onChange={(e) => setGender(e.target.value)}
+                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
+              >
+                <option value="">— Select Gender —</option>
+                <option value="Female">Female</option>
+                <option value="Male">Male</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Category</label>
+              <input
+                type="text"
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                placeholder="e.g. Sales, Non-Sales, Staff, Manager"
+                maxLength={40}
                 className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
               />
             </div>
@@ -1718,7 +2259,7 @@ export function EmployeeMaster({
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Date of Birth (DOB · Birthday Card)
+                    Date of Birth (Birthday Card)
                   </label>
                   <input
                     type="date"
@@ -1729,7 +2270,7 @@ export function EmployeeMaster({
                 </div>
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Date of Joining (DOJ)
+                    Date of Joining
                   </label>
                   <input
                     type="date"
@@ -1766,7 +2307,7 @@ export function EmployeeMaster({
                 </div>
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    PF Number
+                    Provident Fund Number
                   </label>
                   <input
                     type="text"
@@ -1805,7 +2346,7 @@ export function EmployeeMaster({
                 </div>
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Bank Account (Auto-Masked)
+                    Bank Account Number (Auto-Masked)
                   </label>
                   <input
                     type="text"
@@ -1818,7 +2359,7 @@ export function EmployeeMaster({
                 </div>
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    IFSC Code
+                    Bank IFSC Code
                   </label>
                   <input
                     type="text"
@@ -1829,25 +2370,147 @@ export function EmployeeMaster({
                     className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-mono uppercase"
                   />
                 </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                    Emergency Contact
+                  </label>
+                  <input
+                    type="text"
+                    value={emergencyContact}
+                    onChange={(e) => setEmergencyContact(e.target.value)}
+                    placeholder="Name / Phone"
+                    maxLength={120}
+                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                    Residential Address
+                  </label>
+                  <input
+                    type="text"
+                    value={address}
+                    onChange={(e) => setAddress(e.target.value)}
+                    placeholder="House / Street / City / Pin"
+                    maxLength={240}
+                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
+                  />
+                </div>
               </div>
+            </div>
+
+            {/* Dynamic Custom Columns Section */}
+            <div className="md:col-span-2 lg:col-span-3 pt-3 border-t border-slate-100 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold text-[#0F1F3D]">
+                    Extra / Custom Employee Master Columns ({allCustomColumnNames.length})
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    Add any extra column (e.g., Aadhaar Card Number, Blood Group, Base Salary, Weekly Off Day) right here.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={inlineFormColumnInput}
+                    onChange={(e) => setInlineFormColumnInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddCustomColumn(inlineFormColumnInput);
+                      }
+                    }}
+                    placeholder="New column name (e.g. Aadhaar Card Number)..."
+                    maxLength={60}
+                    className="h-8 px-2.5 rounded-lg border border-slate-300 bg-white text-xs w-52"
+                  />
+                  <button
+                    type="button"
+                    disabled={!inlineFormColumnInput.trim()}
+                    onClick={() => handleAddCustomColumn(inlineFormColumnInput)}
+                    className="h-8 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-[#DFC27D]" />
+                    Add Column
+                  </button>
+                </div>
+              </div>
+
+              {allCustomColumnNames.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {allCustomColumnNames.map((colName) => (
+                    <div key={colName}>
+                      <label className="block text-[11px] font-medium text-[#0F1F3D] mb-1">
+                        {colName}
+                      </label>
+                      <input
+                        type="text"
+                        value={customFields[colName] || ''}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setCustomFields((prev) => ({
+                            ...prev,
+                            [colName]: val,
+                          }));
+                        }}
+                        placeholder={`Enter ${colName}`}
+                        maxLength={200}
+                        className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600 flex flex-wrap items-center gap-2">
+                  <span>No custom columns added yet. Quick add:</span>
+                  {QUICK_CUSTOM_COLUMN_SUGGESTIONS.map((sug) => (
+                    <button
+                      key={sug}
+                      type="button"
+                      onClick={() => handleAddCustomColumn(sug)}
+                      className="px-2 py-0.5 rounded border border-slate-300 bg-white hover:border-[#0F1F3D] text-[11px] font-medium text-[#0F1F3D] cursor-pointer"
+                    >
+                      + {sug}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2 border-t border-slate-100">
-            <label className="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={mustChangePassword}
-                onChange={(e) => setMustChangePassword(e.target.checked)}
-                className="rounded border-slate-300 text-[#0F1F3D] focus:ring-[#0F1F3D]"
-              />
-              Require password change on first employee sign-in
-            </label>
+            <div className="flex flex-col gap-2">
+              <label className="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={mustChangePassword}
+                  onChange={(e) => setMustChangePassword(e.target.checked)}
+                  className="rounded border-slate-300 text-[#0F1F3D] focus:ring-[#0F1F3D]"
+                />
+                Require password change on first employee sign-in
+              </label>
+
+              <label className="inline-flex items-center gap-2 text-sm text-[#0F1F3D] font-medium cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isBranchManager}
+                  onChange={(e) => setIsBranchManager(e.target.checked)}
+                  className="rounded border-slate-300 text-[#B8923A] focus:ring-[#B8923A]"
+                />
+                <span>
+                  Branch Manager (Read-Only Floor Access)
+                  <span className="block text-[11px] font-normal text-slate-500">
+                    Can view only own branch team sales &amp; targets (zero peer salary access, zero edit rights).
+                  </span>
+                </span>
+              </label>
+            </div>
 
             <button
               type="submit"
               disabled={saving}
-              className="h-10 px-5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium disabled:opacity-60 cursor-pointer"
+              className="h-10 px-5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium disabled:opacity-60 cursor-pointer shrink-0"
             >
               {saving ? 'Saving...' : editing ? 'Save Changes' : 'Create Employee'}
             </button>
@@ -1868,23 +2531,45 @@ export function EmployeeMaster({
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                  <th className="py-3 px-4">Employee ID</th>
-                  <th className="py-3 px-4">Login ID</th>
-                  <th className="py-3 px-4">Employee Name</th>
-                  <th className="py-3 px-4">Branch</th>
-                  <th className="py-3 px-4">Department</th>
-                  <th className="py-3 px-4">Auth Provisioning</th>
-                  <th className="py-3 px-4">Status</th>
-                  <th className="py-3 px-4 text-right">Actions</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Employee ID</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Login ID</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Employee Name</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Branch</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Department</th>
+                  {BUILTIN_EXTRA_TABLE_COLUMNS.filter((c) => visibleExtraColumns.includes(c.id)).map(
+                    (col) => (
+                      <th key={col.id} className="py-3 px-4 whitespace-nowrap text-[#0F1F3D]">
+                        {col.label}
+                      </th>
+                    ),
+                  )}
+                  {allCustomColumnNames
+                    .filter((cName) => visibleExtraColumns.includes(`custom:${cName}`))
+                    .map((cName) => (
+                      <th
+                        key={`custom:${cName}`}
+                        className="py-3 px-4 whitespace-nowrap text-[#8A671F] bg-[#FDF8EC]/40"
+                      >
+                        {cName}
+                      </th>
+                    ))}
+                  <th className="py-3 px-4 whitespace-nowrap">Login Account Status</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Status</th>
+                  <th className="py-3 px-4 text-right whitespace-nowrap">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-sm">
                 {filtered.map((emp) => (
                   <tr key={emp.employeeId} className="hover:bg-slate-50/60 transition-colors">
-                    <td className="py-3 px-4 font-mono font-medium text-slate-900">
-                      {emp.employeeId}
+                    <td className="py-3 px-4 font-mono font-medium text-slate-900 whitespace-nowrap">
+                      <div>{emp.employeeId}</div>
+                      {emp.saleId && (
+                        <div className="text-[11px] font-semibold text-[#8A671F] mt-0.5">
+                          Sales ID: {emp.saleId}
+                        </div>
+                      )}
                     </td>
-                    <td className="py-3 px-4 font-mono text-slate-700">{emp.loginId}</td>
+                    <td className="py-3 px-4 font-mono text-slate-700 whitespace-nowrap">{emp.loginId}</td>
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2.5">
                         <div className="w-8 h-8 rounded-full bg-[#0F1F3D] text-[#DFC27D] text-[11px] font-bold flex items-center justify-center overflow-hidden border border-[#B8923A]/40 shrink-0">
@@ -1906,7 +2591,14 @@ export function EmployeeMaster({
                           )}
                         </div>
                         <div className="min-w-0">
-                          <div className="font-medium text-slate-900 truncate">{emp.fullName}</div>
+                          <div className="font-medium text-slate-900 truncate flex items-center gap-1.5">
+                            <span>{emp.fullName}</span>
+                            {emp.isBranchManager && (
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#FDF8EC] border border-[#B8923A]/40 text-[#9A7625] shrink-0">
+                                Branch Manager
+                              </span>
+                            )}
+                          </div>
                           <div className="text-xs text-slate-500 truncate">
                             {emp.designation}
                             {emp.dateOfBirth && extractMonthDayFromDob(emp.dateOfBirth) && (
@@ -1919,15 +2611,48 @@ export function EmployeeMaster({
                         </div>
                       </div>
                     </td>
-                    <td className="py-3 px-4 text-slate-700">{emp.branchName}</td>
-                    <td className="py-3 px-4 text-xs">
+                    <td className="py-3 px-4 text-slate-700 whitespace-nowrap">{emp.branchName}</td>
+                    <td className="py-3 px-4 text-xs whitespace-nowrap">
                       {emp.departmentName ? (
                         <span className="font-semibold text-[#0F1F3D]">{emp.departmentName}</span>
                       ) : (
                         <span className="text-amber-700 font-medium">Unassigned</span>
                       )}
                     </td>
-                    <td className="py-3 px-4 text-xs">
+                    {BUILTIN_EXTRA_TABLE_COLUMNS.filter((c) => visibleExtraColumns.includes(c.id)).map(
+                      (col) => {
+                        const rawVal = (emp as unknown as Record<string, unknown>)[col.id];
+                        const displayVal = rawVal ? String(rawVal) : '—';
+                        return (
+                          <td
+                            key={col.id}
+                            className="py-3 px-4 text-xs text-slate-700 whitespace-nowrap font-mono"
+                          >
+                            {displayVal}
+                          </td>
+                        );
+                      },
+                    )}
+                    {allCustomColumnNames
+                      .filter((cName) => visibleExtraColumns.includes(`custom:${cName}`))
+                      .map((cName) => {
+                        const map = emp.customFields || {};
+                        let val = map[cName];
+                        if (val === undefined) {
+                          const lower = cName.toLowerCase();
+                          const matchK = Object.keys(map).find((k) => k.toLowerCase() === lower);
+                          if (matchK) val = map[matchK];
+                        }
+                        return (
+                          <td
+                            key={`custom:${cName}`}
+                            className="py-3 px-4 text-xs text-slate-800 whitespace-nowrap bg-[#FDF8EC]/20"
+                          >
+                            {val || '—'}
+                          </td>
+                        );
+                      })}
+                    <td className="py-3 px-4 text-xs whitespace-nowrap">
                       {emp.credentialsProvisioned ? (
                         <span className="inline-flex items-center gap-1 text-emerald-700 font-medium">
                           <UserCheck className="w-3.5 h-3.5" />
@@ -1942,7 +2667,7 @@ export function EmployeeMaster({
                         </span>
                       )}
                     </td>
-                    <td className="py-3 px-4">
+                    <td className="py-3 px-4 whitespace-nowrap">
                       <span
                         className={`text-xs font-semibold ${
                           emp.status === 'ACTIVE' ? 'text-emerald-700' : 'text-red-700'
@@ -1951,7 +2676,7 @@ export function EmployeeMaster({
                         {emp.status}
                       </span>
                     </td>
-                    <td className="py-3 px-4 text-right">
+                    <td className="py-3 px-4 text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-3">
                         {emp.dateOfBirth && extractMonthDayFromDob(emp.dateOfBirth) && (
                           <button

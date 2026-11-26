@@ -37,6 +37,7 @@ interface Props {
   employees: Employee[];
   incentives: PublishedIncentive[];
   visibilitySettings?: PortalVisibilitySettings;
+  customColumns?: string[];
   onClose: () => void;
   onSuccess: (message: string) => Promise<void>;
 }
@@ -78,6 +79,7 @@ export function BulkEmployeeMasterDrawer({
   employees,
   incentives,
   visibilitySettings,
+  customColumns = [],
   onClose,
   onSuccess,
 }: Props) {
@@ -89,7 +91,7 @@ export function BulkEmployeeMasterDrawer({
   const [committing, setCommitting] = useState(false);
 
   const handleDownloadTemplate = (mode: 'blank' | 'prefilled') => {
-    const csv = buildEmployeeMasterCsvTemplate(branches, employees, mode);
+    const csv = buildEmployeeMasterCsvTemplate(branches, employees, mode, customColumns);
     triggerCsvDownload(
       csv,
       mode === 'prefilled'
@@ -314,8 +316,9 @@ export function BulkEmployeeMasterDrawer({
                 Step 1 · Download Official Employee Master Template
               </p>
               <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
-                Includes <strong>Employee ID, Login ID, Full Name, Branch, Department, Designation</strong>,
-                Status, DOB, DOJ, Phone, PAN, UAN, PF, ESIC, Bank &amp; IFSC.
+                Includes <strong>Employee ID (Official Master ID), Sale ID (Optional POS Code for Sales Staff), Login ID, Full Name, Branch, Department, Designation</strong>,
+                Gender, Category, Status, DOB, DOJ, Phone, PAN, UAN, PF, ESIC, Bank, IFSC, Address &amp; Emergency Contact.
+                <strong> Plus:</strong> Any custom columns you add to the Excel/CSV sheet are automatically imported into Employee Master!
               </p>
               <p className="text-[10px] text-slate-500 mt-1">
                 Sales Counter Depts: {OFFICIAL_DEPARTMENTS.map((d) => d.name).join(' · ')} ·
@@ -492,7 +495,7 @@ export function BulkEmployeeMasterDrawer({
                     <th className="py-2.5 px-3 w-14">Row</th>
                     <th className="py-2.5 px-3 w-44">Status &amp; Action</th>
                     <th className="py-2.5 px-3 w-48">Employee</th>
-                    <th className="py-2.5 px-3 w-56">Branch · Dept · Designation</th>
+                    <th className="py-2.5 px-3 w-56">Branch · Department · Designation</th>
                     <th className="py-2.5 px-3">Exact Diagnostic / Master → File Comparison</th>
                   </tr>
                 </thead>
@@ -574,9 +577,14 @@ export function BulkEmployeeMasterDrawer({
                               {row.fullName || row.rawFullName || '(Blank Name)'}
                             </p>
                             <p className="font-mono text-[11px] text-slate-600 mt-0.5">
-                              ID: {row.employeeId || row.rawEmployeeId || '—'} · Login:{' '}
+                              EMP: {row.employeeId || row.rawEmployeeId || '—'} · Login:{' '}
                               {row.loginId || row.rawLoginId || '—'}
                             </p>
+                            {(row.saleId || row.rawSaleId) && (
+                              <p className="font-mono text-[10px] text-[#8A671F] font-semibold mt-0.5">
+                                Sale ID: {row.saleId || row.rawSaleId}
+                              </p>
+                            )}
                           </td>
 
                           <td className="py-2.5 px-3 align-top text-[11px] text-slate-700 space-y-0.5">

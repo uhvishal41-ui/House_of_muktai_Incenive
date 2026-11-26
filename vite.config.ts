@@ -58,7 +58,7 @@ export default defineConfig(() => {
           maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,webp,svg,woff,woff2}'],
           navigateFallback: '/index.html',
-          navigateFallbackDenylist: [/^\/api\//],
+          navigateFallbackDenylist: [/^\/api\//, /^\/__\/auth\//, /^\/__\/firebase\//],
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
@@ -136,8 +136,6 @@ export default defineConfig(() => {
         'firebase/auth',
         'firebase/firestore',
         'jspdf',
-        'exceljs',
-        'pptxgenjs',
         'zod',
       ],
     },

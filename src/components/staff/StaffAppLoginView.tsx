@@ -8,7 +8,7 @@ import { BrandLogo, CompanyFooter } from '../common/BrandLogo';
 import { PWAInstallButton } from '../common/PWAInstallButton';
 
 export function StaffAppLoginView() {
-  const { signInEmployeeWithLoginId, signInEmployeeWithGoogle } = useAuth();
+  const { signInEmployeeWithLoginId } = useAuth();
   const [lang, setLang] = useState<AppLang>(() => getSavedLang());
   const isMr = lang === 'mr';
 
@@ -58,18 +58,6 @@ export function StaffAppLoginView() {
       } else {
         setError(err instanceof Error ? err.message : 'Sign-in failed.');
       }
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleEmployeeGoogleLogin = async () => {
-    setError(null);
-    setBusy(true);
-    try {
-      await signInEmployeeWithGoogle();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Google Sign-In failed.');
     } finally {
       setBusy(false);
     }
@@ -208,8 +196,8 @@ export function StaffAppLoginView() {
                 </div>
               </div>
 
-              {/* Unified Login Action Tray */}
-              <div className="pt-1 space-y-2.5">
+              {/* Primary Login Action */}
+              <div className="pt-1">
                 <button
                   type="submit"
                   disabled={busy}
@@ -226,15 +214,6 @@ export function StaffAppLoginView() {
                         : 'Sign In'}
                   </span>
                   <ArrowRight className="w-4 h-4" />
-                </button>
-
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={handleEmployeeGoogleLogin}
-                  className="w-full h-10 px-4 rounded-xl border border-slate-300 bg-slate-50/70 hover:bg-slate-100 active:scale-[0.99] text-slate-700 text-xs font-semibold transition-all disabled:opacity-60 cursor-pointer"
-                >
-                  {isMr ? 'Google खात्याने लॉगिन करा' : 'Continue with Google'}
                 </button>
               </div>
             </form>

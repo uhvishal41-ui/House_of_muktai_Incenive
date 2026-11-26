@@ -34,6 +34,9 @@ export interface ActiveAuthUidRecord {
   authUid: string;
   employeeId: string;
   departmentId?: DepartmentId | '';
+  branchId?: string;
+  branchName?: string;
+  isBranchManager?: boolean;
   active: true;
   updatedAt: string;
 }
@@ -51,6 +54,7 @@ export interface Branch {
 
 export interface Employee {
   employeeId: string;
+  saleId?: string; // Optional unique POS / Salesman Code (SELL ID) for Sales staff; blank for Non-Sales
   loginId: string;
   authEmail: string;
   linkedGoogleEmail?: string;
@@ -62,6 +66,8 @@ export interface Employee {
   departmentName?: string;
   photoDataUrl?: string;
   designation: string;
+  gender?: string;
+  category?: string;
   dateOfBirth?: string; // YYYY-MM-DD (private in employees; only MM-DD synced to birthday_profiles)
   dateOfJoining?: string;
   panNumber?: string;
@@ -74,7 +80,9 @@ export interface Employee {
   phone?: string;
   address?: string;
   emergencyContact?: string;
+  customFields?: Record<string, string>; // Dynamic user-added extra columns in Employee Master & Bulk Excel Upload
   role: 'EMPLOYEE';
+  isBranchManager?: boolean; // Optional read-only floor manager view strictly for own branch (zero peer salary access)
   status: 'ACTIVE' | 'INACTIVE';
   mustChangePassword: boolean;
   credentialsProvisioned: boolean;
@@ -301,6 +309,7 @@ export interface EmployeeNotification {
 export interface ExcelColumnMapping {
   businessDate: string;
   employeeId: string;
+  saleId?: string;
   employeeName: string;
   branchCode: string;
   component1: string;
@@ -436,7 +445,25 @@ export type VisibilityMode = 'ALL' | 'SELECTED';
 export interface PortalVisibilitySettings {
   settingId: 'visibility';
   mode: VisibilityMode;
-  visibleMonths: string[]; // YYYY-MM array (bounded <= 36)
+  visibleMonths: string[]; // YYYY-MM array (bounded <= 48) for Incentives
+  salarySlipMode?: VisibilityMode; // Independent mode for Payment / Salary Slips (defaults to mode)
+  salarySlipVisibleMonths?: string[]; // Independent YYYY-MM array (<= 48) for Payment / Salary Slips
+  updatedByEmail: string;
+  updatedAt: string;
+}
+
+export interface EmployeeColumnSettings {
+  settingId: 'employee_columns';
+  customColumns: string[]; // Bounded <= 25 custom column names (<= 60 chars each)
+  visibleColumns: string[]; // Bounded <= 45 table column IDs (built-in + custom:*)
+  updatedByEmail: string;
+  updatedAt: string;
+}
+
+export interface PayrollLockSettings {
+  settingId: 'payroll_locks';
+  lockedMonths: string[]; // Bounded <= 48 YYYY-MM months frozen by Main Owner (Maker-Checker)
+  lockNote?: string;
   updatedByEmail: string;
   updatedAt: string;
 }
@@ -477,12 +504,13 @@ export interface EmployeeDepartmentRank {
   updatedAt: string;
 }
 
-export type SalarySlipPaymentMode = '' | 'BANK' | 'NEFT' | 'CASH' | 'UPI' | 'CHEQUE';
+export type SalarySlipPaymentMode = '' | 'BANK' | 'NEFT' | 'DCR' | 'CASH' | 'UPI' | 'CHEQUE';
 
 export interface SalarySlip {
   slipId: string; // `${monthKey}__${employeeId}`
   monthKey: string; // YYYY-MM
   employeeId: string;
+  saleId?: string;
   authUid: string;
   employeeName: string;
   branchId: string;
@@ -490,6 +518,8 @@ export interface SalarySlip {
   departmentId?: DepartmentId | '';
   departmentName?: string;
   designation?: string;
+  gender?: string;
+  category?: string;
   dateOfJoining?: string;
   panNumber?: string;
   uanNumber?: string;
@@ -500,11 +530,16 @@ export interface SalarySlip {
   bankIfsc?: string;
   // Attendance
   totalDays: number;
+  presentDays?: number;
   paidDays: number;
   lopDays: number;
   weeklyOffDays: number;
   paidLeaveDays: number;
+  overtimeDays?: number;
   overtimeHours: number;
+  // Reference Rate / CTC columns (NEVER summed into grossEarningsPaise)
+  monthlySalaryRatePaise?: number;
+  monthlyGrossRatePaise?: number;
   // Earnings (paise)
   basicPaise: number;
   dearnessAllowancePaise?: number;
@@ -515,20 +550,25 @@ export interface SalarySlip {
   medicalAllowancePaise?: number;
   leaveTravelAllowancePaise?: number;
   communicationExpensesPaise?: number;
+  healthClubAllowancePaise?: number;
   adhocAllowancePaise?: number;
   travelingAllowancePaise?: number;
   salesCommissionPaise?: number;
   specialAllowancePaise: number;
   overtimePaise: number;
   incentivePaise: number;
+  arrearsPaise?: number;
   otherEarningsPaise: number;
   grossEarningsPaise: number;
   // Deductions (paise)
   pfPaise: number;
   esicPaise: number;
   ptPaise: number;
+  lwfPaise?: number;
   advanceRecoveryPaise: number;
   tdsPaise: number;
+  penaltyPaise?: number;
+  insurancePaise?: number;
   otherDeductionPaise: number;
   totalDeductionsPaise: number;
   // Net & Payment
@@ -575,6 +615,31 @@ export interface BirthdayWish {
   senderRole: BirthdayWishSenderRole;
   message: string;
   createdAt: string;
+}
+
+export type LoanType = 'SALARY_ADVANCE' | 'PERSONAL_LOAN' | 'FESTIVAL_ADVANCE';
+export type LoanStatus = 'ACTIVE' | 'CLOSED' | 'CANCELLED';
+
+export interface EmployeeLoan {
+  loanId: string;
+  employeeId: string;
+  authUid?: string;
+  employeeName: string;
+  branchId: string;
+  branchName: string;
+  loanType: LoanType;
+  principalPaise: number;
+  monthlyEmiPaise: number;
+  totalInstallments: number;
+  paidInstallments: number;
+  remainingBalancePaise: number;
+  startMonthKey: string; // YYYY-MM
+  lastDeductedMonthKey?: string; // YYYY-MM
+  status: LoanStatus;
+  remarks?: string;
+  createdByEmail: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 

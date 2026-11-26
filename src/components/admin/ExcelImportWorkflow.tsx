@@ -6,6 +6,8 @@ import {
   CheckCircle2,
   Download,
   FileSpreadsheet,
+  Link2,
+  Lock,
   RefreshCw,
   ShieldAlert,
   Upload,
@@ -22,17 +24,20 @@ import {
 } from '../../lib/format';
 import {
   formatImportTypeLabel,
-  getLastDayOfMonth,
+  planBranchTransferConsolidation,
   validateImportBatch,
 } from '../../lib/incentiveEngine';
+import { detectIncentiveImportAnomalies } from '../../lib/proAnalyticsEngine';
 import {
   approveEmployeeBranchTransfer,
   approveImportBatch,
+  linkVerifiedSaleIdsToEmployees,
   publishApprovedBatch,
   rejectImportBatch,
   stageValidatedBatch,
   syncMastersFromErpRows,
 } from '../../services/incentiveService';
+import { isMonthPayrollLockedLocal } from '../../services/proFeaturesService';
 import type {
   Branch,
   Employee,
@@ -40,8 +45,8 @@ import type {
   ExcelParseResponse,
   ImportBatch,
   ImportBatchRow,
-  ImportType,
   OverlapResolutionMode,
+  PayrollLockSettings,
   PublishedIncentive,
   RowResolution,
 } from '../../types/incentive';
@@ -50,6 +55,7 @@ interface Props {
   branches: Branch[];
   employees: Employee[];
   publishedIncentives: PublishedIncentive[];
+  payrollLockSettings?: PayrollLockSettings;
   onRefresh: () => Promise<void>;
 }
 
@@ -59,12 +65,14 @@ export function ExcelImportWorkflow({
   branches,
   employees,
   publishedIncentives,
+  payrollLockSettings,
   onRefresh,
 }: Props) {
   const [parsed, setParsed] = useState<ExcelParseResponse | null>(null);
   const [mapping, setMapping] = useState<ExcelColumnMapping>({
     businessDate: '',
     employeeId: '',
+    saleId: '',
     employeeName: '',
     branchCode: '',
     component1: '',
@@ -83,20 +91,8 @@ export function ExcelImportWorkflow({
   const [overlapResolutionMode, setOverlapResolutionMode] =
     useState<OverlapResolutionMode>('BLOCK');
   const [overlapReconcileReason, setOverlapReconcileReason] = useState('');
-  // Explicit Super Admin period selection when uploaded Excel has no Row 1 date banner
-  const [manualPeriodMode, setManualPeriodMode] = useState<ImportType>('MONTHLY');
-  const [manualMonthKey, setManualMonthKey] = useState<string>(() => {
-    const today = getTodayIST();
-    const [yStr, mStr] = today.split('-');
-    const y = Number(yStr);
-    const m = Number(mStr);
-    const prevY = m === 1 ? y - 1 : y;
-    const prevM = m === 1 ? 12 : m - 1;
-    return `${prevY}-${String(prevM).padStart(2, '0')}`;
-  });
-  const [manualSingleDate, setManualSingleDate] = useState<string>(() => getTodayIST());
-  const [manualCustomStart, setManualCustomStart] = useState<string>('');
-  const [manualCustomEnd, setManualCustomEnd] = useState<string>('');
+  // Fallback single upload date ONLY when a legacy Excel has neither a Date column nor a Row 1 date banner
+  const [fallbackDate, setFallbackDate] = useState<string>(() => getTodayIST());
   const [manualPeriodApplied, setManualPeriodApplied] = useState<{
     start: string;
     end: string;
@@ -117,8 +113,10 @@ export function ExcelImportWorkflow({
   const [busy, setBusy] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [syncingMasters, setSyncingMasters] = useState(false);
+  const [linkingSaleIds, setLinkingSaleIds] = useState(false);
+  const [selectedSaleIdLinks, setSelectedSaleIdLinks] = useState<Record<string, boolean>>({});
   const [approvingTransferId, setApprovingTransferId] = useState<string | null>(null);
-  const [sampleType, setSampleType] = useState<ImportType>('DAILY');
+  const [approvingAllTransfers, setApprovingAllTransfers] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err' | 'warn'; text: string } | null>(
     null,
   );
@@ -186,6 +184,17 @@ export function ExcelImportWorkflow({
       }
       return changed ? next : prev;
     });
+    setSelectedSaleIdLinks((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const link of validation.pendingSaleIdLinks) {
+        if (next[link.employeeId] === undefined) {
+          next[link.employeeId] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
   }, [validation]);
 
   const filteredPreview = useMemo(() => {
@@ -208,6 +217,73 @@ export function ExcelImportWorkflow({
     return { Authorization: `Bearer ${token}` };
   };
 
+  const hasDateColumn = Boolean(mapping.businessDate);
+
+  // Deduplicated branch transfers across multi-date rows + live preview of previous-branch incentive carry-forward
+  const uploadedMonthKeys = useMemo(() => {
+    if (!validation) return [];
+    const set = new Set<string>();
+    for (const r of validation.rows) {
+      if (r.businessDate && /^\d{4}-\d{2}/.test(r.businessDate)) {
+        set.add(r.businessDate.slice(0, 7));
+      }
+    }
+    return Array.from(set).sort();
+  }, [validation]);
+
+  const uniqueBranchTransfers = useMemo(() => {
+    if (!validation || validation.branchTransfers.length === 0) return [];
+    const seen = new Map<
+      string,
+      {
+        employeeId: string;
+        employeeName: string;
+        masterBranchId: string;
+        masterBranchName: string;
+        excelBranchId: string;
+        excelBranchName: string;
+        rowCount: number;
+        carryForwardCount: number;
+        carryForwardPaise: number;
+        carryForwardMonths: string[];
+      }
+    >();
+
+    for (const tr of validation.branchTransfers) {
+      const key = `${tr.employeeId.toUpperCase()}__${tr.excelBranchId}`;
+      const existing = seen.get(key);
+      if (existing) {
+        existing.rowCount += 1;
+        continue;
+      }
+      const emp = employeesById[tr.employeeId.toUpperCase()];
+      const preview = emp
+        ? planBranchTransferConsolidation({
+            employee: emp,
+            newBranchId: tr.excelBranchId,
+            newBranchName: tr.excelBranchName,
+            publishedIncentives,
+            targetMonthKeys: uploadedMonthKeys.length > 0 ? uploadedMonthKeys : undefined,
+          })
+        : null;
+
+      seen.set(key, {
+        employeeId: tr.employeeId,
+        employeeName: tr.employeeName,
+        masterBranchId: tr.masterBranchId,
+        masterBranchName: tr.masterBranchName,
+        excelBranchId: tr.excelBranchId,
+        excelBranchName: tr.excelBranchName,
+        rowCount: 1,
+        carryForwardCount: preview?.recordsToMigrate.length || 0,
+        carryForwardPaise: preview?.migratedIncentivePaise || 0,
+        carryForwardMonths: preview?.affectedMonthKeys || [],
+      });
+    }
+
+    return Array.from(seen.values());
+  }, [validation, employeesById, publishedIncentives, uploadedMonthKeys]);
+
   const handleDownloadSample = async () => {
     setBusy(true);
     setFeedback(null);
@@ -215,29 +291,17 @@ export function ExcelImportWorkflow({
       const headers = await getBearerHeader();
       const activeEmployees = employees.filter((e) => e.status === 'ACTIVE').slice(0, 15);
       const today = getTodayIST();
-      const [yStr, mStr] = today.split('-');
-      const year = Number(yStr);
-      const month = Number(mStr);
-      const lastDay = String(getLastDayOfMonth(year, month)).padStart(2, '0');
-
-      let periodStart = today;
-      let periodEnd = today;
-      if (sampleType === 'MONTHLY') {
-        periodStart = `${yStr}-${mStr}-01`;
-        periodEnd = `${yStr}-${mStr}-${lastDay}`;
-      } else if (sampleType === 'CUSTOM_PERIOD') {
-        periodStart = `${yStr}-${mStr}-01`;
-        periodEnd = `${yStr}-${mStr}-15`;
-      }
 
       const resp = await fetch('/api/v1/excel/sample-template', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify({
-          periodStart,
-          periodEnd,
+          businessDate: today,
+          periodStart: today,
+          periodEnd: today,
           rows: activeEmployees.map((e) => ({
             employeeId: e.employeeId,
+            saleId: e.saleId || '',
             employeeName: e.fullName,
             branchName: e.branchName,
           })),
@@ -253,17 +317,17 @@ export function ExcelImportWorkflow({
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `house-of-muktai-${sampleType.toLowerCase()}-${periodStart}-to-${periodEnd}.xlsx`;
+      a.download = `house-of-muktai-incentive-template-${today}.xlsx`;
       a.click();
       URL.revokeObjectURL(url);
       setFeedback({
         type: 'ok',
-        text: `Downloaded ${sampleType} ERP sample workbook (${periodStart} to ${periodEnd}) with Row 1 merged banner and Row 2 ERP headers.`,
+        text: `Downloaded Incentive Upload Template (${today}) with built-in Date column. Enter each row's Date (YYYY-MM-DD or DD-MM-YYYY) and upload directly.`,
       });
     } catch (err) {
       setFeedback({
         type: 'err',
-        text: err instanceof Error ? err.message : 'Unable to generate sample template.',
+        text: err instanceof Error ? err.message : 'Unable to generate template.',
       });
     } finally {
       setBusy(false);
@@ -287,6 +351,7 @@ export function ExcelImportWorkflow({
     setOverlapReconcileReason('');
     setManualPeriodApplied(null);
     setCandidateStatuses({});
+    setSelectedSaleIdLinks({});
 
     try {
       const headers = await getBearerHeader();
@@ -315,7 +380,7 @@ export function ExcelImportWorkflow({
             : '';
         setFeedback({
           type: 'warn',
-          text: `${parsedResp.totalRows} employee row(s) parsed cleanly.${salesNote} No Row 1 date banner was found in this Excel sheet — select the Report Period below (e.g. Full Month October) to continue.`,
+          text: `${parsedResp.totalRows} employee row(s) parsed cleanly.${salesNote} No Date column was found in this Excel sheet — select the Upload Date below (or map your Date column) to continue.`,
         });
       } else {
         const skippedParts: string[] = [];
@@ -331,10 +396,14 @@ export function ExcelImportWorkflow({
           parsedResp.excludedSalesColumns.length > 0
             ? ` Excluded sales columns (${parsedResp.excludedSalesColumns.join(', ')}).`
             : '';
+        const dateSpanLabel =
+          parsedResp.periodStart === parsedResp.periodEnd
+            ? parsedResp.periodStart
+            : `${parsedResp.periodStart} to ${parsedResp.periodEnd}`;
 
         setFeedback({
           type: parsedResp.excludedSalesColumns.length > 0 ? 'warn' : 'ok',
-          text: `Detected ${parsedResp.importType} report (${parsedResp.periodStart} to ${parsedResp.periodEnd}) · ${parsedResp.totalRows} employee rows parsed.${skippedNote}${salesNote}`,
+          text: `Detected template date(s): ${dateSpanLabel} · ${parsedResp.totalRows} employee rows parsed.${skippedNote}${salesNote}`,
         });
       }
     } catch (err) {
@@ -423,6 +492,44 @@ export function ExcelImportWorkflow({
     }
   };
 
+  const handleLinkVerifiedSaleIds = async () => {
+    if (!validation || validation.pendingSaleIdLinks.length === 0) return;
+    const linksToApply = validation.pendingSaleIdLinks
+      .filter((c) => selectedSaleIdLinks[c.employeeId] !== false)
+      .map((c) => ({ employeeId: c.employeeId, saleId: c.proposedSaleId }));
+
+    if (linksToApply.length === 0) {
+      setFeedback({
+        type: 'warn',
+        text: 'Select at least one verified employee row to link its Sales ID to Employee Master.',
+      });
+      return;
+    }
+
+    setLinkingSaleIds(true);
+    setFeedback(null);
+    try {
+      const res = await linkVerifiedSaleIdsToEmployees({
+        links: linksToApply,
+        employees,
+      });
+      await onRefresh();
+      setFeedback({
+        type: 'ok',
+        text: `Verified and permanently linked Sales ID to ${res.linkedCount} Employee Master record(s)${
+          res.skippedCount > 0 ? ` (${res.skippedCount} skipped due to existing/duplicate ID)` : ''
+        }. Future Sale-ID-only uploads will match directly.`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Failed to link verified Sales IDs.',
+      });
+    } finally {
+      setLinkingSaleIds(false);
+    }
+  };
+
   const handleApproveTransfer = async (
     employeeId: string,
     newBranchId: string,
@@ -433,16 +540,23 @@ export function ExcelImportWorkflow({
     setApprovingTransferId(employeeId);
     setFeedback(null);
     try {
-      await approveEmployeeBranchTransfer({
+      const result = await approveEmployeeBranchTransfer({
         employee: emp,
         newBranchId,
         newBranchName,
+        targetMonthKeys: uploadedMonthKeys.length > 0 ? uploadedMonthKeys : undefined,
+        consolidatePreviousBranchIncentives: true,
+        allEmployees: employees,
         reason: `Approved during Excel import (${parsed?.fileName || 'ERP export'})`,
       });
       await onRefresh();
+      const carryMsg =
+        result.migratedRecordsCount > 0
+          ? ` Previous branch incentive of ${formatINRFromPaise(result.migratedIncentivePaise)} (${result.migratedRecordsCount} record${result.migratedRecordsCount === 1 ? '' : 's'}) carried forward into ${newBranchName}.`
+          : '';
       setFeedback({
         type: 'ok',
-        text: `Branch transfer approved for Salesman No ${emp.employeeId} (${emp.fullName}): ${emp.branchName} -> ${newBranchName}.`,
+        text: `Branch transfer approved for ${emp.employeeId} (${emp.fullName}): ${emp.branchName} → ${newBranchName}.${carryMsg}`,
       });
     } catch (err) {
       setFeedback({
@@ -451,6 +565,47 @@ export function ExcelImportWorkflow({
       });
     } finally {
       setApprovingTransferId(null);
+    }
+  };
+
+  const handleApproveAllTransfers = async () => {
+    if (uniqueBranchTransfers.length === 0) return;
+    setApprovingAllTransfers(true);
+    setFeedback(null);
+    try {
+      let totalMigratedRecords = 0;
+      let totalMigratedPaise = 0;
+      let approvedCount = 0;
+
+      for (const tr of uniqueBranchTransfers) {
+        const emp = employeesById[tr.employeeId.toUpperCase()];
+        if (!emp) continue;
+        const result = await approveEmployeeBranchTransfer({
+          employee: emp,
+          newBranchId: tr.excelBranchId,
+          newBranchName: tr.excelBranchName,
+          targetMonthKeys: uploadedMonthKeys.length > 0 ? uploadedMonthKeys : undefined,
+          consolidatePreviousBranchIncentives: true,
+          allEmployees: employees,
+          reason: `Bulk approved during Excel import (${parsed?.fileName || 'ERP export'})`,
+        });
+        approvedCount += 1;
+        totalMigratedRecords += result.migratedRecordsCount;
+        totalMigratedPaise += result.migratedIncentivePaise;
+      }
+
+      await onRefresh();
+      setFeedback({
+        type: 'ok',
+        text: `Approved ${approvedCount} branch transfer(s) and consolidated ${totalMigratedRecords} previous-branch incentive record(s) (${formatINRFromPaise(totalMigratedPaise)}) into each employee's current branch.`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Failed to approve branch transfers.',
+      });
+    } finally {
+      setApprovingAllTransfers(false);
     }
   };
 
@@ -513,6 +668,23 @@ export function ExcelImportWorkflow({
     setBusy(true);
     setFeedback(null);
     try {
+      // Auto-link checked verified Sales IDs to Employee Master before backend verification & staging
+      let employeesForVerify = employees;
+      let autoLinkedCount = 0;
+      if (validation.pendingSaleIdLinks.length > 0) {
+        const checkedLinks = validation.pendingSaleIdLinks
+          .filter((c) => selectedSaleIdLinks[c.employeeId] !== false)
+          .map((c) => ({ employeeId: c.employeeId, saleId: c.proposedSaleId }));
+        if (checkedLinks.length > 0) {
+          const linkRes = await linkVerifiedSaleIdsToEmployees({
+            links: checkedLinks,
+            employees,
+          });
+          employeesForVerify = linkRes.updatedEmployees;
+          autoLinkedCount = linkRes.linkedCount;
+        }
+      }
+
       // Backend verification call before staging to Firestore
       const headers = await getBearerHeader();
       const verifyResp = await fetch('/api/v1/excel/validate', {
@@ -528,7 +700,7 @@ export function ExcelImportWorkflow({
           mapping,
           rows: parsed.rows,
           branches,
-          employees,
+          employees: employeesForVerify,
           publishedIncentives,
           overrides: Object.fromEntries(
             Object.entries(overrides).map(([k, v]) => [String(k), v]),
@@ -602,7 +774,11 @@ export function ExcelImportWorkflow({
       setStagedBatch(staged);
       setFeedback({
         type: 'ok',
-        text: `Staged ${importType} batch ${staged.batch.batchId} (${periodStart} to ${periodEnd}) as VALIDATED. Draft data stays hidden from employees until approved and published.`,
+        text: `Staged ${importType} batch ${staged.batch.batchId} (${periodStart} to ${periodEnd}) as VALIDATED.${
+          autoLinkedCount > 0
+            ? ` Also linked verified Sales IDs to ${autoLinkedCount} Employee Master record(s).`
+            : ''
+        } Draft data stays hidden from employees until approved and published.`,
       });
       await onRefresh();
     } catch (err) {
@@ -636,6 +812,14 @@ export function ExcelImportWorkflow({
 
   const handlePublish = async () => {
     if (!stagedBatch) return;
+    const batchMonthKey = (stagedBatch.batch.periodEnd || stagedBatch.batch.businessDate || '').slice(0, 7);
+    if (isMonthPayrollLockedLocal(batchMonthKey, payrollLockSettings)) {
+      setFeedback({
+        type: 'err',
+        text: `Month ${batchMonthKey} is LOCKED by the Main Owner. Unlock it in Pro Insights & Loans before publishing incentives for this month.`,
+      });
+      return;
+    }
     setBusy(true);
     setStagedBatch((prev) =>
       prev ? { ...prev, batch: { ...prev.batch, status: 'PROCESSING' } } : prev,
@@ -704,31 +888,21 @@ export function ExcelImportWorkflow({
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3.5">
           <div>
             <h2 className="text-base font-semibold text-slate-900">
-              ERP Excel Import
+              Incentive Excel Upload
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Daily, Monthly &amp; Custom Period (.xlsx)
+              Each row uploads strictly by its <strong className="text-slate-700">Date</strong> column in the Excel template (.xlsx)
             </p>
           </div>
           <div className="inline-flex flex-wrap items-center gap-1.5 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80 self-start lg:self-auto">
-            <select
-              aria-label="Sample template period type"
-              value={sampleType}
-              onChange={(e) => setSampleType(e.target.value as ImportType)}
-              className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700"
-            >
-              <option value="DAILY">Daily Sample</option>
-              <option value="MONTHLY">Monthly Sample</option>
-              <option value="CUSTOM_PERIOD">Custom Sample</option>
-            </select>
             <button
               type="button"
               disabled={busy}
               onClick={handleDownloadSample}
               className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-60"
             >
-              <Download className="w-3.5 h-3.5" />
-              Sample .xlsx
+              <Download className="w-3.5 h-3.5 text-[#B8923A]" />
+              Download Template (.xlsx)
             </button>
 
             <label className="h-8 px-3.5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors">
@@ -783,12 +957,13 @@ export function ExcelImportWorkflow({
           </div>
           <h3 className="text-sm sm:text-base font-semibold text-[#0F1F3D]">
             {isDragging
-              ? 'Drop ERP Excel Workbook (.xlsx) Here'
-              : 'Drag & Drop ERP Incentive Sheet (.xlsx)'}
+              ? 'Drop Incentive Excel Workbook (.xlsx) Here'
+              : 'Drag & Drop Incentive Sheet (.xlsx)'}
           </h3>
           <p className="text-xs text-slate-500 mt-1.5 max-w-md mx-auto leading-relaxed">
-            Supports Daily, Monthly, and Custom Date Range ERP exports matched by Salesman No.
-            Duplicate &amp; overlap protection runs automatically before staging.
+            Fill the <strong className="text-slate-700">Date</strong> column in the Excel template
+            (single date or multiple dates in one sheet). Duplicate, overlap &amp; branch-transfer
+            consolidation run automatically before staging.
           </p>
           <div className="mt-5 flex flex-wrap items-center justify-center gap-2.5">
             <label className="h-9 px-4 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-2 cursor-pointer transition-colors shadow-xs">
@@ -808,10 +983,10 @@ export function ExcelImportWorkflow({
 
       {parsed && validation && (
         <>
-          {/* Report Period Selector when uploaded Excel has no Row 1 Date Banner (e.g. direct header Row 1 format) */}
-          {!hasBannerDates && !stagedBatch && (
+          {/* Simple Upload Date Fallback ONLY when uploaded legacy Excel has neither a Date column nor a Row 1 banner */}
+          {!hasDateColumn && !hasBannerDates && !stagedBatch && (
             <div
-              className={`p-5 rounded-xl border text-sm space-y-4 ${
+              className={`p-5 rounded-xl border text-sm space-y-3 ${
                 validation.period.valid
                   ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
                   : 'bg-amber-50 border-amber-300 text-amber-950'
@@ -826,141 +1001,47 @@ export function ExcelImportWorkflow({
                 <div className="space-y-1">
                   <p className="font-semibold">
                     {validation.period.valid
-                      ? `Report Period Confirmed: ${validation.period.importType} (${effectivePeriodStart} to ${effectivePeriodEnd})`
-                      : 'Select Report Period (No Date Banner Row Found in Excel)'}
+                      ? `Upload Date Confirmed: ${effectivePeriodStart}`
+                      : 'No Date Column Found in Excel — Select Upload Date'}
                   </p>
                   <p className="text-xs leading-relaxed">
                     {validation.period.valid
-                      ? 'Super Admin manually confirmed the report dates for this header-first Excel sheet. You can change the period below before staging.'
-                      : 'This Excel file starts directly with column headers (NAME, Sales Person Name, Salesman No...) without a Row 1 date banner. Select the exact Month, Day, or Custom Date Range below to unlock staging and publishing.'}
+                      ? 'All rows in this sheet will upload under the date below. For multi-date sheets, add a Date column in the template.'
+                      : 'This older Excel file does not include a Date column. Pick the upload date below or map your Date column in Step 2.'}
                   </p>
                 </div>
               </div>
 
               <div className="pl-8 flex flex-wrap items-end gap-3 text-xs">
                 <div>
-                  <label className="block font-medium mb-1">Import Period Type</label>
-                  <select
-                    value={manualPeriodMode}
-                    onChange={(e) => setManualPeriodMode(e.target.value as ImportType)}
-                    className="h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-slate-900"
-                  >
-                    <option value="MONTHLY">Full Month (Monthly Sheet)</option>
-                    <option value="DAILY">Single Day (Daily Sheet)</option>
-                    <option value="CUSTOM_PERIOD">Custom Date Range</option>
-                  </select>
+                  <label className="block font-medium mb-1">Upload Date</label>
+                  <input
+                    type="date"
+                    value={fallbackDate}
+                    onChange={(e) => setFallbackDate(e.target.value)}
+                    className="h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 font-mono"
+                  />
                 </div>
-
-                {manualPeriodMode === 'MONTHLY' && (
-                  <div>
-                    <label className="block font-medium mb-1">Select Month</label>
-                    <input
-                      type="month"
-                      value={manualMonthKey}
-                      onChange={(e) => setManualMonthKey(e.target.value)}
-                      className="h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 font-mono"
-                    />
-                  </div>
-                )}
-
-                {manualPeriodMode === 'DAILY' && (
-                  <div>
-                    <label className="block font-medium mb-1">Business Date</label>
-                    <input
-                      type="date"
-                      value={manualSingleDate}
-                      onChange={(e) => setManualSingleDate(e.target.value)}
-                      className="h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 font-mono"
-                    />
-                  </div>
-                )}
-
-                {manualPeriodMode === 'CUSTOM_PERIOD' && (
-                  <>
-                    <div>
-                      <label className="block font-medium mb-1">Start Date</label>
-                      <input
-                        type="date"
-                        value={manualCustomStart}
-                        onChange={(e) => setManualCustomStart(e.target.value)}
-                        className="h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 font-mono"
-                      />
-                    </div>
-                    <div>
-                      <label className="block font-medium mb-1">End Date</label>
-                      <input
-                        type="date"
-                        value={manualCustomEnd}
-                        onChange={(e) => setManualCustomEnd(e.target.value)}
-                        className="h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 font-mono"
-                      />
-                    </div>
-                  </>
-                )}
-
                 <button
                   type="button"
                   onClick={() => {
-                    if (manualPeriodMode === 'MONTHLY') {
-                      const match = manualMonthKey.match(/^(\d{4})-(\d{2})$/);
-                      if (!match) {
-                        setFeedback({ type: 'err', text: 'Please select a valid month (YYYY-MM).' });
-                        return;
-                      }
-                      const y = Number(match[1]);
-                      const m = Number(match[2]);
-                      const lastDay = String(getLastDayOfMonth(y, m)).padStart(2, '0');
-                      const start = `${match[1]}-${match[2]}-01`;
-                      const end = `${match[1]}-${match[2]}-${lastDay}`;
-                      setManualPeriodApplied({
-                        start,
-                        end,
-                        label: `Manual Monthly Selection: ${start} To ${end}`,
-                      });
-                      setFeedback({
-                        type: 'ok',
-                        text: `Applied MONTHLY period (${start} to ${end}). Review employees & totals below, then stage and publish.`,
-                      });
-                    } else if (manualPeriodMode === 'DAILY') {
-                      if (!/^\d{4}-\d{2}-\d{2}$/.test(manualSingleDate)) {
-                        setFeedback({ type: 'err', text: 'Please select a valid date.' });
-                        return;
-                      }
-                      setManualPeriodApplied({
-                        start: manualSingleDate,
-                        end: manualSingleDate,
-                        label: `Manual Daily Selection: ${manualSingleDate}`,
-                      });
-                      setFeedback({
-                        type: 'ok',
-                        text: `Applied DAILY period (${manualSingleDate}).`,
-                      });
-                    } else {
-                      if (
-                        !/^\d{4}-\d{2}-\d{2}$/.test(manualCustomStart) ||
-                        !/^\d{4}-\d{2}-\d{2}$/.test(manualCustomEnd) ||
-                        manualCustomStart > manualCustomEnd
-                      ) {
-                        setFeedback({
-                          type: 'err',
-                          text: 'Please select valid Start Date and End Date (Start Date must be on or before End Date).',
-                        });
-                        return;
-                      }
-                      setManualPeriodApplied({
-                        start: manualCustomStart,
-                        end: manualCustomEnd,
-                        label: `Manual Custom Selection: ${manualCustomStart} To ${manualCustomEnd}`,
-                      });
-                      setFeedback({
-                        type: 'ok',
-                        text: `Applied period (${manualCustomStart} to ${manualCustomEnd}).`,
-                      });
+                    if (!/^\d{4}-\d{2}-\d{2}$/.test(fallbackDate)) {
+                      setFeedback({ type: 'err', text: 'Please select a valid date.' });
+                      return;
                     }
+                    setManualPeriodApplied({
+                      start: fallbackDate,
+                      end: fallbackDate,
+                      label: fallbackDate,
+                    });
+                    setFeedback({
+                      type: 'ok',
+                      text: `Applied upload date (${fallbackDate}) for all rows in this sheet.`,
+                    });
                   }}
-                  className="h-9 px-4 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-medium cursor-pointer"
+                  className="h-9 px-4 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white font-medium cursor-pointer"
                 >
-                  Apply Report Period
+                  Apply Upload Date
                 </button>
               </div>
             </div>
@@ -1143,7 +1224,7 @@ export function ExcelImportWorkflow({
                 </p>
               </div>
               <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
-                <p className="text-[11px] text-slate-500">Total Sale Qty</p>
+                <p className="text-[11px] text-slate-500">Total Sale Quantity</p>
                 <p className="text-sm font-semibold font-mono tabular-nums text-slate-900 mt-0.5">
                   {formatQty(validation.metrics.totalSaleQty)}
                 </p>
@@ -1233,6 +1314,120 @@ export function ExcelImportWorkflow({
             </div>
           </section>
 
+          {/* Verify & Link Sales IDs to Employee Master (when Master has EMP ID only and Name matches Incentive Sheet) */}
+          {!stagedBatch && validation.pendingSaleIdLinks.length > 0 && (() => {
+            const selectedCount = validation.pendingSaleIdLinks.filter(
+              (c) => selectedSaleIdLinks[c.employeeId] !== false,
+            ).length;
+            const basisLabel: Record<string, string> = {
+              EXACT_EMP_ID: 'Exact Employee ID',
+              EXACT_NAME_AND_BRANCH: 'Name + Branch Match',
+              UNIQUE_NAME_TOKENS_AND_BRANCH: 'Name Words + Branch',
+              UNIQUE_EXACT_NAME: 'Unique Exact Name',
+            };
+            return (
+              <section className="bg-white border border-emerald-300 rounded-xl p-6 space-y-4">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Link2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        Verify &amp; Link Sales IDs to Employee Master ({validation.pendingSaleIdLinks.length}{' '}
+                        Employee{validation.pendingSaleIdLinks.length === 1 ? '' : 's'})
+                      </h3>
+                    </div>
+                    <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                      These employees exist in Employee Master with only an{' '}
+                      <strong className="font-mono text-slate-900">Employee ID</strong> (blank Sales ID) and
+                      uniquely matched this Incentive Sheet by Name. Checked rows will automatically save
+                      their <strong className="font-mono text-slate-900">Sales ID</strong> in Employee
+                      Master when you click <strong>Verify &amp; Link</strong> or{' '}
+                      <strong>Stage Batch</strong>.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={linkingSaleIds || busy || selectedCount === 0}
+                    onClick={handleLinkVerifiedSaleIds}
+                    className="h-10 px-4 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium inline-flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60"
+                  >
+                    {linkingSaleIds ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Link2 className="w-3.5 h-3.5" />
+                    )}
+                    <span>
+                      {linkingSaleIds
+                        ? 'Linking Sales IDs...'
+                        : `Verify & Link ${selectedCount} Sales ID${selectedCount === 1 ? '' : 's'} to Master`}
+                    </span>
+                  </button>
+                </div>
+
+                <div className="overflow-x-auto max-h-64 border border-slate-200 rounded-lg">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
+                      <tr>
+                        <th className="py-2 px-3 w-10 text-center">Link</th>
+                        <th className="py-2 px-3">Master Employee ID</th>
+                        <th className="py-2 px-3">Master Employee Name</th>
+                        <th className="py-2 px-3">Excel Employee Name</th>
+                        <th className="py-2 px-3">Branch</th>
+                        <th className="py-2 px-3">Detected Sales ID</th>
+                        <th className="py-2 px-3">Verification Match</th>
+                        <th className="py-2 px-3 text-right">Matching Rows</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {validation.pendingSaleIdLinks.map((item) => {
+                        const isChecked = selectedSaleIdLinks[item.employeeId] !== false;
+                        return (
+                          <tr key={item.employeeId} className="hover:bg-emerald-50/40">
+                            <td className="py-2 px-3 text-center">
+                              <input
+                                type="checkbox"
+                                aria-label={`Link Sale ID ${item.proposedSaleId} to ${item.employeeId}`}
+                                checked={isChecked}
+                                onChange={(e) =>
+                                  setSelectedSaleIdLinks((prev) => ({
+                                    ...prev,
+                                    [item.employeeId]: e.target.checked,
+                                  }))
+                                }
+                                className="w-4 h-4 rounded border-slate-300 text-emerald-700 focus:ring-emerald-600 cursor-pointer"
+                              />
+                            </td>
+                            <td className="py-2 px-3 font-mono font-semibold text-slate-900">
+                              {item.employeeId}
+                            </td>
+                            <td className="py-2 px-3 font-medium text-slate-800">
+                              {item.masterFullName}
+                            </td>
+                            <td className="py-2 px-3 text-slate-600">
+                              {item.excelEmployeeName || '—'}
+                            </td>
+                            <td className="py-2 px-3 text-slate-600">{item.branchName}</td>
+                            <td className="py-2 px-3">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 font-mono font-semibold">
+                                {item.proposedSaleId}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-slate-600">
+                              {basisLabel[item.matchBasis] || item.matchBasis}
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono text-slate-700">
+                              {item.rowCount}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            );
+          })()}
+
           {/* Super Admin Controlled New Employee Candidates & Missing Branches Onboarding */}
           {!stagedBatch &&
             (validation.missingBranches.length > 0 ||
@@ -1280,10 +1475,10 @@ export function ExcelImportWorkflow({
                     <table className="w-full text-left border-collapse text-xs">
                       <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
                         <tr>
-                          <th className="py-2 px-3">Salesman No</th>
-                          <th className="py-2 px-3">Sales Person Name (ERP)</th>
+                          <th className="py-2 px-3">Employee / Sales ID</th>
+                          <th className="py-2 px-3">Employee Name (Excel)</th>
                           <th className="py-2 px-3">Branch</th>
-                          <th className="py-2 px-3">Flag</th>
+                          <th className="py-2 px-3">Category Flag</th>
                           <th className="py-2 px-3 text-right">
                             Super Admin Initial Status Selection
                           </th>
@@ -1329,47 +1524,93 @@ export function ExcelImportWorkflow({
               </section>
             )}
 
-          {/* Explicit Branch Transfer Review Panel (NEVER Silent Overwrite) */}
-          {!stagedBatch && validation.branchTransfers.length > 0 && (
-            <section className="bg-white border border-amber-300 rounded-xl p-6 space-y-3">
-              <div className="flex items-center gap-2">
-                <ArrowRightLeft className="w-4 h-4 text-amber-700" />
-                <h3 className="text-sm font-semibold text-slate-900">
-                  Branch Transfer Review ({validation.branchTransfers.length})
-                </h3>
+          {/* Explicit Branch Transfer Review Panel + Automatic Previous-Branch Incentive Carry-Forward */}
+          {!stagedBatch && uniqueBranchTransfers.length > 0 && (
+            <section className="bg-white border border-amber-300 rounded-xl p-6 space-y-3.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <ArrowRightLeft className="w-4 h-4 text-amber-700 shrink-0" />
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    Branch Transfer &amp; Incentive Carry-Forward Review ({uniqueBranchTransfers.length}{' '}
+                    Employee{uniqueBranchTransfers.length === 1 ? '' : 's'})
+                  </h3>
+                </div>
+                {uniqueBranchTransfers.length > 1 && (
+                  <button
+                    type="button"
+                    disabled={approvingAllTransfers || approvingTransferId !== null}
+                    onClick={handleApproveAllTransfers}
+                    className="h-8 px-3.5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold whitespace-nowrap cursor-pointer disabled:opacity-60"
+                  >
+                    {approvingAllTransfers
+                      ? 'Approving & Consolidating...'
+                      : `Approve All (${uniqueBranchTransfers.length}) & Carry Forward Incentives`}
+                  </button>
+                )}
               </div>
-              <p className="text-xs text-slate-600">
-                Existing employees matched by <span className="font-mono">Salesman No</span>{' '}
-                appeared under a different branch in this Excel export. Branches are never
-                overwritten silently — Super Admin must explicitly approve each transfer.
+              <p className="text-xs text-slate-600 leading-relaxed">
+                These employees appeared under a new current branch in your uploaded template.
+                Approving a transfer updates their branch AND automatically{' '}
+                <strong className="text-slate-900">
+                  carries forward their previous branch&apos;s published incentives into their new
+                  current branch
+                </strong>{' '}
+                so branch &amp; monthly totals reflect Previous + New branch earnings seamlessly.
               </p>
               <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg">
-                {validation.branchTransfers.map((tr) => (
+                {uniqueBranchTransfers.map((tr) => (
                   <div
-                    key={`${tr.employeeId}_${tr.rowNumber}`}
-                    className="p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                    key={`${tr.employeeId}_${tr.excelBranchId}`}
+                    className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
                   >
-                    <div>
-                      <span className="font-mono font-semibold text-slate-900">
-                        {tr.employeeId}
-                      </span>{' '}
-                      · <span className="text-slate-800">{tr.employeeName}</span>
-                      <div className="text-slate-500 mt-0.5">
-                        Master: <strong className="text-slate-700">{tr.masterBranchName}</strong> →
-                        Excel: <strong className="text-amber-800">{tr.excelBranchName}</strong>
+                    <div className="space-y-1">
+                      <div>
+                        <span className="font-mono font-semibold text-slate-900">
+                          {tr.employeeId}
+                        </span>{' '}
+                        · <span className="font-medium text-slate-800">{tr.employeeName}</span>
+                        {tr.rowCount > 1 && (
+                          <span className="ml-2 text-[11px] text-slate-500">
+                            ({tr.rowCount} rows in file)
+                          </span>
+                        )}
                       </div>
+                      <div className="text-slate-600">
+                        Previous Branch:{' '}
+                        <strong className="text-slate-800">{tr.masterBranchName}</strong> → Current
+                        Branch (Template):{' '}
+                        <strong className="text-[#0F1F3D]">{tr.excelBranchName}</strong>
+                      </div>
+                      {tr.carryForwardCount > 0 ? (
+                        <div className="text-[11px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200/80 rounded-md px-2.5 py-1 inline-block">
+                          Will carry forward{' '}
+                          <strong className="font-mono">
+                            {formatINRFromPaise(tr.carryForwardPaise)}
+                          </strong>{' '}
+                          ({tr.carryForwardCount} record{tr.carryForwardCount === 1 ? '' : 's'} in{' '}
+                          {tr.carryForwardMonths.join(', ')}) from {tr.masterBranchName} into{' '}
+                          {tr.excelBranchName}
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-slate-500">
+                          No prior published incentives in {tr.masterBranchName} for the uploaded
+                          month(s) — will update branch to {tr.excelBranchName}.
+                        </div>
+                      )}
                     </div>
                     <button
                       type="button"
-                      disabled={approvingTransferId === tr.employeeId}
+                      disabled={approvingAllTransfers || approvingTransferId === tr.employeeId}
                       onClick={() =>
                         handleApproveTransfer(tr.employeeId, tr.excelBranchId, tr.excelBranchName)
                       }
-                      className="h-8 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-medium whitespace-nowrap cursor-pointer disabled:opacity-60"
+                      className="h-8 px-3.5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white font-medium whitespace-nowrap cursor-pointer disabled:opacity-60 shrink-0"
                     >
                       {approvingTransferId === tr.employeeId
-                        ? 'Approving...'
-                        : 'Approve Branch Transfer'}
+                        ? 'Transferring...'
+                        : tr.carryForwardCount > 0
+                          ? 'Approve & Carry Forward'
+                          : 'Approve Transfer'}
                     </button>
                   </div>
                 ))}
@@ -1381,18 +1622,20 @@ export function ExcelImportWorkflow({
           <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
             <div>
               <h3 className="text-sm font-semibold text-slate-900">
-                2. ERP Column Mapping Verification (12 Columns: Identity + Sale Amt + Sale Qty + Incentive)
+                2. Column Mapping Verification (Date + Employee ID / Sales ID + Sale Amount + Sale Quantity + Incentive)
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Auto-mapped positionally from your Excel headers. Leave Sale Amt / Sale Qty blank if not present in an older sheet.
+                Auto-mapped from your Excel headers. You can fill data in <strong>either Employee ID or Sales ID (or both)</strong> in any row — the system automatically links to the employee&apos;s Master record.
               </p>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
               {(
                 [
-                  ['branchCode', 'Branch Column (NAME)'],
-                  ['employeeId', 'Employee ID (Salesman No)'],
-                  ['employeeName', 'Employee Name (Sales Person Name)'],
+                  ['businessDate', 'Date Column'],
+                  ['branchCode', 'Branch Name Column'],
+                  ['employeeId', 'Employee ID (or Sales ID)'],
+                  ['saleId', 'Sales ID Column (Optional)'],
+                  ['employeeName', 'Employee Name'],
                 ] as Array<[keyof ExcelColumnMapping, string]>
               ).map(([field, label]) => (
                 <div key={field}>
@@ -1445,7 +1688,7 @@ export function ExcelImportWorkflow({
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="block text-[11px] font-medium text-slate-500 mb-1">
-                        Sale Amt (Optional)
+                        Sale Amount (Optional)
                       </label>
                       <select
                         disabled={Boolean(stagedBatch)}
@@ -1465,7 +1708,7 @@ export function ExcelImportWorkflow({
                     </div>
                     <div>
                       <label className="block text-[11px] font-medium text-slate-500 mb-1">
-                        Sale Qty (Optional)
+                        Sale Quantity (Optional)
                       </label>
                       <select
                         disabled={Boolean(stagedBatch)}
@@ -1574,14 +1817,14 @@ export function ExcelImportWorkflow({
                 <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-600">
                   <tr>
                     <th className="py-2.5 px-3">Row</th>
-                    <th className="py-2.5 px-3">Type / Period</th>
-                    <th className="py-2.5 px-3">Salesman No / Name</th>
+                    <th className="py-2.5 px-3">Date</th>
+                    <th className="py-2.5 px-3">Employee ID &amp; Name</th>
                     <th className="py-2.5 px-3">Branch</th>
                     <th className="py-2.5 px-3 text-right">New Items Sale</th>
                     <th className="py-2.5 px-3 text-right">Old Items Sale</th>
                     <th className="py-2.5 px-3 text-right">Other Items Sale</th>
-                    <th className="py-2.5 px-3 text-right">Total Sale / Qty</th>
-                    <th className="py-2.5 px-3 text-right">Total Inc</th>
+                    <th className="py-2.5 px-3 text-right">Total Sale Amount &amp; Quantity</th>
+                    <th className="py-2.5 px-3 text-right">Total Incentive</th>
                     <th className="py-2.5 px-3">Validation / Resolution</th>
                   </tr>
                 </thead>
@@ -1590,18 +1833,36 @@ export function ExcelImportWorkflow({
                     <tr key={row.rowNumber} className="hover:bg-slate-50/70">
                       <td className="py-2.5 px-3 font-mono text-slate-500">{row.rowNumber}</td>
                       <td className="py-2.5 px-3 font-mono tabular-nums text-slate-800 whitespace-nowrap">
-                        <div className="text-[11px] font-semibold text-[#0F1F3D]">{row.importType}</div>
-                        <div className="text-[11px] text-slate-500">
-                          {row.importType === 'DAILY'
-                            ? row.periodStart || '—'
-                            : `${row.periodStart} → ${row.periodEnd}`}
-                        </div>
+                        {row.importType === 'DAILY' ? (
+                          <div className="text-xs font-semibold text-[#0F1F3D]">
+                            {row.periodStart ? formatShortDate(row.periodStart) : 'Missing'}
+                          </div>
+                        ) : (
+                          <>
+                            <div className="text-[11px] font-semibold text-[#0F1F3D]">
+                              {row.importType}
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {row.periodStart} → {row.periodEnd}
+                            </div>
+                          </>
+                        )}
                       </td>
                       <td className="py-2.5 px-3">
-                        <div className="font-mono font-medium text-slate-900">
-                          {row.employeeId || '—'}
+                        <div className="font-mono font-medium text-slate-900 flex flex-wrap items-center gap-1.5">
+                          <span>{row.employeeId || '—'}</span>
+                          {row.matchedSaleId && (
+                            <span className="text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
+                              Sale ID: {row.matchedSaleId}
+                            </span>
+                          )}
+                          {row.matchedViaSaleIdLink && (
+                            <span className="text-[10px] font-sans font-semibold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
+                              Auto-Link
+                            </span>
+                          )}
                           {row.isSmplCandidate && (
-                            <span className="ml-1.5 text-[10px] font-sans font-semibold text-amber-800">
+                            <span className="text-[10px] font-sans font-semibold text-amber-800">
                               SMPL
                             </span>
                           )}
@@ -1744,6 +2005,58 @@ export function ExcelImportWorkflow({
               </table>
             </div>
 
+            {/* Pre-Publish Smart Audit & Anomaly Guard (Feature #2) */}
+            {!stagedBatch &&
+              (() => {
+                const anomalies = detectIncentiveImportAnomalies({
+                  validatedRows: validation.rows,
+                  publishedIncentives,
+                });
+                if (anomalies.length === 0) return null;
+                return (
+                  <div className="mx-6 my-4 p-4 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-950 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="font-bold flex items-center gap-1.5 text-amber-900">
+                        <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                        Pre-Publish Smart Audit Guard: {anomalies.length} variance / anomaly flag(s)
+                        detected
+                      </p>
+                      <span className="text-[11px] font-medium text-amber-800">
+                        Informational check — verify before staging &amp; publishing
+                      </span>
+                    </div>
+                    <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
+                      {anomalies.slice(0, 15).map((a) => (
+                        <div
+                          key={a.id}
+                          className="flex items-start justify-between gap-2 bg-white/85 border border-amber-200 rounded-lg px-2.5 py-1.5"
+                        >
+                          <div className="min-w-0">
+                            <span
+                              className={`inline-block text-[10px] font-bold px-1.5 py-0.5 rounded mr-1.5 ${
+                                a.severity === 'HIGH'
+                                  ? 'bg-red-100 text-red-800'
+                                  : 'bg-amber-100 text-amber-900'
+                              }`}
+                            >
+                              {a.severity}
+                            </span>
+                            <strong className="text-[#0F1F3D]">
+                              {a.employeeName} ({a.employeeId})
+                            </strong>{' '}
+                            — <span className="font-semibold">{a.title}</span>
+                            <p className="text-[11px] text-slate-600 mt-0.5">{a.detail}</p>
+                          </div>
+                          <span className="text-[10px] text-slate-500 shrink-0">
+                            {a.branchName}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
             {/* Stage -> Approve -> Publish / Reject Bar */}
             <div className="p-6 bg-slate-50 border-t border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
               <div className="text-xs text-slate-600">
@@ -1812,16 +2125,34 @@ export function ExcelImportWorkflow({
                       >
                         Reject Batch
                       </button>
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={handlePublish}
-                        className="h-10 px-5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-sm font-medium disabled:opacity-60 cursor-pointer"
-                      >
-                        {stagedBatch.batch.status === 'FAILED'
-                          ? 'Retry Publish'
-                          : 'Publish Approved Incentives'}
-                      </button>
+                      {(() => {
+                        const batchMonthKey = (
+                          stagedBatch.batch.periodEnd ||
+                          stagedBatch.batch.businessDate ||
+                          ''
+                        ).slice(0, 7);
+                        const batchLocked = isMonthPayrollLockedLocal(
+                          batchMonthKey,
+                          payrollLockSettings,
+                        );
+                        return (
+                          <button
+                            type="button"
+                            disabled={busy || batchLocked}
+                            onClick={handlePublish}
+                            className="h-10 px-5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-sm font-medium inline-flex items-center gap-1.5 disabled:opacity-60 cursor-pointer"
+                          >
+                            {batchLocked && <Lock className="w-4 h-4 text-[#DFC27D]" />}
+                            <span>
+                              {batchLocked
+                                ? `Month ${batchMonthKey} Locked`
+                                : stagedBatch.batch.status === 'FAILED'
+                                  ? 'Retry Publish'
+                                  : 'Publish Approved Incentives'}
+                            </span>
+                          </button>
+                        );
+                      })()}
                     </>
                   )}
 

@@ -48,6 +48,7 @@ export function resolveCanonicalDepartment(raw?: string | null): OfficialDepartm
   }
   if (
     compact.includes('ladies') ||
+    compact.includes('leadies') ||
     compact.includes('ledies') ||
     compact.includes('lady') ||
     compact.includes('women') ||
@@ -73,6 +74,9 @@ export function resolveCanonicalDepartment(raw?: string | null): OfficialDepartm
     compact.includes('nonapparel') ||
     compact.includes('nonaparel') ||
     compact.includes('nonapp') ||
+    compact.includes('hosiery') ||
+    compact.includes('hosiary') ||
+    compact.includes('hoisery') ||
     compact.includes('homefurnish') ||
     compact.includes('accessor') ||
     compact.includes('handloom')
@@ -133,6 +137,7 @@ const NON_SALES_ALIASES: Record<string, string> = {
   storeoperations: 'Store Operations',
   mgmt: 'Management',
   management: 'Management',
+  manager: 'Management',
   purchase: 'Purchase',
   procurement: 'Purchase',
   inventory: 'Inventory & Stock',
@@ -142,7 +147,9 @@ const NON_SALES_ALIASES: Record<string, string> = {
   dispatch: 'Warehouse & Dispatch',
   logistics: 'Warehouse & Dispatch',
   security: 'Security',
+  hk: 'Housekeeping',
   housekeeping: 'Housekeeping',
+  reception: 'Reception',
   tailoring: 'Tailoring & Alteration',
   alteration: 'Tailoring & Alteration',
   marketing: 'Marketing',
@@ -182,6 +189,24 @@ export function isMonthVisibleToEmployees(
   return Array.isArray(settings.visibleMonths) && settings.visibleMonths.includes(monthKey);
 }
 
+/**
+ * Pure visibility predicate for Payment / Salary Slips.
+ * Falls back to legacy `mode` / `visibleMonths` if independent salary slip visibility has not yet been saved.
+ */
+export function isSalarySlipMonthVisibleToEmployees(
+  monthKey: string,
+  settings: PortalVisibilitySettings | null | undefined,
+): boolean {
+  if (!monthKey) return false;
+  if (!settings) return true;
+  const effectiveMode = settings.salarySlipMode ?? settings.mode;
+  if (effectiveMode === 'ALL') return true;
+  const allowedMonths = Array.isArray(settings.salarySlipVisibleMonths)
+    ? settings.salarySlipVisibleMonths
+    : settings.visibleMonths || [];
+  return allowedMonths.includes(monthKey);
+}
+
 export function filterVisibleMonths(
   monthKeys: string[],
   settings: PortalVisibilitySettings | null | undefined,
@@ -189,6 +214,13 @@ export function filterVisibleMonths(
   if (!settings || settings.mode === 'ALL') return [...monthKeys];
   const allowed = new Set(settings.visibleMonths || []);
   return monthKeys.filter((m) => allowed.has(m));
+}
+
+export function filterVisibleSalarySlipMonths(
+  monthKeys: string[],
+  settings: PortalVisibilitySettings | null | undefined,
+): string[] {
+  return monthKeys.filter((m) => isSalarySlipMonthVisibleToEmployees(m, settings));
 }
 
 export function buildDepartmentLeaderboardId(monthKey: string, departmentId: DepartmentId): string {
@@ -480,7 +512,7 @@ export function parseBulkDepartmentCsvText(
 }
 
 export function buildDepartmentCsvTemplate(employees: Employee[]): string {
-  const header = 'Salesman No,Employee Name,Branch Name,Department (Saree Dept. / Ladies Wear Dept. / Kids Wear Dept. / Mens Wear Dept. / Non Apparels Dept.)';
+  const header = 'Employee ID,Employee Name,Branch Name,Department (Saree Dept. / Ladies Wear Dept. / Kids Wear Dept. / Mens Wear Dept. / Non Apparels Dept.)';
   const sorted = [...employees]
     .filter((e) => e.status === 'ACTIVE')
     .sort((a, b) => a.branchName.localeCompare(b.branchName) || a.fullName.localeCompare(b.fullName));
