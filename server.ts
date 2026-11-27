@@ -21,6 +21,7 @@ import {
   parseExcelBuffer,
 } from './server/excelEngine.ts';
 import {
+  ElevenLabsSpeechError,
   getVoiceCapabilitiesStatus,
   runMarathiVoiceTurn,
   synthesizeMarathiSpeech,
@@ -320,6 +321,7 @@ const voiceConverseSchema = z.object({
 
 const voiceTtsSchema = z.object({
   text: z.string().min(1).max(900),
+  forceRefresh: z.boolean().optional(),
 });
 
 export function createApiRouter(authMiddleware = verifyFirebaseBearerToken) {
@@ -640,12 +642,22 @@ export function createApiRouter(authMiddleware = verifyFirebaseBearerToken) {
     async (req: AuthenticatedRequest, res) => {
       try {
         const parsed = voiceTtsSchema.parse(req.body ?? {});
-        const result = await synthesizeMarathiSpeech(parsed.text);
+        const result = await synthesizeMarathiSpeech(parsed.text, {
+          forceRefresh: parsed.forceRefresh,
+        });
         res.json(result);
       } catch (err) {
+        if (err instanceof ElevenLabsSpeechError) {
+          res.status(503).json({
+            error: err.message,
+            elevenLabsStatus: err.reason,
+            elevenLabsOnly: true,
+          });
+          return;
+        }
         const message =
-          err instanceof Error ? err.message : 'Speech synthesis unavailable.';
-        res.status(400).json({ error: message });
+          err instanceof Error ? err.message : 'ElevenLabs speech synthesis unavailable.';
+        res.status(503).json({ error: message, elevenLabsOnly: true });
       }
     },
   );

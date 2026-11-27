@@ -7,3 +7,6 @@ coverage/
 .env*
 !.env.example
 .backup_pre_upgrade/
+.backup_phase2c/
+DRAFT_firestore.rules
+

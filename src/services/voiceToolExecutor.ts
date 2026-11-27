@@ -2931,7 +2931,7 @@ export async function executeVoiceToolCall(
           hasPhone: item.hasPhone,
           directReplyMr: item.hasPhone
             ? `${exact.fullName} यांची ${item.monthLabel} ची ${docLabelMr} (${item.amountLabel}) WhatsApp वर पाठवण्यासाठी तयार आहे. खालील हिरव्या 'WhatsApp वर पाठवा' बटणावर क्लिक करा.`
-            : `${exact.fullName} यांची ${item.monthLabel} ची ${docLabelMr} तयार केली आहे, पण त्यांचा मोबाईल नंबर सेव्ह नाही. तुम्ही खालील बटणावरून नंबर निवडून पाठवू शकता किंवा त्यांचा नंबर सांगा म्हणजे मी सेव्ह करतो.`,
+            : `${exact.fullName} यांची ${item.monthLabel} ची ${docLabelMr} तयार केली आहे, पण त्यांचा मोबाईल नंबर सेव्ह नाही. तुम्ही खालील बटणावरून नंबर निवडून पाठवू शकता किंवा त्यांचा नंबर सांगा म्हणजे मी सेव्ह करते.`,
         };
       }
 

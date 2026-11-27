@@ -5820,13 +5820,11 @@ test('82. Voice service uses valid ThinkingLevel.LOW on gemini-4-hydrogen and ma
     'voiceService.ts must pin preferredModel across multi-turn tool loops and flatten history on cross-model failover',
   );
   assert.ok(
-    voiceSvcText.includes("apiVersion: 'v1beta'") &&
-      voiceSvcText.includes('getGeminiBetaClient()') &&
-      voiceSvcText.includes("GEMINI_TTS_FALLBACK_MODEL = 'gemini-3.8-flash-tts'") &&
-      voiceSvcText.includes('isPlausibleElevenLabsApiKey') &&
-      voiceSvcText.includes('synthesizeViaGoogleNeuralMarathiTts') &&
+    voiceSvcText.includes('isPlausibleElevenLabsApiKey') &&
+      voiceSvcText.includes('ElevenLabsSpeechError') &&
+      !voiceSvcText.includes('synthesizeViaGoogleNeuralMarathiTts') &&
       !voiceSvcText.includes("language_code = 'mr'"),
-    'Gemini 3.8 TTS must use apiVersion: v1beta with neural Marathi MP3 fallback and validate ElevenLabs sk_ API keys',
+    'voiceService.ts must run in strict ElevenLabs-only TTS mode and validate ElevenLabs sk_ API keys',
   );
 
   // 2. Verify Devanagari transliteration & phonetic employee matching ("शोभा लोंढे" -> SHOBHA POPAT LONDHE)
@@ -6108,6 +6106,263 @@ test('84. buildSanitizedSalarySlipForRules strips unknown keys, normalizes legac
   assert.equal(clean.totalDeductionsPaise, 200_000);
   assert.equal(clean.netPayablePaise, 1_720_000);
 });
+
+// =========================================================================
+// TEST 85: ElevenLabs-First Marathi Engine (eleven_v3), Custom Voice ID & Render.com Readiness
+// =========================================================================
+test('85. ElevenLabs voice engine validates sk_ keys, uses eleven_v3 with language_code mr, preserves custom Voice ID, and declares Render.com secrets', async () => {
+  const {
+    isPlausibleElevenLabsApiKey,
+    sanitizeElevenLabsVoiceId,
+    resolveElevenLabsModelChain,
+    resolveElevenLabsConfig,
+    buildElevenLabsRequestPayload,
+    resetElevenLabsRuntimeStateForTest,
+  } = await import('../server/voiceService.ts');
+
+  resetElevenLabsRuntimeStateForTest();
+
+  // 1. Key format validation: accept real sk_ keys & legacy 32-hex, reject Voice IDs / Key IDs
+  const mockValidKey = ['sk', 'unit', 'mock', '0123456789abcdef01234567'].join('_');
+  assert.equal(isPlausibleElevenLabsApiKey(mockValidKey), true);
+  assert.equal(isPlausibleElevenLabsApiKey('pNInz6obpgDQGcFmaJgB'), false);
+  assert.equal(isPlausibleElevenLabsApiKey(''), false);
+
+  // 2. Custom Voice ID preservation & sanitization (default is Free-Tier Premade Female Sarah)
+  const customVoice = sanitizeElevenLabsVoiceId('CustomVoiceId1234567');
+  assert.equal(customVoice.voiceId, 'CustomVoiceId1234567');
+  assert.equal(customVoice.isCustom, true);
+
+  const fallbackVoice = sanitizeElevenLabsVoiceId('   ');
+  assert.equal(fallbackVoice.voiceId, 'EXAVITQu4vr4xnSDxMaL');
+  assert.equal(fallbackVoice.isCustom, false);
+
+  // 3. Model priority chain defaults to eleven_v3 (native Marathi) -> eleven_flash_v2_5 -> eleven_multilingual_v2
+  assert.deepEqual(resolveElevenLabsModelChain(undefined), [
+    'eleven_v3',
+    'eleven_flash_v2_5',
+    'eleven_multilingual_v2',
+  ]);
+  assert.deepEqual(resolveElevenLabsModelChain('eleven_multilingual_v2'), [
+    'eleven_multilingual_v2',
+    'eleven_v3',
+    'eleven_flash_v2_5',
+  ]);
+
+  // 4. Payload rules: eleven_v3 includes language_code: 'mr'; flash/multilingual_v2 omit language_code
+  const v3Payload = buildElevenLabsRequestPayload({
+    text: 'नमस्कार!',
+    modelId: 'eleven_v3',
+  });
+  assert.equal(v3Payload.model_id, 'eleven_v3');
+  assert.equal(v3Payload.language_code, 'mr');
+
+  const flashPayload = buildElevenLabsRequestPayload({
+    text: 'नमस्कार!',
+    modelId: 'eleven_flash_v2_5',
+  });
+  assert.equal(flashPayload.model_id, 'eleven_flash_v2_5');
+  assert.equal('language_code' in flashPayload, false);
+
+  // 5. Status resolution for missing, invalid format, and ready keys
+  assert.equal(resolveElevenLabsConfig({}).status, 'missing_key');
+  assert.equal(
+    resolveElevenLabsConfig({ ELEVENLABS_API_KEY: 'pNInz6obpgDQGcFmaJgB' }).status,
+    'invalid_key_format',
+  );
+  const readyCfg = resolveElevenLabsConfig({
+    ELEVENLABS_API_KEY: ['sk', 'unit', 'ready', 'abcdefghijklmnopqrst1234'].join('_'),
+    ELEVENLABS_VOICE_ID: 'CustomMarathiVoice123',
+  });
+  assert.equal(readyCfg.status, 'ready');
+  assert.equal(readyCfg.voiceId, 'CustomMarathiVoice123');
+  assert.equal(readyCfg.voiceIdIsCustom, true);
+  assert.equal(readyCfg.primaryModelId, 'eleven_v3');
+
+  // 6. Render.com Blueprint declares GEMINI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID safely with sync: false
+  const renderYaml = fs.readFileSync(path.resolve(process.cwd(), 'render.yaml'), 'utf-8');
+  assert.ok(renderYaml.includes('key: GEMINI_API_KEY'));
+  assert.ok(renderYaml.includes('key: ELEVENLABS_API_KEY'));
+  assert.ok(renderYaml.includes('key: ELEVENLABS_VOICE_ID'));
+  assert.ok(renderYaml.includes('key: ELEVENLABS_MODEL_ID'));
+  assert.ok(renderYaml.includes('sync: false'));
+  assert.ok(renderYaml.includes('eleven_v3'));
+});
+
+// =========================================================================
+// TEST 86: ElevenLabs Free Plan HTTP 402 Classification & Auto-Switch to Premade Female Voice (Sarah)
+// =========================================================================
+test('86. ElevenLabs classifies HTTP 402 Library Voice restriction accurately and auto-switches to Premade Female Sarah without false quota cooldown', async () => {
+  const {
+    classifyElevenLabsHttpError,
+    synthesizeMarathiSpeech,
+    getVoiceCapabilitiesStatus,
+    resetElevenLabsRuntimeStateForTest,
+  } = await import('../server/voiceService.ts');
+
+  // 1. Error classifier accuracy
+  assert.equal(
+    classifyElevenLabsHttpError(
+      402,
+      JSON.stringify({
+        detail: {
+          status: 'payment_required',
+          message: 'Free users cannot use library voices via the API. Please upgrade your subscription.',
+        },
+      }),
+    ),
+    'library_voice_paid_only',
+  );
+  assert.equal(
+    classifyElevenLabsHttpError(
+      401,
+      JSON.stringify({
+        detail: {
+          status: 'detected_unusual_activity',
+          message: 'Unusual activity detected. Free Tier usage disabled.',
+        },
+      }),
+    ),
+    'free_tier_ip_blocked',
+  );
+  assert.equal(
+    classifyElevenLabsHttpError(
+      401,
+      JSON.stringify({
+        detail: { status: 'quota_exceeded', message: 'This request exceeds your remaining quota' },
+      }),
+    ),
+    'quota_exceeded',
+  );
+  assert.equal(
+    classifyElevenLabsHttpError(
+      401,
+      JSON.stringify({ detail: { code: 'invalid_api_key', message: 'Invalid API key' } }),
+    ),
+    'auth_rejected',
+  );
+
+  // 2. Live auto-switch test: custom Library voice returns 402 -> immediately switches to Sarah (EXAVITQu4vr4xnSDxMaL)
+  resetElevenLabsRuntimeStateForTest();
+  const prevKey = process.env.ELEVENLABS_API_KEY;
+  const prevVoice = process.env.ELEVENLABS_VOICE_ID;
+  const prevFetch = globalThis.fetch;
+
+  const calledUrls: string[] = [];
+  process.env.ELEVENLABS_API_KEY = ['sk', 'unit', 'freetier', '1234567890abcdefghij'].join('_');
+  process.env.ELEVENLABS_VOICE_ID = 'LibraryVoicePaidOnly12';
+
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    calledUrls.push(url);
+    if (url.includes('LibraryVoicePaidOnly12')) {
+      return new Response(
+        JSON.stringify({
+          detail: {
+            status: 'payment_required',
+            message: 'Free users cannot use library voices via the API.',
+          },
+        }),
+        { status: 402, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    if (url.includes('EXAVITQu4vr4xnSDxMaL')) {
+      return new Response(new Uint8Array([0x49, 0x44, 0x33, 0x03, 0x00, 0x00]), {
+        status: 200,
+        headers: { 'Content-Type': 'audio/mpeg' },
+      });
+    }
+    return new Response('unexpected', { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    const result = await synthesizeMarathiSpeech('नमस्कार मुक्ताई!', { forceRefresh: true });
+    assert.equal(result.provider, 'elevenlabs');
+    assert.equal(result.voiceId, 'EXAVITQu4vr4xnSDxMaL');
+    assert.equal(result.voiceLabel, 'Sarah');
+    assert.equal(result.usedPremadeFallback, true);
+    assert.equal(calledUrls.length, 2);
+    assert.ok(calledUrls[0].includes('LibraryVoicePaidOnly12'));
+    assert.ok(calledUrls[1].includes('EXAVITQu4vr4xnSDxMaL'));
+
+    const status = getVoiceCapabilitiesStatus();
+    assert.equal(status.elevenLabsConfigured, true);
+    assert.equal(status.elevenLabsStatus, 'premade_fallback_active');
+    assert.equal(status.activeVoiceLabel, 'Sarah');
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevKey === undefined) delete process.env.ELEVENLABS_API_KEY;
+    else process.env.ELEVENLABS_API_KEY = prevKey;
+    if (prevVoice === undefined) delete process.env.ELEVENLABS_VOICE_ID;
+    else process.env.ELEVENLABS_VOICE_ID = prevVoice;
+    resetElevenLabsRuntimeStateForTest();
+  }
+});
+
+// =========================================================================
+// TEST 87: Strict ElevenLabs-Only Audio (Zero Robotic Fallback) & 100% Feminine Marathi Persona
+// =========================================================================
+test('87. Voice assistant enforces strict ElevenLabs-only audio (zero speechSynthesis/robotic fallback) and 100% feminine Marathi persona', async () => {
+  const speechClientSrc = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/lib/voiceSpeechClient.ts'),
+    'utf-8',
+  );
+  const assistantUiSrc = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/admin/MarathiVoiceAssistant.tsx'),
+    'utf-8',
+  );
+  const voiceToolsSrc = fs.readFileSync(
+    path.resolve(process.cwd(), 'server/voiceTools.ts'),
+    'utf-8',
+  );
+  const voiceExecSrc = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/services/voiceToolExecutor.ts'),
+    'utf-8',
+  );
+
+  // 1. Zero browser speechSynthesis / SpeechSynthesisUtterance robotic fallback anywhere
+  assert.equal(speechClientSrc.includes('speechSynthesis'), false);
+  assert.equal(speechClientSrc.includes('SpeechSynthesisUtterance'), false);
+  assert.equal(assistantUiSrc.includes('window.speechSynthesis'), false);
+
+  // 2. Strict feminine Marathi persona ("मी तुमची काय मदत करू शकते?", zero masculine "अपलोड करतो"/"सेव्ह करतो")
+  assert.ok(assistantUiSrc.includes('मी तुमची काय मदत करू शकते?'));
+  assert.ok(voiceToolsSrc.includes('मी तुमची काय मदत करू शकते?'));
+  assert.ok(voiceToolsSrc.includes('मी फाईल लगेच अपलोड करते.'));
+  assert.equal(voiceToolsSrc.includes('फाईल लगेच अपलोड करतो'), false);
+  assert.ok(voiceExecSrc.includes('मी सेव्ह करते.'));
+  assert.equal(voiceExecSrc.includes('मी सेव्ह करतो'), false);
+
+  // 3. Server throws ElevenLabsSpeechError instead of falling back to Gemini/Google TTS when key is missing
+  const {
+    synthesizeMarathiSpeech,
+    ElevenLabsSpeechError,
+    getVoiceCapabilitiesStatus,
+    resetElevenLabsRuntimeStateForTest,
+  } = await import('../server/voiceService.ts');
+
+  resetElevenLabsRuntimeStateForTest();
+  const prevKey = process.env.ELEVENLABS_API_KEY;
+  delete process.env.ELEVENLABS_API_KEY;
+  try {
+    const caps = getVoiceCapabilitiesStatus();
+    assert.equal(caps.elevenLabsOnly, true);
+    assert.equal(caps.ttsPrimaryProvider, 'elevenlabs');
+
+    await assert.rejects(
+      async () => {
+        await synthesizeMarathiSpeech('नमस्कार मुक्ताई!', { forceRefresh: true });
+      },
+      (err: unknown) =>
+        err instanceof ElevenLabsSpeechError && err.reason === 'missing_key',
+    );
+  } finally {
+    if (prevKey !== undefined) process.env.ELEVENLABS_API_KEY = prevKey;
+    resetElevenLabsRuntimeStateForTest();
+  }
+});
+
+
 
 
 

@@ -8,26 +8,235 @@ import {
 const GEMINI_CONVERSE_MODEL = 'gemini-4-hydrogen';
 const GEMINI_CONVERSE_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
 const GEMINI_TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
-const GEMINI_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
-const GEMINI_TTS_FALLBACK_MODEL = 'gemini-3.8-flash-tts';
-const DEFAULT_ELEVENLABS_VOICE_ID = 'pNInz6obpgDQGcFmaJgB';
+const DEFAULT_ELEVENLABS_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'; // Sarah — ElevenLabs Free-Tier Premade Female Voice
+const DEFAULT_ELEVENLABS_MODEL_ID: ElevenLabsModelId = 'eleven_v3';
+
+export const FREE_PREMADE_FEMALE_VOICES: ReadonlyArray<{ voiceId: string; label: string }> = [
+  { voiceId: 'EXAVITQu4vr4xnSDxMaL', label: 'Sarah' },
+  { voiceId: '21m00Tcm4TlvDq8ikWAM', label: 'Rachel' },
+  { voiceId: 'Xb7hH8MSUJpSbSDYk0k2', label: 'Alice' },
+  { voiceId: 'FGY2WhTYpPnrIDTdsKH5', label: 'Laura' },
+];
+
+export type ElevenLabsModelId = 'eleven_v3' | 'eleven_flash_v2_5' | 'eleven_multilingual_v2';
+export type ElevenLabsHealthStatus =
+  | 'ready'
+  | 'premade_fallback_active'
+  | 'missing_key'
+  | 'invalid_key_format'
+  | 'auth_rejected'
+  | 'free_tier_ip_blocked'
+  | 'quota_cooldown';
+export type ElevenLabsFallbackReason =
+  | 'missing_key'
+  | 'invalid_key_format'
+  | 'auth_rejected'
+  | 'free_tier_ip_blocked'
+  | 'quota_cooldown'
+  | 'voice_error';
+export type ElevenLabsHttpErrorKind =
+  | 'library_voice_paid_only'
+  | 'free_tier_ip_blocked'
+  | 'auth_rejected'
+  | 'quota_exceeded'
+  | 'voice_error';
+
+const ALLOWED_ELEVENLABS_MODELS: readonly ElevenLabsModelId[] = [
+  'eleven_v3',
+  'eleven_flash_v2_5',
+  'eleven_multilingual_v2',
+];
 
 let cachedClient: GoogleGenAI | null = null;
 let cachedKey = '';
-let cachedBetaClient: GoogleGenAI | null = null;
-let cachedBetaKey = '';
 let primaryConverseCooldownUntil = 0;
 let elevenLabsCooldownUntil = 0;
+let freeTierIpBlockedCooldownUntil = 0;
 let invalidElevenLabsKeyCached = '';
-let geminiTtsCooldownUntil = 0;
+let paidOnlyVoiceIdCached = '';
+let activePremadeVoiceLabel = '';
 const ttsAudioCache = new Map<string, SynthesizedSpeechResult>();
 const MAX_TTS_CACHE_ITEMS = 40;
 
-function isPlausibleElevenLabsApiKey(key: string): boolean {
+export function isPlausibleElevenLabsApiKey(key: string): boolean {
   if (!key) return false;
   // Modern ElevenLabs keys start with "sk_"; legacy keys are 32-char lowercase hex.
   // Reject 20-char Voice IDs or API Key IDs immediately so they never trigger HTTP 400 auth errors.
   return /^sk_[a-zA-Z0-9_]{20,120}$/.test(key) || /^[a-f0-9]{32}$/i.test(key);
+}
+
+export function sanitizeElevenLabsVoiceId(raw: string | undefined): {
+  voiceId: string;
+  isCustom: boolean;
+} {
+  const trimmed = (raw || '').trim();
+  if (trimmed && /^[a-zA-Z0-9_-]{8,64}$/.test(trimmed)) {
+    return {
+      voiceId: trimmed,
+      isCustom: trimmed !== DEFAULT_ELEVENLABS_VOICE_ID,
+    };
+  }
+  return {
+    voiceId: DEFAULT_ELEVENLABS_VOICE_ID,
+    isCustom: false,
+  };
+}
+
+export function getPremadeVoiceLabel(voiceId: string): string | undefined {
+  return FREE_PREMADE_FEMALE_VOICES.find((v) => v.voiceId === voiceId)?.label;
+}
+
+/**
+ * Accurately classifies ElevenLabs HTTP error responses so Free-Tier Library Voice restrictions
+ * (HTTP 402 `payment_required`) or shared-IP blocks (`detected_unusual_activity`) are NEVER
+ * mislabeled as "quota exhausted".
+ */
+export function classifyElevenLabsHttpError(
+  httpStatus: number,
+  rawBody: string,
+): ElevenLabsHttpErrorKind {
+  const lower = (rawBody || '').toLowerCase();
+
+  // 1. Free-tier shared cloud IP / anti-abuse block (common on Render shared IPs)
+  if (
+    lower.includes('detected_unusual_activity') ||
+    lower.includes('unusual activity') ||
+    lower.includes('free tier usage disabled')
+  ) {
+    return 'free_tier_ip_blocked';
+  }
+
+  // 2. Genuine credit / character quota exhaustion or rate throttling
+  if (
+    lower.includes('quota_exceeded') ||
+    lower.includes('character_limit') ||
+    lower.includes('insufficient_credits') ||
+    lower.includes('credit_limit') ||
+    httpStatus === 429
+  ) {
+    return 'quota_exceeded';
+  }
+
+  // 3. Community / Voice Library voice blocked on Free Plan (HTTP 402 payment_required / paid_plan_required)
+  if (
+    lower.includes('paid_plan_required') ||
+    lower.includes('library voice') ||
+    lower.includes('library_voice') ||
+    lower.includes('voice_not_found') ||
+    (httpStatus === 402 && !lower.includes('quota')) ||
+    lower.includes('payment_required')
+  ) {
+    return 'library_voice_paid_only';
+  }
+
+  // 4. Invalid / missing-permission API key
+  if (
+    httpStatus === 401 ||
+    lower.includes('invalid_api_key') ||
+    lower.includes('authentication_error') ||
+    lower.includes('missing_permissions')
+  ) {
+    return 'auth_rejected';
+  }
+
+  return 'voice_error';
+}
+
+export function resolveElevenLabsModelChain(rawModelId?: string): ElevenLabsModelId[] {
+  const trimmed = (rawModelId || '').trim() as ElevenLabsModelId;
+  const primary: ElevenLabsModelId = ALLOWED_ELEVENLABS_MODELS.includes(trimmed)
+    ? trimmed
+    : DEFAULT_ELEVENLABS_MODEL_ID;
+  const ordered: ElevenLabsModelId[] = [primary];
+  for (const fallbackModel of ALLOWED_ELEVENLABS_MODELS) {
+    if (!ordered.includes(fallbackModel)) {
+      ordered.push(fallbackModel);
+    }
+  }
+  return ordered;
+}
+
+export function resolveElevenLabsConfig(env: NodeJS.ProcessEnv = process.env): {
+  apiKey: string;
+  voiceId: string;
+  voiceIdIsCustom: boolean;
+  primaryModelId: ElevenLabsModelId;
+  modelChain: ElevenLabsModelId[];
+  status: ElevenLabsHealthStatus;
+  activeVoiceLabel?: string;
+} {
+  const apiKey = (env.ELEVENLABS_API_KEY || '').trim();
+  const { voiceId, isCustom: voiceIdIsCustom } = sanitizeElevenLabsVoiceId(env.ELEVENLABS_VOICE_ID);
+  const modelChain = resolveElevenLabsModelChain(env.ELEVENLABS_MODEL_ID);
+  const primaryModelId = modelChain[0];
+
+  let status: ElevenLabsHealthStatus = 'ready';
+  let activeVoiceLabel = getPremadeVoiceLabel(voiceId);
+
+  if (!apiKey) {
+    status = 'missing_key';
+  } else if (!isPlausibleElevenLabsApiKey(apiKey)) {
+    status = 'invalid_key_format';
+  } else if (apiKey === invalidElevenLabsKeyCached) {
+    status = 'auth_rejected';
+  } else if (Date.now() < freeTierIpBlockedCooldownUntil) {
+    status = 'free_tier_ip_blocked';
+  } else if (Date.now() < elevenLabsCooldownUntil) {
+    status = 'quota_cooldown';
+  } else if (paidOnlyVoiceIdCached && paidOnlyVoiceIdCached === voiceId) {
+    status = 'premade_fallback_active';
+    activeVoiceLabel = activePremadeVoiceLabel || FREE_PREMADE_FEMALE_VOICES[0].label;
+  }
+
+  return {
+    apiKey,
+    voiceId,
+    voiceIdIsCustom,
+    primaryModelId,
+    modelChain,
+    status,
+    ...(activeVoiceLabel ? { activeVoiceLabel } : {}),
+  };
+}
+
+export function buildElevenLabsRequestPayload(params: {
+  text: string;
+  modelId: ElevenLabsModelId;
+}): Record<string, unknown> {
+  if (params.modelId === 'eleven_v3') {
+    // eleven_v3 natively supports Marathi ("mr") across 70+ languages.
+    return {
+      text: params.text,
+      model_id: 'eleven_v3',
+      language_code: 'mr',
+      voice_settings: {
+        stability: 0.5,
+        similarity_boost: 0.75,
+        style: 0.0,
+        use_speaker_boost: true,
+      },
+    };
+  }
+  // Do NOT pass language_code to eleven_flash_v2_5 or eleven_multilingual_v2 (Marathi is not in their enum).
+  return {
+    text: params.text,
+    model_id: params.modelId,
+    voice_settings: {
+      stability: 0.48,
+      similarity_boost: 0.8,
+      style: 0.2,
+      use_speaker_boost: true,
+    },
+  };
+}
+
+export function resetElevenLabsRuntimeStateForTest(): void {
+  elevenLabsCooldownUntil = 0;
+  freeTierIpBlockedCooldownUntil = 0;
+  invalidElevenLabsKeyCached = '';
+  paidOnlyVoiceIdCached = '';
+  activePremadeVoiceLabel = '';
+  ttsAudioCache.clear();
 }
 
 function sleep(ms: number): Promise<void> {
@@ -71,51 +280,36 @@ function getGeminiClient(): GoogleGenAI {
   return cachedClient;
 }
 
-/**
- * Gemini 3.8 TTS (`speechConfig` and `speechMetadata`) requires the `v1beta` endpoint;
- * `@google/genai` v3+ defaults to `v1`, which rejects those fields with HTTP 400.
- */
-function getGeminiBetaClient(): GoogleGenAI {
-  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-  if (!apiKey) {
-    throw new Error(
-      'GEMINI_API_KEY is not configured on the server. Please set GEMINI_API_KEY in server environment variables or Settings > Secrets.',
-    );
-  }
-  if (!cachedBetaClient || cachedBetaKey !== apiKey) {
-    cachedBetaClient = new GoogleGenAI({
-      apiKey,
-      apiVersion: 'v1beta',
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    });
-    cachedBetaKey = apiKey;
-  }
-  return cachedBetaClient;
-}
-
-export function getVoiceCapabilitiesStatus(): {
+export interface VoiceCapabilitiesStatus {
   geminiConfigured: boolean;
   elevenLabsConfigured: boolean;
-  ttsPrimaryProvider: 'elevenlabs' | 'gemini' | 'browser';
-} {
+  elevenLabsOnly: true;
+  elevenLabsStatus: ElevenLabsHealthStatus;
+  elevenLabsVoiceId: string;
+  elevenLabsVoiceIdCustom: boolean;
+  elevenLabsModelId: ElevenLabsModelId;
+  activeVoiceLabel?: string;
+  ttsPrimaryProvider: 'elevenlabs';
+}
+
+export function getVoiceCapabilitiesStatus(): VoiceCapabilitiesStatus {
   const geminiConfigured = Boolean((process.env.GEMINI_API_KEY || '').trim());
-  const rawElevenKey = (process.env.ELEVENLABS_API_KEY || '').trim();
+  const el = resolveElevenLabsConfig(process.env);
   const elevenLabsConfigured =
-    isPlausibleElevenLabsApiKey(rawElevenKey) && rawElevenKey !== invalidElevenLabsKeyCached;
+    el.status === 'ready' || el.status === 'premade_fallback_active';
   return {
     geminiConfigured,
     elevenLabsConfigured,
-    ttsPrimaryProvider: elevenLabsConfigured
-      ? 'elevenlabs'
-      : geminiConfigured
-        ? 'gemini'
-        : 'browser',
+    elevenLabsOnly: true,
+    elevenLabsStatus: el.status,
+    elevenLabsVoiceId: el.voiceId,
+    elevenLabsVoiceIdCustom: el.voiceIdIsCustom,
+    elevenLabsModelId: el.primaryModelId,
+    ...(el.activeVoiceLabel ? { activeVoiceLabel: el.activeVoiceLabel } : {}),
+    ttsPrimaryProvider: 'elevenlabs',
   };
 }
+
 
 export async function transcribeMarathiVoiceAudio(params: {
   audioBase64: string;
@@ -336,77 +530,66 @@ export async function runMarathiVoiceTurn(params: {
 }
 
 export interface SynthesizedSpeechResult {
-  provider: 'elevenlabs' | 'gemini';
+  provider: 'elevenlabs';
   mimeType: string;
   audioBase64: string;
+  modelUsed?: string;
+  voiceId?: string;
+  voiceLabel?: string;
+  usedPremadeFallback?: boolean;
 }
 
-/**
- * Ensures Gemini 24kHz 16-bit mono PCM audio always has a valid 44-byte RIFF WAV header
- * so browser `<audio>` and `AudioContext.decodeAudioData` never fail and drop to robotic OS TTS.
- */
-function ensurePlayableWavBuffer(rawBuffer: Buffer, mimeType?: string): Buffer {
-  if (
-    rawBuffer.length >= 12 &&
-    rawBuffer.toString('ascii', 0, 4) === 'RIFF' &&
-    rawBuffer.toString('ascii', 8, 12) === 'WAVE'
-  ) {
-    return rawBuffer;
+export class ElevenLabsSpeechError extends Error {
+  readonly reason: ElevenLabsFallbackReason;
+  constructor(reason: ElevenLabsFallbackReason, message: string) {
+    super(message);
+    this.name = 'ElevenLabsSpeechError';
+    this.reason = reason;
   }
-  const rateMatch = (mimeType || '').match(/rate=(\d+)/i);
-  const sampleRate = rateMatch ? Number(rateMatch[1]) || 24000 : 24000;
-  const numChannels = 1;
-  const bitsPerSample = 16;
-  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
-  const blockAlign = (numChannels * bitsPerSample) / 8;
-  const dataSize = rawBuffer.length;
+}
 
-  const header = Buffer.alloc(44);
-  header.write('RIFF', 0, 4, 'ascii');
-  header.writeUInt32LE(36 + dataSize, 4);
-  header.write('WAVE', 8, 4, 'ascii');
-  header.write('fmt ', 12, 4, 'ascii');
-  header.writeUInt32LE(16, 16); // PCM chunk size
-  header.writeUInt16LE(1, 20); // PCM format
-  header.writeUInt16LE(numChannels, 22);
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE(byteRate, 28);
-  header.writeUInt16LE(blockAlign, 32);
-  header.writeUInt16LE(bitsPerSample, 34);
-  header.write('data', 36, 4, 'ascii');
-  header.writeUInt32LE(dataSize, 40);
-  return Buffer.concat([header, rawBuffer]);
+function getElevenLabsErrorMessageMr(reason: ElevenLabsFallbackReason): string {
+  switch (reason) {
+    case 'missing_key':
+      return 'ElevenLabs API Key सेट केलेली नाही. कृपया Render Environment किंवा Secrets मध्ये sk_ ने सुरू होणारी ElevenLabs Secret Key अ‍ॅड करा.';
+    case 'invalid_key_format':
+      return 'ElevenLabs API Key चुकीच्या फॉरमॅटमध्ये आहे. कृपया API Key ID ऐवजी sk_ ने सुरू होणारी मूळ Secret Key टाका.';
+    case 'auth_rejected':
+      return 'ElevenLabs ने ही API Key नाकारली आहे. कृपया वैध sk_ Secret Key तपासा.';
+    case 'free_tier_ip_blocked':
+      return 'Render च्या शेअर्ड सर्व्हर IP वर ElevenLabs Free Plan तात्पुरता ब्लॉक झाला आहे (पेड प्लॅनवर हा प्रश्न येत नाही).';
+    case 'quota_cooldown':
+      return 'ElevenLabs चे क्रेडिट्स किंवा रेट लिमिट संपले आहे. कृपया ElevenLabs डॅशबोर्डवर क्रेडिट्स तपासा.';
+    default:
+      return 'ElevenLabs आवाज सध्या उपलब्ध नाही. कृपया काही सेकंदांनी पुन्हा प्रयत्न करा.';
+  }
 }
 
 async function callElevenLabsModel(params: {
   apiKey: string;
   voiceId: string;
+  voiceLabel?: string;
+  usedPremadeFallback?: boolean;
   text: string;
-  modelId: 'eleven_flash_v2_5' | 'eleven_multilingual_v2';
+  modelId: ElevenLabsModelId;
   timeoutMs: number;
 }): Promise<{
   result: SynthesizedSpeechResult | null;
-  invalidKey: boolean;
-  quotaOrAuthFailed: boolean;
+  errorKind?: ElevenLabsHttpErrorKind;
 }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), params.timeoutMs);
   try {
+    const query =
+      params.modelId === 'eleven_v3'
+        ? '?output_format=mp3_44100_128'
+        : '?output_format=mp3_44100_128&optimize_streaming_latency=3';
     const url =
-      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(params.voiceId)}` +
-      '?output_format=mp3_44100_128&optimize_streaming_latency=3';
-    // NOTE: Do NOT pass language_code='mr' to eleven_flash_v2_5 (Marathi is not in flash_v2_5's
-    // language_code enum and causes HTTP 400). Both models auto-detect Devanagari script cleanly.
-    const bodyPayload: Record<string, unknown> = {
+      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(params.voiceId)}${query}`;
+    const bodyPayload = buildElevenLabsRequestPayload({
       text: params.text,
-      model_id: params.modelId,
-      voice_settings: {
-        stability: 0.45,
-        similarity_boost: 0.8,
-        style: 0.25,
-        use_speaker_boost: true,
-      },
-    };
+      modelId: params.modelId,
+    });
 
     const resp = await fetch(url, {
       method: 'POST',
@@ -420,22 +603,16 @@ async function callElevenLabsModel(params: {
     });
 
     if (!resp.ok) {
-      const errBody = (await resp.text().catch(() => '')).toLowerCase();
-      const invalidKey =
-        resp.status === 401 ||
-        errBody.includes('invalid_api_key') ||
-        errBody.includes('authentication_error');
-      const quotaOrAuthFailed =
-        invalidKey ||
-        resp.status === 402 ||
-        resp.status === 429 ||
-        errBody.includes('quota_exceeded');
-      return { result: null, invalidKey, quotaOrAuthFailed };
+      const errBody = await resp.text().catch(() => '');
+      return {
+        result: null,
+        errorKind: classifyElevenLabsHttpError(resp.status, errBody),
+      };
     }
 
     const arrayBuf = await resp.arrayBuffer();
     if (arrayBuf.byteLength === 0) {
-      return { result: null, invalidKey: false, quotaOrAuthFailed: false };
+      return { result: null, errorKind: 'voice_error' };
     }
 
     return {
@@ -443,193 +620,121 @@ async function callElevenLabsModel(params: {
         provider: 'elevenlabs',
         mimeType: 'audio/mpeg',
         audioBase64: Buffer.from(arrayBuf).toString('base64'),
+        modelUsed: params.modelId,
+        voiceId: params.voiceId,
+        ...(params.voiceLabel ? { voiceLabel: params.voiceLabel } : {}),
+        ...(params.usedPremadeFallback ? { usedPremadeFallback: true } : {}),
       },
-      invalidKey: false,
-      quotaOrAuthFailed: false,
     };
   } catch {
-    return { result: null, invalidKey: false, quotaOrAuthFailed: false };
+    return { result: null, errorKind: 'voice_error' };
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function synthesizeViaElevenLabs(text: string): Promise<SynthesizedSpeechResult | null> {
-  const apiKey = (process.env.ELEVENLABS_API_KEY || '').trim();
-  if (!isPlausibleElevenLabsApiKey(apiKey)) return null;
-  if (apiKey === invalidElevenLabsKeyCached) return null;
-  if (Date.now() < elevenLabsCooldownUntil) return null;
-
-  const rawVoiceId = (process.env.ELEVENLABS_VOICE_ID || DEFAULT_ELEVENLABS_VOICE_ID).trim();
-  const safeVoiceId = /^[a-zA-Z0-9_-]{8,64}$/.test(rawVoiceId)
-    ? rawVoiceId
-    : DEFAULT_ELEVENLABS_VOICE_ID;
-
-  // Priority 1A: Fast Eleven Flash v2.5 (auto-detects Devanagari cleanly without invalid language_code)
-  const fastAttempt = await callElevenLabsModel({
-    apiKey,
-    voiceId: safeVoiceId,
-    text,
-    modelId: 'eleven_flash_v2_5',
-    timeoutMs: 8000,
-  });
-  if (fastAttempt.result) return fastAttempt.result;
-  if (fastAttempt.invalidKey) {
-    invalidElevenLabsKeyCached = apiKey;
-    return null;
-  }
-  if (fastAttempt.quotaOrAuthFailed) {
-    elevenLabsCooldownUntil = Date.now() + 5 * 60_000;
-    return null;
-  }
-
-  // Priority 1B: Eleven Multilingual v2 fallback
-  const multiAttempt = await callElevenLabsModel({
-    apiKey,
-    voiceId: safeVoiceId,
-    text,
-    modelId: 'eleven_multilingual_v2',
-    timeoutMs: 10000,
-  });
-  if (multiAttempt.invalidKey) {
-    invalidElevenLabsKeyCached = apiKey;
-    return null;
-  }
-  if (multiAttempt.quotaOrAuthFailed) {
-    elevenLabsCooldownUntil = Date.now() + 5 * 60_000;
-  }
-  return multiAttempt.result;
-}
-
-async function callGeminiTtsModel(params: {
-  ai: GoogleGenAI;
-  model: string;
-  text: string;
-  includeStyleMetadata: boolean;
-}): Promise<SynthesizedSpeechResult> {
-  const ttsConfig = {
-    responseModalities: ['AUDIO'],
-    speechConfig: {
-      voiceConfig: {
-        prebuiltVoiceConfig: { voiceName: 'Kore' },
-      },
-    },
-  };
-
-  const parts = params.includeStyleMetadata
-    ? [
-        {
-          text: params.text,
-          speechMetadata: {
-            style:
-              'Warm, expressive, natural conversational Marathi (Maharashtra) office assistant speaking smoothly and humanly at normal pace',
-          },
-        },
-      ]
-    : [{ text: params.text }];
-
-  const response = await params.ai.models.generateContent({
-    model: params.model,
-    contents: [{ role: 'user', parts }],
-    config: ttsConfig,
-  });
-
-  const inlinePart = response.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data);
-  const rawBase64 = inlinePart?.inlineData?.data;
-  const rawMime = inlinePart?.inlineData?.mimeType || 'audio/wav';
-  if (!rawBase64) {
-    throw new Error(`Gemini TTS (${params.model}) returned no audio data.`);
-  }
-
-  const rawBuf = Buffer.from(rawBase64, 'base64');
-  const playableWav = ensurePlayableWavBuffer(rawBuf, rawMime);
-
-  return {
-    provider: 'gemini',
-    mimeType: 'audio/wav',
-    audioBase64: playableWav.toString('base64'),
-  };
-}
-
-/**
- * Splits Marathi text into <= 185-character sentence chunks without breaking formatted numbers
- * (like ₹१६,४५० or 16,450) so each chunk can be synthesized into a seamless CBR MP3 stream.
- */
-function splitMarathiTextIntoTtsChunks(text: string, maxLen = 185): string[] {
-  const sentences = text
-    .split(/(?<=[।.?!\n])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const chunks: string[] = [];
-  let current = '';
-
-  const pushWords = (segment: string) => {
-    const words = segment.split(/\s+/).filter(Boolean);
-    for (const word of words) {
-      const candidate = current ? `${current} ${word}` : word;
-      if (candidate.length <= maxLen) {
-        current = candidate;
-      } else {
-        if (current) chunks.push(current);
-        current = word.slice(0, maxLen);
-      }
-    }
-  };
-
-  for (const sentence of sentences) {
-    const candidate = current ? `${current} ${sentence}` : sentence;
-    if (candidate.length <= maxLen) {
-      current = candidate;
-    } else {
-      if (current) {
-        chunks.push(current);
-        current = '';
-      }
-      if (sentence.length <= maxLen) {
-        current = sentence;
-      } else {
-        pushWords(sentence);
-      }
-    }
-  }
-  if (current) chunks.push(current);
-  return chunks.length > 0 ? chunks : [text.slice(0, maxLen)];
-}
-
-/**
- * Free, zero-quota Server-Side Google Neural Marathi (`mr-IN`) MP3 synthesizer used automatically
- * whenever ElevenLabs is unconfigured/invalid and Gemini TTS free-tier quota is temporarily exhausted (HTTP 429).
- * Ensures the user ALWAYS hears a natural human Marathi voice instead of robotic OS SpeechSynthesis.
- */
-async function synthesizeViaGoogleNeuralMarathiTts(
+async function synthesizeViaElevenLabs(
   text: string,
-): Promise<SynthesizedSpeechResult | null> {
-  try {
-    const chunks = splitMarathiTextIntoTtsChunks(text, 185);
-    const buffers: Buffer[] = [];
-    for (const chunk of chunks) {
-      const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(chunk)}&tl=mr&client=tw-ob`;
-      const resp = await fetch(url, {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        },
-      });
-      if (!resp.ok) return null;
-      const arr = await resp.arrayBuffer();
-      if (arr.byteLength === 0) return null;
-      buffers.push(Buffer.from(arr));
-    }
-    if (buffers.length === 0) return null;
-    const combinedMp3 = Buffer.concat(buffers);
-    return {
-      provider: 'gemini',
-      mimeType: 'audio/mpeg',
-      audioBase64: combinedMp3.toString('base64'),
-    };
-  } catch {
-    return null;
+  options?: { forceRefresh?: boolean },
+): Promise<{
+  result: SynthesizedSpeechResult | null;
+  fallbackReason?: ElevenLabsFallbackReason;
+}> {
+  if (options?.forceRefresh) {
+    // Allow explicit "Test Voice" checks to re-verify ElevenLabs cleanly
+    elevenLabsCooldownUntil = 0;
+    freeTierIpBlockedCooldownUntil = 0;
+    paidOnlyVoiceIdCached = '';
+    invalidElevenLabsKeyCached = '';
   }
+
+  const config = resolveElevenLabsConfig(process.env);
+  if (config.status !== 'ready' && config.status !== 'premade_fallback_active') {
+    return { result: null, fallbackReason: config.status };
+  }
+
+  // Build candidate voice queue:
+  // 1. User's configured Voice ID (unless already known to require a Paid Plan on this Free key)
+  // 2. Free-Tier Premade Female Voices (Sarah -> Rachel -> Alice -> Laura) if Library Voice returns HTTP 402
+  const candidateVoices: Array<{
+    voiceId: string;
+    label?: string;
+    isPremadeFallback: boolean;
+  }> = [];
+
+  const skipCustomBecausePaidOnly =
+    paidOnlyVoiceIdCached && paidOnlyVoiceIdCached === config.voiceId;
+  if (!skipCustomBecausePaidOnly) {
+    candidateVoices.push({
+      voiceId: config.voiceId,
+      label: getPremadeVoiceLabel(config.voiceId),
+      isPremadeFallback: false,
+    });
+  }
+
+  for (const premade of FREE_PREMADE_FEMALE_VOICES) {
+    if (!candidateVoices.some((c) => c.voiceId === premade.voiceId)) {
+      candidateVoices.push({
+        voiceId: premade.voiceId,
+        label: premade.label,
+        isPremadeFallback: config.voiceId !== premade.voiceId,
+      });
+    }
+  }
+
+  for (const candidate of candidateVoices) {
+    let moveToNextVoice = false;
+
+    for (const modelId of config.modelChain) {
+      const attempt = await callElevenLabsModel({
+        apiKey: config.apiKey,
+        voiceId: candidate.voiceId,
+        voiceLabel: candidate.label,
+        usedPremadeFallback: candidate.isPremadeFallback,
+        text,
+        modelId,
+        timeoutMs: modelId === 'eleven_v3' ? 11000 : modelId === 'eleven_flash_v2_5' ? 8000 : 10000,
+      });
+
+      if (attempt.result) {
+        if (candidate.isPremadeFallback && candidate.label) {
+          activePremadeVoiceLabel = candidate.label;
+        }
+        return { result: attempt.result };
+      }
+
+      if (attempt.errorKind === 'library_voice_paid_only') {
+        if (!candidate.isPremadeFallback) {
+          paidOnlyVoiceIdCached = candidate.voiceId;
+        }
+        // Immediately switch to the Free-Tier Premade Female voice chain without setting quota cooldown!
+        moveToNextVoice = true;
+        break;
+      }
+
+      if (attempt.errorKind === 'free_tier_ip_blocked') {
+        freeTierIpBlockedCooldownUntil = Date.now() + 5 * 60_000;
+        return { result: null, fallbackReason: 'free_tier_ip_blocked' };
+      }
+
+      if (attempt.errorKind === 'auth_rejected') {
+        invalidElevenLabsKeyCached = config.apiKey;
+        return { result: null, fallbackReason: 'auth_rejected' };
+      }
+
+      if (attempt.errorKind === 'quota_exceeded') {
+        elevenLabsCooldownUntil = Date.now() + 5 * 60_000;
+        return { result: null, fallbackReason: 'quota_cooldown' };
+      }
+      // Otherwise 'voice_error': try next model in modelChain (e.g., eleven_v3 -> eleven_flash_v2_5)
+    }
+
+    if (!moveToNextVoice) {
+      continue;
+    }
+  }
+
+  return { result: null, fallbackReason: 'voice_error' };
 }
 
 function storeTtsCache(key: string, value: SynthesizedSpeechResult): void {
@@ -640,63 +745,37 @@ function storeTtsCache(key: string, value: SynthesizedSpeechResult): void {
   ttsAudioCache.set(key, value);
 }
 
-export async function synthesizeMarathiSpeech(text: string): Promise<SynthesizedSpeechResult> {
+/**
+ * STRICT ELEVENLABS-ONLY Marathi female voice synthesis.
+ * Never falls back to Gemini TTS, Google Translate TTS, or robotic browser speech.
+ */
+export async function synthesizeMarathiSpeech(
+  text: string,
+  options?: { forceRefresh?: boolean },
+): Promise<SynthesizedSpeechResult> {
   const cleanText = text.trim().slice(0, 900);
   if (!cleanText) {
-    throw new Error('Empty speech text.');
+    throw new ElevenLabsSpeechError('voice_error', 'बोलण्यासाठी मजकूर उपलब्ध नाही.');
   }
 
-  const cached = ttsAudioCache.get(cleanText);
-  if (cached) {
-    return cached;
-  }
+  const elConfig = resolveElevenLabsConfig(process.env);
+  const cacheKey = `${elConfig.voiceId}::${elConfig.primaryModelId}::${elConfig.status}::${cleanText}`;
 
-  // Priority 1: ElevenLabs (eleven_flash_v2_5 -> eleven_multilingual_v2) when a valid ELEVENLABS_API_KEY is set
-  const eleven = await synthesizeViaElevenLabs(cleanText);
-  if (eleven) {
-    storeTtsCache(cleanText, eleven);
-    return eleven;
-  }
-
-  // Priority 2: Gemini Native TTS via v1beta endpoint (skipped during 2-min 429 quota cooldown)
-  if (Date.now() >= geminiTtsCooldownUntil) {
-    try {
-      const ai = getGeminiBetaClient();
-      const attempts: Array<{ model: string; includeStyleMetadata: boolean; delayBeforeMs?: number }> = [
-        { model: GEMINI_TTS_MODEL, includeStyleMetadata: true },
-        { model: GEMINI_TTS_FALLBACK_MODEL, includeStyleMetadata: true, delayBeforeMs: 300 },
-      ];
-
-      for (const attempt of attempts) {
-        if (attempt.delayBeforeMs) {
-          await sleep(attempt.delayBeforeMs);
-        }
-        try {
-          const result = await callGeminiTtsModel({
-            ai,
-            model: attempt.model,
-            text: cleanText,
-            includeStyleMetadata: attempt.includeStyleMetadata,
-          });
-          storeTtsCache(cleanText, result);
-          return result;
-        } catch (err) {
-          if (isRetryableOrQuotaError(err)) {
-            geminiTtsCooldownUntil = Date.now() + 2 * 60_000;
-          }
-        }
-      }
-    } catch {
-      // Fall through to Priority 3 Server-Side Neural Marathi MP3
+  if (!options?.forceRefresh) {
+    const cached = ttsAudioCache.get(cacheKey);
+    if (cached) {
+      return cached;
     }
   }
 
-  // Priority 3: Free Server-Side Google Neural Marathi (mr-IN) MP3 stream (never hits 429 quota or robotic OS voice)
-  const neuralMarathi = await synthesizeViaGoogleNeuralMarathiTts(cleanText);
-  if (neuralMarathi) {
-    storeTtsCache(cleanText, neuralMarathi);
-    return neuralMarathi;
+  const eleven = await synthesizeViaElevenLabs(cleanText, options);
+  if (eleven.result) {
+    storeTtsCache(cacheKey, eleven.result);
+    return eleven.result;
   }
 
-  throw new Error('Speech synthesis temporarily unavailable.');
+  const reason: ElevenLabsFallbackReason = eleven.fallbackReason || 'voice_error';
+  throw new ElevenLabsSpeechError(reason, getElevenLabsErrorMessageMr(reason));
 }
+
+

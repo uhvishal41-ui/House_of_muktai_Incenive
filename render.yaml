@@ -15,3 +15,12 @@ services:
         value: https://houseofmuktai.co.in
       - key: ALLOWED_ORIGINS
         value: https://houseofmuktai.co.in,https://www.houseofmuktai.co.in,https://staff.houseofmuktai.co.in
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: ELEVENLABS_MODEL_ID
+        value: eleven_v3
+
