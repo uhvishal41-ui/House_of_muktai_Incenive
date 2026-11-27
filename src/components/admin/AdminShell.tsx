@@ -5,7 +5,9 @@ import {
   Check,
   Crown,
   FileSpreadsheet,
+  FolderCheck,
   FolderDown,
+  FolderOpen,
   History,
   KeyRound,
   LayoutDashboard,
@@ -78,6 +80,14 @@ import { AdminGlobalSearch, type AdminNavTab } from './AdminGlobalSearch';
 import { AdminNotificationCenter } from './AdminNotificationCenter';
 import { AdminOverview } from './AdminOverview';
 import { HindiTrainingDeckModal } from './HindiTrainingDeckModal';
+import { MarathiVoiceAssistant } from './MarathiVoiceAssistant';
+import {
+  EMPTY_LINKED_FOLDER,
+  buildLinkedFolderFromFileList,
+  requestLocalFolderAccess,
+  type LinkedLocalFolderState,
+} from '../../lib/localFolderSync';
+import type { VoiceFilterCommand, VoiceRefreshScope } from '../../services/voiceToolExecutor';
 
 // Route/tab-level code splitting for faster initial Admin Panel load (H2)
 const AdminAnalytics = lazy(() =>
@@ -158,7 +168,41 @@ export function AdminShell() {
   const [loadingData, setLoadingData] = useState(true);
   const [syncWarning, setSyncWarning] = useState<string | null>(null);
   const [copiedStaffLink, setCopiedStaffLink] = useState(false);
+  const [linkedFolder, setLinkedFolder] = useState<LinkedLocalFolderState>(EMPTY_LINKED_FOLDER);
+  const [linkingFolderBusy, setLinkingFolderBusy] = useState(false);
+  const [voiceFilter, setVoiceFilter] = useState<VoiceFilterCommand | null>(null);
+  const folderFallbackInputRef = useRef<HTMLInputElement | null>(null);
   const autoSyncedBranchesRef = useRef(false);
+
+  const handleLinkLocalFolder = useCallback(async () => {
+    setLinkingFolderBusy(true);
+    try {
+      const res = await requestLocalFolderAccess();
+      if (res.status === 'LINKED') {
+        setLinkedFolder(res.state);
+      } else if (res.status === 'NEEDS_FALLBACK_INPUT') {
+        // Fallback for browsers/iframes without showDirectoryPicker
+        folderFallbackInputRef.current?.click();
+      }
+    } finally {
+      setLinkingFolderBusy(false);
+    }
+  }, []);
+
+  const handleFallbackFolderSelected = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      setLinkedFolder(buildLinkedFolderFromFileList(files));
+    }
+    e.target.value = '';
+  }, []);
+
+  const applyVoiceFilter = useCallback((cmd: Omit<VoiceFilterCommand, 'version'>) => {
+    setVoiceFilter({
+      ...cmd,
+      version: Date.now(),
+    });
+  }, []);
 
   // Global keyboard shortcut Cmd+K / Ctrl+K for Global Search
   useEffect(() => {
@@ -224,7 +268,7 @@ export function AdminShell() {
       if (!autoSyncedBranchesRef.current) {
         const existingIds = new Set(b.map((br) => br.branchId));
         const missingOfficial = DEFAULT_12_BRANCHES.some((def) => !existingIds.has(def.code));
-        const hasLegacyOrDuplicate = b.some((br) => isLegacyOrDuplicateBranch(br));
+        const hasLegacyOrDuplicate = isMainOwner && b.some((br) => isLegacyOrDuplicateBranch(br));
         autoSyncedBranchesRef.current = true;
         if (missingOfficial || hasLegacyOrDuplicate) {
           try {
@@ -267,6 +311,113 @@ export function AdminShell() {
     }
   }, []);
 
+  /**
+   * Silent, targeted single-collection refresh for the Marathi Voice Assistant.
+   * Updates live UI state in ~250-600ms without flashing the full-screen skeleton loader
+   * or re-downloading all 15 Firestore collections on every single edit.
+   */
+  const refreshVoiceScope = useCallback(async (scope: VoiceRefreshScope = 'all') => {
+    try {
+      if (scope === 'employees') {
+        setEmployees(await listEmployees());
+        return;
+      }
+      if (scope === 'branches') {
+        setBranches(await listBranches());
+        return;
+      }
+      if (scope === 'adjustments') {
+        setAdjustments(await listAllAdjustments().catch(() => [] as IncentiveAdjustment[]));
+        return;
+      }
+      if (scope === 'payouts') {
+        setPayoutRecords(await listAllPayoutRecords().catch(() => [] as PayoutRecord[]));
+        return;
+      }
+      if (scope === 'salary') {
+        const [sl, e] = await Promise.all([
+          listAllSalarySlips().catch(() => [] as SalarySlip[]),
+          listEmployees(),
+        ]);
+        setSalarySlips(sl);
+        setEmployees(e);
+        return;
+      }
+      if (scope === 'incentives') {
+        const [ib, pi, ms] = await Promise.all([
+          listImportBatches(),
+          listAllPublishedIncentives(),
+          listAllMonthlySummaries(),
+        ]);
+        setBatches(ib);
+        setIncentives(pi);
+        setMonthlySummaries(ms);
+        return;
+      }
+      if (scope === 'targets') {
+        setSalesTargets(await listAllSalesTargets().catch(() => [] as SalesTarget[]));
+        return;
+      }
+      if (scope === 'loans') {
+        setEmployeeLoans(await listAllEmployeeLoans().catch(() => [] as EmployeeLoan[]));
+        return;
+      }
+      if (scope === 'queries') {
+        setEmployeeQueries(await listAllEmployeeQueries().catch(() => [] as EmployeeQuery[]));
+        return;
+      }
+      if (scope === 'visibility') {
+        setVisibilitySettings(
+          await fetchPortalVisibilitySettings().catch(() => ({ ...DEFAULT_PORTAL_VISIBILITY })),
+        );
+        return;
+      }
+      if (scope === 'locks') {
+        setPayrollLockSettings(
+          await fetchPayrollLockSettings().catch(() => ({ ...DEFAULT_PAYROLL_LOCKS })),
+        );
+        return;
+      }
+
+      // Parallel silent full sync (all collections in one round-trip, no skeleton flash)
+      const [b, e, ib, pi, ms, iv, al, pr, adj, tgt, qry, vis, sl, loans, locks] =
+        await Promise.all([
+          listBranches(),
+          listEmployees(),
+          listImportBatches(),
+          listAllPublishedIncentives(),
+          listAllMonthlySummaries(),
+          listIncentiveVersions(),
+          listAuditLogs(),
+          listAllPayoutRecords().catch(() => [] as PayoutRecord[]),
+          listAllAdjustments().catch(() => [] as IncentiveAdjustment[]),
+          listAllSalesTargets().catch(() => [] as SalesTarget[]),
+          listAllEmployeeQueries().catch(() => [] as EmployeeQuery[]),
+          fetchPortalVisibilitySettings().catch(() => ({ ...DEFAULT_PORTAL_VISIBILITY })),
+          listAllSalarySlips().catch(() => [] as SalarySlip[]),
+          listAllEmployeeLoans().catch(() => [] as EmployeeLoan[]),
+          fetchPayrollLockSettings().catch(() => ({ ...DEFAULT_PAYROLL_LOCKS })),
+        ]);
+      setBranches(b);
+      setEmployees(e);
+      setBatches(ib);
+      setIncentives(pi);
+      setMonthlySummaries(ms);
+      setVersions(iv);
+      setAuditLogs(al);
+      setPayoutRecords(pr);
+      setAdjustments(adj);
+      setSalesTargets(tgt);
+      setEmployeeQueries(qry);
+      setVisibilitySettings(vis);
+      setSalarySlips(sl);
+      setEmployeeLoans(loans);
+      setPayrollLockSettings(locks);
+    } catch {
+      // Non-fatal silent background refresh failure
+    }
+  }, []);
+
   useEffect(() => {
     refreshAll();
   }, [refreshAll]);
@@ -278,7 +429,7 @@ export function AdminShell() {
   const isPasswordAdmin = !isMainOwner && adminAccount?.authType === 'PASSWORD';
   const currentNavLabel =
     safeActiveTab === 'owner-access'
-      ? 'Owner · Admin Access'
+      ? 'Owner · Access & Rights'
       : NAV_ITEMS.find((n) => n.id === safeActiveTab)?.label || 'Dashboard';
   const pendingApprovalCount = batches.filter(
     (b) =>
@@ -290,10 +441,10 @@ export function AdminShell() {
   const openQueriesCount = employeeQueries.filter((q) => q.status !== 'RESOLVED').length;
   const actorLabel = isMainOwner
     ? 'Main Owner'
-    : adminAccount?.displayName || 'Admin';
+    : adminAccount?.displayName || 'Super Admin';
   const actorSubLabel = isMainOwner
     ? user?.email || ''
-    : adminAccount?.username || user?.email || '';
+    : `${adminAccount?.username || user?.email || ''} · Super Admin`;
   const adminInitials = (
     isMainOwner ? 'MO' : adminAccount?.username || user?.email || 'AD'
   )
@@ -379,7 +530,7 @@ export function AdminShell() {
                     safeActiveTab === 'owner-access' ? 'text-[#0F1F3D]' : 'text-[#DFC27D]'
                   }`}
                 />
-                <span className="truncate">Owner · Admin Access</span>
+                <span className="truncate">Owner · Access &amp; Rights</span>
               </button>
             </div>
           )}
@@ -519,7 +670,7 @@ export function AdminShell() {
                       }`}
                     >
                       <Crown className="w-4 h-4 shrink-0" />
-                      <span>Owner · Admin Access</span>
+                      <span>Owner · Access &amp; Rights</span>
                     </button>
                   </div>
                 )}
@@ -580,7 +731,7 @@ export function AdminShell() {
             </button>
             <div className="flex items-center gap-2 text-sm min-w-0">
               <span className="text-slate-400 hidden sm:inline whitespace-nowrap">
-                {isMainOwner ? 'Main Owner Panel' : 'Admin Panel'}
+                {isMainOwner ? 'Main Owner Panel' : 'Super Admin Panel'}
               </span>
               <span className="text-slate-300 hidden sm:inline">/</span>
               <h1 className="font-semibold text-[#0F1F3D] truncate">{currentNavLabel}</h1>
@@ -600,6 +751,50 @@ export function AdminShell() {
                 <span className="hidden md:inline">Change Password</span>
               </button>
             )}
+
+            {/* Pro-Level Local Folder Sync (File System Access API + iframe fallback) */}
+            <input
+              ref={folderFallbackInputRef}
+              type="file"
+              multiple
+              // @ts-expect-error webkitdirectory is supported across Chromium/Safari/Firefox for folder linking
+              webkitdirectory=""
+              accept=".xlsx,.csv"
+              className="hidden"
+              onChange={handleFallbackFolderSelected}
+            />
+            <button
+              type="button"
+              onClick={() => void handleLinkLocalFolder()}
+              disabled={linkingFolderBusy}
+              title={
+                linkedFolder.linked
+                  ? `Folder Linked: "${linkedFolder.folderName}" (${linkedFolder.files.length} Excel/CSV files ready for Marathi Voice Upload). Click to change folder.`
+                  : 'Link Desktop or local folder once per session for instant Marathi Voice Excel Uploads'
+              }
+              className={`h-8 px-2.5 sm:px-3 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors disabled:opacity-60 ${
+                linkedFolder.linked
+                  ? 'bg-emerald-50 hover:bg-emerald-100 border-emerald-300 text-emerald-800'
+                  : 'bg-[#FDF8EC] hover:bg-[#FAF0D7] border-[#B8923A]/45 text-[#0F1F3D]'
+              }`}
+            >
+              {linkedFolder.linked ? (
+                <>
+                  <FolderCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                  <span className="hidden md:inline">Folder Linked</span>
+                  <span className="md:hidden">Linked</span>
+                  <span className="px-1 py-0.2 rounded bg-emerald-200/70 text-[10px] font-mono text-emerald-900">
+                    {linkedFolder.files.length}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <FolderOpen className="w-3.5 h-3.5 text-[#9A7625] shrink-0" />
+                  <span className="hidden md:inline">Link Local Folder</span>
+                  <span className="md:hidden">Folder</span>
+                </>
+              )}
+            </button>
 
             {/* Global Search Trigger */}
             <button
@@ -737,6 +932,7 @@ export function AdminShell() {
                       payoutRecords={payoutRecords}
                       adjustments={adjustments}
                       employeeQueries={employeeQueries}
+                      voiceFilter={voiceFilter}
                       onRefresh={refreshAll}
                     />
                   </Suspense>
@@ -767,6 +963,7 @@ export function AdminShell() {
                       salarySlips={salarySlips}
                       visibilitySettings={visibilitySettings}
                       payrollLockSettings={payrollLockSettings}
+                      voiceFilter={voiceFilter}
                       onRefresh={refreshAll}
                     />
                   </Suspense>
@@ -781,6 +978,7 @@ export function AdminShell() {
                       payoutRecords={payoutRecords}
                       adjustments={adjustments}
                       payrollLockSettings={payrollLockSettings}
+                      voiceFilter={voiceFilter}
                     />
                   </Suspense>
                 )}
@@ -800,6 +998,7 @@ export function AdminShell() {
                       employees={employees}
                       incentives={incentives}
                       visibilitySettings={visibilitySettings}
+                      voiceFilter={voiceFilter}
                       onRefresh={refreshAll}
                     />
                   </Suspense>
@@ -864,6 +1063,39 @@ export function AdminShell() {
           onClose={() => setChangePasswordOpen(false)}
         />
       )}
+      <MarathiVoiceAssistant
+        activeTab={safeActiveTab}
+        actorLabel={actorLabel}
+        env={{
+          isMainOwner,
+          branches,
+          employees,
+          batches,
+          incentives,
+          monthlySummaries,
+          payoutRecords,
+          adjustments,
+          salesTargets,
+          employeeQueries,
+          salarySlips,
+          employeeLoans,
+          visibilitySettings,
+          payrollLockSettings,
+          linkedFolder,
+          setLinkedFolder,
+          navigateToTab: (tab) => setActiveTab(tab),
+          openModal: (modal) => {
+            if (modal === 'search') setSearchOpen(true);
+            else if (modal === 'training_ppt') setTrainingDeckOpen(true);
+            else if (modal === 'change_password' && isPasswordAdmin) setChangePasswordOpen(true);
+          },
+          applyVoiceFilter,
+          refreshAll: () => refreshVoiceScope('all'),
+          refreshScope: refreshVoiceScope,
+          onLiveStatus: () => {},
+          onPendingConfirmation: () => {},
+        }}
+      />
       <OfflineIndicator />
     </div>
   );

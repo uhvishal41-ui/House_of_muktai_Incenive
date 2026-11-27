@@ -1138,7 +1138,7 @@ service cloud.firestore {
         && incoming().branchId == existing().branchId
         && incoming().createdAt == existing().createdAt
         && incoming().diff(existing()).affectedKeys().hasOnly(['branchCode', 'branchName', 'city', 'managerName', 'active', 'updatedAt']);
-      allow delete: if isValidId(branchId) && isSuperAdmin();
+      allow delete: if isValidId(branchId) && isMainOwner();
     }
 
     // 3. Employee Master (PII Isolated; Active/Inactive status strictly SUPER ADMIN ONLY; Pillar 7 active_auth_uids sync)
@@ -1228,9 +1228,10 @@ service cloud.firestore {
               'rejectionReason', 'correctionNote', 'updatedAt'
             ])
           )
-          // Action B: Audited post-publish batch metadata & recomputed totals update (status locked to PUBLISHED)
+          // Action B: Main Owner ONLY post-publish batch metadata & recomputed totals update (status locked to PUBLISHED)
           || (
-            existing().status == 'PUBLISHED'
+            isMainOwner()
+            && existing().status == 'PUBLISHED'
             && incoming().status == 'PUBLISHED'
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'fileName', 'totalRows', 'validRows', 'correctionRows',
@@ -1239,7 +1240,10 @@ service cloud.firestore {
             ])
           )
         );
-      allow delete: if isValidId(batchId) && isSuperAdmin();
+      allow delete: if isValidId(batchId) && (
+        isMainOwner()
+        || (isSuperAdmin() && existing().status != 'PUBLISHED')
+      );
     }
 
     // 5. Staged & Published Excel Import Rows (SUPER ADMIN ONLY — Zero Employee Access)
@@ -1313,7 +1317,7 @@ service cloud.firestore {
             )
           )
         );
-      allow delete: if isValidId(recordId) && isSuperAdmin() && !isMonthPayrollLocked(existing().monthKey);
+      allow delete: if isValidId(recordId) && isMainOwner() && !isMonthPayrollLocked(existing().monthKey);
     }
 
     // 7. Immutable Correction Version History (SUPER ADMIN ONLY — Append-Only)
@@ -1348,7 +1352,7 @@ service cloud.firestore {
           'saleAmt3TotalPaise', 'saleQty3Total', 'totalSaleAmtPaise', 'totalSaleQty',
           'publishedDaysCount', 'employeeVisible', 'updatedAt'
         ]);
-      allow delete: if isValidId(summaryId) && isSuperAdmin();
+      allow delete: if isValidId(summaryId) && isMainOwner();
     }
 
     // 9. Append-Only Audit Logs (SUPER ADMIN ONLY — Never deletable)
@@ -1443,7 +1447,7 @@ service cloud.firestore {
           'branchId', 'branchName', 'employeeId', 'authUid', 'employeeName',
           'targetSaleAmtPaise', 'targetSaleQty', 'employeeVisible', 'updatedByEmail', 'updatedAt'
         ]);
-      allow delete: if isValidId(targetId) && isSuperAdmin();
+      allow delete: if isValidId(targetId) && isMainOwner();
     }
 
     // 14. Employee Query / Dispute Tickets (Active Employee creates & reads own; Super Admin resolves)
@@ -1596,12 +1600,12 @@ service cloud.firestore {
         && incoming().slipId == existing().slipId
         && incoming().monthKey == existing().monthKey
         && incoming().employeeId == existing().employeeId
-        && incoming().uploadedAt == existing().uploadedAt
+        && (!('uploadedAt' in existing()) || incoming().uploadedAt == existing().uploadedAt)
         && (
           !isMonthPayrollLocked(existing().monthKey)
           || incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'employeeVisible', 'updatedAt'])
         );
-      allow delete: if isValidId(slipId) && isSuperAdmin() && !isMonthPayrollLocked(existing().monthKey);
+      allow delete: if isValidId(slipId) && isMainOwner() && !isMonthPayrollLocked(existing().monthKey);
     }
 
     // 19. Privacy-Isolated 12-Branch Birthday Directory (Super Admin writes; Active Employees read active celebration profiles with ZERO PII)
@@ -1676,7 +1680,7 @@ service cloud.firestore {
           'monthlyEmiPaise', 'totalInstallments', 'paidInstallments',
           'remainingBalancePaise', 'lastDeductedMonthKey', 'status', 'remarks', 'updatedAt'
         ]);
-      allow delete: if isValidId(loanId) && isSuperAdmin();
+      allow delete: if isValidId(loanId) && isMainOwner();
     }
   }
 }

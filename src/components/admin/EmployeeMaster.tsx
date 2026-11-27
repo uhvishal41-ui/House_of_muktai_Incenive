@@ -50,8 +50,10 @@ import {
   saveEmployeeColumnSettings,
   subscribeEmployeeColumnSettings,
 } from '../../services/departmentVisibilityService';
+import { useAuth } from '../../context/AuthContext';
 import {
   backfillAuthUidAndActiveRegistry,
+  deleteEmployeeByOwner,
   provisionAllPendingEmployeeLogins,
   provisionSingleEmployeeDefaultLogin,
   saveEmployee,
@@ -68,11 +70,14 @@ import type {
   PublishedIncentive,
 } from '../../types/incentive';
 
+import type { VoiceFilterCommand } from '../../services/voiceToolExecutor';
+
 interface Props {
   branches: Branch[];
   employees: Employee[];
   incentives?: PublishedIncentive[];
   visibilitySettings?: PortalVisibilitySettings;
+  voiceFilter?: VoiceFilterCommand | null;
   onRefresh: () => Promise<void>;
 }
 
@@ -124,8 +129,13 @@ export function EmployeeMaster({
   employees,
   incentives = [],
   visibilitySettings,
+  voiceFilter,
   onRefresh,
 }: Props) {
+  const { isMainOwner } = useAuth();
+  const [confirmDeleteEmp, setConfirmDeleteEmp] = useState<Employee | null>(null);
+  const [deleteEmpReason, setDeleteEmpReason] = useState('');
+  const [deletingEmpBusy, setDeletingEmpBusy] = useState(false);
   const [search, setSearch] = useState('');
   const [branchFilter, setBranchFilter] = useState('ALL');
   const [departmentFilter, setDepartmentFilter] = useState<
@@ -135,6 +145,28 @@ export function EmployeeMaster({
   const [authFilter, setAuthFilter] = useState<'ALL' | 'PENDING' | 'ACTIVE'>('ALL');
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Employee | null>(null);
+
+  useEffect(() => {
+    if (!voiceFilter || voiceFilter.targetTab !== 'employees') return;
+    if (voiceFilter.clearFilters) {
+      setSearch('');
+      setBranchFilter('ALL');
+      setDepartmentFilter('ALL');
+      setStatusFilter('ALL');
+      setAuthFilter('ALL');
+      return;
+    }
+    if (voiceFilter.searchQuery !== undefined) setSearch(voiceFilter.searchQuery);
+    if (voiceFilter.branchId !== undefined) setBranchFilter(voiceFilter.branchId);
+    if (voiceFilter.department !== undefined) setDepartmentFilter(voiceFilter.department);
+    if (
+      voiceFilter.status === 'ALL' ||
+      voiceFilter.status === 'ACTIVE' ||
+      voiceFilter.status === 'INACTIVE'
+    ) {
+      setStatusFilter(voiceFilter.status);
+    }
+  }, [voiceFilter]);
 
   const [employeeId, setEmployeeId] = useState('');
   const [saleId, setSaleId] = useState('');
@@ -2723,6 +2755,20 @@ export function EmployeeMaster({
                           <Edit3 className="w-3.5 h-3.5" />
                           Edit
                         </button>
+                        {isMainOwner && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfirmDeleteEmp(emp);
+                              setDeleteEmpReason('');
+                            }}
+                            title="Main Owner only: permanently delete employee"
+                            className="inline-flex items-center gap-1 text-xs font-medium text-rose-700 hover:text-rose-900 hover:underline cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Delete
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -2732,6 +2778,92 @@ export function EmployeeMaster({
           </div>
         )}
       </div>
+
+      {/* Main Owner ONLY: Permanent Employee Delete Confirmation Modal */}
+      {isMainOwner && confirmDeleteEmp && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border-2 border-rose-200 rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
+            <div className="px-5 py-4 bg-rose-50 border-b border-rose-200 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-rose-950">
+                  Main Owner · Permanently Delete Employee?
+                </h3>
+                <p className="text-xs text-rose-800 mt-0.5">
+                  {confirmDeleteEmp.fullName} ({confirmDeleteEmp.employeeId} · {confirmDeleteEmp.loginId})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteEmp(null)}
+                className="p-1 text-rose-500 hover:text-rose-800 cursor-pointer"
+                aria-label="Close delete employee confirmation"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-700 leading-relaxed">
+                This permanently removes the employee master record, revokes portal access immediately,
+                and logs the deletion in Audit Logs. Tip: if you want to keep historical staff status,
+                use <strong>Deactivate</strong> instead.
+              </p>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Audit Reason (optional)
+                </label>
+                <input
+                  type="text"
+                  value={deleteEmpReason}
+                  onChange={(e) => setDeleteEmpReason(e.target.value)}
+                  placeholder="e.g. Duplicate test employee entry"
+                  className="w-full h-9 px-3 rounded-lg border border-slate-300 text-xs text-slate-900"
+                />
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={deletingEmpBusy}
+                  onClick={() => setConfirmDeleteEmp(null)}
+                  className="h-9 px-3.5 rounded-lg border border-slate-300 bg-white text-xs font-medium text-slate-700 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={deletingEmpBusy}
+                  onClick={async () => {
+                    setDeletingEmpBusy(true);
+                    setFeedback(null);
+                    try {
+                      await deleteEmployeeByOwner(confirmDeleteEmp, deleteEmpReason);
+                      setFeedback({
+                        type: 'ok',
+                        text: `Main Owner permanently deleted employee ${confirmDeleteEmp.fullName} (${confirmDeleteEmp.employeeId}).`,
+                      });
+                      setConfirmDeleteEmp(null);
+                      await onRefresh();
+                    } catch (err) {
+                      setFeedback({
+                        type: 'err',
+                        text:
+                          err instanceof Error
+                            ? err.message
+                            : 'Unable to delete employee record.',
+                      });
+                    } finally {
+                      setDeletingEmpBusy(false);
+                    }
+                  }}
+                  className="h-9 px-4 rounded-lg bg-rose-700 hover:bg-rose-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  {deletingEmpBusy ? 'Deleting...' : 'Delete Permanently'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <BirthdayWishingCardModal
         open={Boolean(previewCardEmp)}

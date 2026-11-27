@@ -7,8 +7,10 @@ import {
   PlusCircle,
   RefreshCw,
   Search,
+  Trash2,
   Wallet,
 } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 import {
   formatINRFromPaise,
   formatMonthLabel,
@@ -18,6 +20,9 @@ import { normalizeRecordPeriod } from '../../lib/incentiveEngine';
 import { downloadEmployeeIncentiveSlipPdf } from '../../lib/pdfGenerator';
 import {
   createIncentiveAdjustment,
+  deleteEmployeeQueryByOwner,
+  deleteIncentiveAdjustmentByOwner,
+  deletePayoutRecordByOwner,
   resolveEmployeeQuery,
   syncOperationalAuthUids,
   upsertPayoutRecord,
@@ -38,6 +43,8 @@ import type {
   QueryStatus,
 } from '../../types/incentive';
 
+import type { VoiceFilterCommand } from '../../services/voiceToolExecutor';
+
 interface Props {
   branches: Branch[];
   employees: Employee[];
@@ -46,6 +53,7 @@ interface Props {
   payoutRecords: PayoutRecord[];
   adjustments: IncentiveAdjustment[];
   employeeQueries: EmployeeQuery[];
+  voiceFilter?: VoiceFilterCommand | null;
   onRefresh: () => Promise<void>;
 }
 
@@ -59,14 +67,44 @@ export function AdminPayoutsAndQueries({
   payoutRecords,
   adjustments,
   employeeQueries,
+  voiceFilter,
   onRefresh,
 }: Props) {
+  const { isMainOwner } = useAuth();
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [subTab, setSubTab] = useState<SubTab>('payouts');
   const [selectedMonth, setSelectedMonth] = useState('');
   const [selectedBranch, setSelectedBranch] = useState('ALL');
   const [statusFilter, setStatusFilter] = useState<'ALL' | PayoutStatus>('ALL');
   const [search, setSearch] = useState('');
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!voiceFilter || voiceFilter.targetTab !== 'payouts') return;
+    if (voiceFilter.subTab === 'payouts' || voiceFilter.subTab === 'adjustments' || voiceFilter.subTab === 'queries') {
+      setSubTab(voiceFilter.subTab);
+    }
+    if (voiceFilter.clearFilters) {
+      setSelectedBranch('ALL');
+      setStatusFilter('ALL');
+      setSearch('');
+      return;
+    }
+    if (voiceFilter.monthKey && voiceFilter.monthKey !== 'ALL') {
+      setSelectedMonth(voiceFilter.monthKey);
+    }
+    if (voiceFilter.branchId !== undefined) setSelectedBranch(voiceFilter.branchId);
+    if (
+      voiceFilter.status === 'ALL' ||
+      voiceFilter.status === 'UNPAID' ||
+      voiceFilter.status === 'APPROVED' ||
+      voiceFilter.status === 'PAID'
+    ) {
+      setStatusFilter(voiceFilter.status);
+    }
+    if (voiceFilter.searchQuery !== undefined) setSearch(voiceFilter.searchQuery);
+  }, [voiceFilter]);
 
   // Payout edit modal/drawer state
   const [editingPayoutRow, setEditingPayoutRow] = useState<{
@@ -880,6 +918,57 @@ export function AdminPayoutsAndQueries({
                                 <FileDown className="w-3.5 h-3.5" />
                                 PDF Slip
                               </button>
+                              {isMainOwner && row.existingPayout && (
+                                confirmDeleteKey === `payout:${row.existingPayout.payoutId}` ? (
+                                  <span className="inline-flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      disabled={deletingKey === `payout:${row.existingPayout.payoutId}`}
+                                      onClick={async () => {
+                                        const rec = row.existingPayout!;
+                                        setDeletingKey(`payout:${rec.payoutId}`);
+                                        setFeedback(null);
+                                        try {
+                                          await deletePayoutRecordByOwner(rec);
+                                          setConfirmDeleteKey(null);
+                                          setFeedback({
+                                            type: 'ok',
+                                            text: `Main Owner deleted payout entry for ${rec.employeeName} (reset to UNPAID).`,
+                                          });
+                                          await onRefresh();
+                                        } catch (err) {
+                                          setFeedback({
+                                            type: 'err',
+                                            text: err instanceof Error ? err.message : 'Unable to delete payout record.',
+                                          });
+                                        } finally {
+                                          setDeletingKey(null);
+                                        }
+                                      }}
+                                      className="px-2 py-0.5 rounded bg-red-600 hover:bg-red-700 text-white text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                                    >
+                                      {deletingKey === `payout:${row.existingPayout.payoutId}` ? '...' : 'Confirm'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmDeleteKey(null)}
+                                      className="px-1.5 py-0.5 rounded border border-slate-200 text-[11px] text-slate-600 cursor-pointer"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteKey(`payout:${row.existingPayout!.payoutId}`)}
+                                    title="Main Owner only: delete payout record (reset to UNPAID)"
+                                    className="inline-flex items-center gap-1 text-xs font-medium text-rose-700 hover:underline cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    Delete
+                                  </button>
+                                )
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -1067,20 +1156,72 @@ export function AdminPayoutsAndQueries({
                               {adj.status}
                             </span>
                           </td>
-                          <td className="py-3 px-4 text-right">
-                            {adj.status === 'ACTIVE' ? (
-                              <button
-                                type="button"
-                                disabled={voidingId === adj.adjustmentId}
-                                onClick={() => handleVoidAdjustment(adj.adjustmentId)}
-                                className="inline-flex items-center gap-1 text-xs font-medium text-red-700 hover:underline cursor-pointer disabled:opacity-50"
-                              >
-                                <Ban className="w-3.5 h-3.5" />
-                                {voidingId === adj.adjustmentId ? 'Voiding...' : 'Void'}
-                              </button>
-                            ) : (
-                              <span className="text-slate-400 text-[11px]">Voided</span>
-                            )}
+                          <td className="py-3 px-4 text-right whitespace-nowrap">
+                            <div className="inline-flex items-center gap-3">
+                              {adj.status === 'ACTIVE' ? (
+                                <button
+                                  type="button"
+                                  disabled={voidingId === adj.adjustmentId}
+                                  onClick={() => handleVoidAdjustment(adj.adjustmentId)}
+                                  className="inline-flex items-center gap-1 text-xs font-medium text-amber-800 hover:underline cursor-pointer disabled:opacity-50"
+                                >
+                                  <Ban className="w-3.5 h-3.5" />
+                                  {voidingId === adj.adjustmentId ? 'Voiding...' : 'Void'}
+                                </button>
+                              ) : (
+                                <span className="text-slate-400 text-[11px]">Voided</span>
+                              )}
+                              {isMainOwner && (
+                                confirmDeleteKey === `adj:${adj.adjustmentId}` ? (
+                                  <span className="inline-flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      disabled={deletingKey === `adj:${adj.adjustmentId}`}
+                                      onClick={async () => {
+                                        setDeletingKey(`adj:${adj.adjustmentId}`);
+                                        setFeedback(null);
+                                        try {
+                                          await deleteIncentiveAdjustmentByOwner(adj);
+                                          setConfirmDeleteKey(null);
+                                          setFeedback({
+                                            type: 'ok',
+                                            text: `Main Owner permanently deleted adjustment for ${adj.employeeName}.`,
+                                          });
+                                          await onRefresh();
+                                        } catch (err) {
+                                          setFeedback({
+                                            type: 'err',
+                                            text: err instanceof Error ? err.message : 'Unable to delete adjustment.',
+                                          });
+                                        } finally {
+                                          setDeletingKey(null);
+                                        }
+                                      }}
+                                      className="px-2 py-0.5 rounded bg-red-600 hover:bg-red-700 text-white text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                                    >
+                                      {deletingKey === `adj:${adj.adjustmentId}` ? '...' : 'Confirm'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmDeleteKey(null)}
+                                      className="px-1.5 py-0.5 rounded border border-slate-200 text-[11px] text-slate-600 cursor-pointer"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteKey(`adj:${adj.adjustmentId}`)}
+                                    title="Main Owner only: permanently delete adjustment"
+                                    className="inline-flex items-center gap-1 text-xs font-medium text-rose-700 hover:underline cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    Delete
+                                  </button>
+                                )
+                              )}
+                            </div>
                           </td>
                         </tr>
                       );
@@ -1195,6 +1336,56 @@ export function AdminPayoutsAndQueries({
                         <CheckCircle2 className="w-3.5 h-3.5" />
                         {busyQueryId === qItem.queryId ? 'Updating...' : 'Save Reply'}
                       </button>
+                      {isMainOwner && (
+                        confirmDeleteKey === `qry:${qItem.queryId}` ? (
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              disabled={deletingKey === `qry:${qItem.queryId}`}
+                              onClick={async () => {
+                                setDeletingKey(`qry:${qItem.queryId}`);
+                                setFeedback(null);
+                                try {
+                                  await deleteEmployeeQueryByOwner(qItem);
+                                  setConfirmDeleteKey(null);
+                                  setFeedback({
+                                    type: 'ok',
+                                    text: `Main Owner permanently deleted query from ${qItem.employeeName}.`,
+                                  });
+                                  await onRefresh();
+                                } catch (err) {
+                                  setFeedback({
+                                    type: 'err',
+                                    text: err instanceof Error ? err.message : 'Unable to delete query.',
+                                  });
+                                } finally {
+                                  setDeletingKey(null);
+                                }
+                              }}
+                              className="h-9 px-3 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-semibold cursor-pointer disabled:opacity-50"
+                            >
+                              {deletingKey === `qry:${qItem.queryId}` ? '...' : 'Confirm Delete'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteKey(null)}
+                              className="h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs text-slate-600 cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteKey(`qry:${qItem.queryId}`)}
+                            title="Main Owner only: permanently delete query ticket"
+                            className="h-9 px-3 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Delete
+                          </button>
+                        )
+                      )}
                     </div>
                   </div>
                 );

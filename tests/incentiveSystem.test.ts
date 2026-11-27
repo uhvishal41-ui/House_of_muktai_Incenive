@@ -1946,17 +1946,23 @@ test('30. Management Excel workbook builds 2 formatted sheets, new slab names au
 });
 
 // =========================================================================
-// TEST 31: Super Admin Batch Edit, Update & Delete Security Rules Invariants
+// TEST 31: Role-Separated Batch Edit, Update & Delete Security Rules Invariants
 // =========================================================================
-test('31. firestore.rules supports Super Admin audited batch edit/update/delete while keeping audit_logs, incentive_versions & employees undeletable', () => {
+test('31. firestore.rules separates Super Admin draft ops from Main Owner published edit/delete while keeping audit_logs immutable', () => {
   const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
   const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
 
-  // import_batches allows Super Admin delete & audited PUBLISHED metadata/totals update (status locked to PUBLISHED)
+  // import_batches allows Main Owner post-publish edits/deletes, and Super Admin unpublished draft deletes
   const batchBlockMatch = rulesNoComments.match(/match \/import_batches\/\{batchId\}\s*\{[\s\S]*?\n    \}/);
   assert.ok(batchBlockMatch, 'import_batches match block must exist');
-  assert.match(batchBlockMatch[0], /allow delete: if isValidId\(batchId\) && isSuperAdmin\(\);/);
-  assert.match(batchBlockMatch[0], /existing\(\)\.status == 'PUBLISHED'\s*&& incoming\(\)\.status == 'PUBLISHED'/);
+  assert.match(
+    batchBlockMatch[0],
+    /allow delete: if isValidId\(batchId\) && \(\s*isMainOwner\(\)\s*\|\| \(isSuperAdmin\(\) && existing\(\)\.status != 'PUBLISHED'\)\s*\);/,
+  );
+  assert.match(
+    batchBlockMatch[0],
+    /isMainOwner\(\)\s*&& existing\(\)\.status == 'PUBLISHED'\s*&& incoming\(\)\.status == 'PUBLISHED'/,
+  );
   assert.match(batchBlockMatch[0], /'totalSaleAmtPaise'/);
   assert.match(batchBlockMatch[0], /'totalSaleQty'/);
 
@@ -1967,19 +1973,19 @@ test('31. firestore.rules supports Super Admin audited batch edit/update/delete 
   assert.match(rowsBlockMatch[0], /'component1Paise'/);
   assert.match(rowsBlockMatch[0], /'saleAmt1Paise'/);
 
-  // published_incentives, monthly_summaries & notifications permit Super Admin rollback delete (when month is unlocked)
+  // published_incentives & monthly_summaries restrict permanent rollback delete strictly to Main Owner (and unlocked month)
   const pubBlockMatch = rulesNoComments.match(/match \/published_incentives\/\{recordId\}\s*\{[\s\S]*?\n    \}/);
   assert.ok(pubBlockMatch, 'published_incentives match block must exist');
   assert.match(
     pubBlockMatch[0],
-    /allow delete: if isValidId\(recordId\) && isSuperAdmin\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/,
+    /allow delete: if isValidId\(recordId\) && isMainOwner\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/,
   );
 
   const summaryBlockMatch = rulesNoComments.match(/match \/monthly_summaries\/\{summaryId\}\s*\{[\s\S]*?\n    \}/);
   assert.ok(summaryBlockMatch, 'monthly_summaries match block must exist');
-  assert.match(summaryBlockMatch[0], /allow delete: if isValidId\(summaryId\) && isSuperAdmin\(\);/);
+  assert.match(summaryBlockMatch[0], /allow delete: if isValidId\(summaryId\) && isMainOwner\(\);/);
 
-  // Immutable audit logs MUST remain undeletable; version history & employees allow delete ONLY for Main Owner Clean Reset
+  // Immutable audit logs MUST remain undeletable; version history & employees allow delete ONLY for Main Owner
   const auditBlockMatch = rulesNoComments.match(/match \/audit_logs\/\{logId\}\s*\{[\s\S]*?\n    \}/);
   assert.ok(auditBlockMatch && /allow update, delete: if false;/.test(auditBlockMatch[0]));
   const verBlockMatch = rulesNoComments.match(/match \/incentive_versions\/\{versionId\}\s*\{[\s\S]*?\n    \}/);
@@ -2637,7 +2643,7 @@ test('41. firestore.rules enforces exact Salary Slip arithmetic & privacy isolat
   assert.match(slipBlock[0], /incoming\(\)\.uploadedAt == existing\(\)\.uploadedAt/);
   assert.match(
     slipBlock[0],
-    /allow delete: if isValidId\(slipId\) && isSuperAdmin\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/,
+    /allow delete: if isValidId\(slipId\) && isMainOwner\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/,
   );
 
   // 3. departmentVisibilityService cascades Admin Month Visibility toggles to salary_slips
@@ -5543,8 +5549,565 @@ test('78. firestore.rules enforces SalarySlip string bounds, employee_queries em
   assert.match(adminsBlock[0], /existing\(\)\.email == request\.auth\.token\.email/);
 });
 
+// =========================================================================
+// TEST 79: Main Owner vs Super Admin Role Separation (Rules + Services + UI)
+// =========================================================================
+test('79. Main Owner vs Super Admin privileges are separated across firestore.rules, services, and Admin UI', () => {
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  const draftText = fs.readFileSync(path.resolve(process.cwd(), 'DRAFT_firestore.rules'), 'utf-8');
+  assert.equal(rulesText, draftText, 'firestore.rules and DRAFT_firestore.rules must stay identical');
+  const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
 
+  // 1. All destructive master/financial deletes are strictly Main Owner only in firestore.rules
+  const ownerDeleteCollections: Array<[string, RegExp]> = [
+    ['admins', /allow delete: if isValidId\(adminUid\) && isMainOwner\(\);/],
+    ['branches', /allow delete: if isValidId\(branchId\) && isMainOwner\(\);/],
+    ['employees', /allow delete: if isValidId\(employeeId\) && isMainOwner\(\);/],
+    ['published_incentives', /allow delete: if isValidId\(recordId\) && isMainOwner\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/],
+    ['incentive_versions', /allow delete: if isValidId\(versionId\) && isMainOwner\(\);/],
+    ['monthly_summaries', /allow delete: if isValidId\(summaryId\) && isMainOwner\(\);/],
+    ['payout_records', /allow delete: if isValidId\(payoutId\) && isMainOwner\(\);/],
+    ['incentive_adjustments', /allow delete: if isValidId\(adjustmentId\) && isMainOwner\(\);/],
+    ['sales_targets', /allow delete: if isValidId\(targetId\) && isMainOwner\(\);/],
+    ['employee_queries', /allow delete: if isValidId\(queryId\) && isMainOwner\(\);/],
+    ['salary_slips', /allow delete: if isValidId\(slipId\) && isMainOwner\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/],
+    ['employee_loans', /allow delete: if isValidId\(loanId\) && isMainOwner\(\);/],
+  ];
+  for (const [col, pattern] of ownerDeleteCollections) {
+    const m = rulesNoComments.match(new RegExp(`match \\/${col}\\/\\{[^}]+\\}\\s*\\{[\\s\\S]*?\\n    \\}`));
+    assert.ok(m, `${col} match block must exist`);
+    assert.match(m[0], pattern, `${col} delete must be restricted strictly to Main Owner`);
+  }
 
+  // 2. import_batches allows Super Admin draft delete only, while Main Owner owns PUBLISHED edits & deletes
+  const batchBlock = rulesNoComments.match(/match \/import_batches\/\{batchId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(batchBlock);
+  assert.match(
+    batchBlock[0],
+    /isMainOwner\(\)\s*&& existing\(\)\.status == 'PUBLISHED'\s*&& incoming\(\)\.status == 'PUBLISHED'/,
+  );
+  assert.match(
+    batchBlock[0],
+    /allow delete: if isValidId\(batchId\) && \(\s*isMainOwner\(\)\s*\|\| \(isSuperAdmin\(\) && existing\(\)\.status != 'PUBLISHED'\)\s*\);/,
+  );
+
+  // 3. Dedicated audited Main Owner service mutations exist
+  const incSvc = fs.readFileSync(path.resolve(process.cwd(), 'src/services/incentiveService.ts'), 'utf-8');
+  assert.ok(incSvc.includes('export async function deleteEmployeeByOwner('));
+  assert.ok(incSvc.includes("'EMPLOYEE_DELETED_BY_OWNER'"));
+
+  const slipSvc = fs.readFileSync(path.resolve(process.cwd(), 'src/services/salarySlipService.ts'), 'utf-8');
+  assert.ok(slipSvc.includes('export async function updatePublishedSalarySlipByOwner('));
+  assert.ok(slipSvc.includes("'SALARY_SLIP_OWNER_EDITED'"));
+
+  const opsSvc = fs.readFileSync(path.resolve(process.cwd(), 'src/services/operationsService.ts'), 'utf-8');
+  assert.ok(opsSvc.includes('export async function deletePayoutRecordByOwner('));
+  assert.ok(opsSvc.includes('export async function deleteIncentiveAdjustmentByOwner('));
+  assert.ok(opsSvc.includes('export async function deleteEmployeeQueryByOwner('));
+
+  // 4. Admin UI components gate destructive actions & inline Owner editors behind isMainOwner
+  const uiChecks: Array<[string, string[]]> = [
+    ['src/components/admin/OwnerSalarySlipEditModal.tsx', ['updatePublishedSalarySlipByOwner']],
+    ['src/components/admin/SalarySlipsManager.tsx', ['isMainOwner', 'OwnerSalarySlipEditModal']],
+    ['src/components/admin/EmployeeMaster.tsx', ['isMainOwner', 'deleteEmployeeByOwner']],
+    ['src/components/admin/HistoryAndReports.tsx', ['isMainOwner']],
+    ['src/components/admin/AdminPayoutsAndQueries.tsx', ['isMainOwner', 'deletePayoutRecordByOwner', 'deleteIncentiveAdjustmentByOwner', 'deleteEmployeeQueryByOwner']],
+    ['src/components/admin/BranchMaster.tsx', ['isMainOwner']],
+    ['src/components/admin/BranchTargetManager.tsx', ['isMainOwner']],
+    ['src/components/admin/ProExecutiveSuite.tsx', ['isMainOwner']],
+    ['src/components/admin/OwnerAdminAccessManager.tsx', ['Main Owner', 'Super Admin']],
+  ];
+  for (const [relPath, tokens] of uiChecks) {
+    const content = fs.readFileSync(path.resolve(process.cwd(), relPath), 'utf-8');
+    for (const token of tokens) {
+      assert.ok(content.includes(token), `${relPath} must contain ${token}`);
+    }
+  }
+});
+
+// =========================================================================
+// TEST 80: Local Folder Fuzzy Spreadsheet Matcher (Voice Excel Upload)
+// =========================================================================
+test('80. Local Folder Sync fuzzy matches exact, month-alias, ambiguous, and missing spreadsheet filenames accurately', async () => {
+  const {
+    findBestMatchingSpreadsheetFile,
+    scoreSpreadsheetFileMatch,
+  } = await import('../src/lib/localFolderSync.ts');
+
+  const files = [
+    {
+      name: 'Oct_2026_Incentive_Report.xlsx',
+      relativePath: 'Oct_2026_Incentive_Report.xlsx',
+      extension: 'xlsx' as const,
+      getFile: async () => new File([], 'Oct_2026_Incentive_Report.xlsx'),
+    },
+    {
+      name: 'October_2026_Salary_Sheet.xlsx',
+      relativePath: 'Payroll/October_2026_Salary_Sheet.xlsx',
+      extension: 'xlsx' as const,
+      getFile: async () => new File([], 'October_2026_Salary_Sheet.xlsx'),
+    },
+    {
+      name: 'Baramati_Daily_Sales_15Oct.csv',
+      relativePath: 'Baramati_Daily_Sales_15Oct.csv',
+      extension: 'csv' as const,
+      getFile: async () => new File([], 'Baramati_Daily_Sales_15Oct.csv'),
+    },
+  ];
+
+  // 1. Exact filename match
+  const exact = findBestMatchingSpreadsheetFile('Oct_2026_Incentive_Report.xlsx', files);
+  assert.equal(exact.status, 'MATCHED');
+  if (exact.status === 'MATCHED') {
+    assert.equal(exact.entry.name, 'Oct_2026_Incentive_Report.xlsx');
+  }
+
+  // 2. Fuzzy natural spoken query with month alias ("october salary")
+  const fuzzySalary = findBestMatchingSpreadsheetFile('october 2026 salary', files);
+  assert.equal(fuzzySalary.status, 'MATCHED');
+  if (fuzzySalary.status === 'MATCHED') {
+    assert.equal(fuzzySalary.entry.name, 'October_2026_Salary_Sheet.xlsx');
+  }
+
+  // 3. Typo-tolerant query ("baramti daily sales")
+  const typoMatch = findBestMatchingSpreadsheetFile('baramti daily sales', files);
+  assert.equal(typoMatch.status, 'MATCHED');
+  if (typoMatch.status === 'MATCHED') {
+    assert.equal(typoMatch.entry.name, 'Baramati_Daily_Sales_15Oct.csv');
+  }
+
+  // 4. Ambiguous query matching both Oct_2026 files closely
+  const ambiguous = findBestMatchingSpreadsheetFile('oct 2026', files);
+  assert.equal(ambiguous.status, 'AMBIGUOUS');
+  if (ambiguous.status === 'AMBIGUOUS') {
+    assert.ok(ambiguous.candidates.length >= 2);
+  }
+
+  // 5. Missing file returns NOT_FOUND with available suggestions
+  const missing = findBestMatchingSpreadsheetFile('December_2027_Audit_Bonus', files);
+  assert.equal(missing.status, 'NOT_FOUND');
+  assert.ok(missing.suggestions.length >= 1);
+
+  // 6. Score helper ranks closer match strictly higher
+  assert.ok(
+    scoreSpreadsheetFileMatch('incentive oct 2026', files[0].name) >
+      scoreSpreadsheetFileMatch('incentive oct 2026', files[1].name),
+  );
+});
+
+// =========================================================================
+// TEST 81: Marathi Voice Assistant Security, Gemini Tools & UI Wiring
+// =========================================================================
+test('81. Marathi Voice Assistant keeps API keys strictly server-side, protects voice routes with Super Admin auth, and exposes all 14 app tools', async () => {
+  // 1. Verify zero @google/genai or secret env vars in frontend src/
+  const walkSrcFiles = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...walkSrcFiles(full));
+      else if (/\.(ts|tsx|js|jsx)$/.test(entry.name)) out.push(full);
+    }
+    return out;
+  };
+  for (const filePath of walkSrcFiles(path.resolve(process.cwd(), 'src'))) {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    assert.equal(
+      content.includes('@google/genai'),
+      false,
+      `Frontend file ${filePath} must never import @google/genai`,
+    );
+    assert.equal(
+      content.includes('GEMINI_API_KEY'),
+      false,
+      `Frontend file ${filePath} must never reference GEMINI_API_KEY`,
+    );
+    assert.equal(
+      content.includes('ELEVENLABS_API_KEY'),
+      false,
+      `Frontend file ${filePath} must never reference ELEVENLABS_API_KEY`,
+    );
+  }
+
+  // 2. Verify all 14 Function Calling declarations exist in server/voiceTools.ts
+  const { VOICE_FUNCTION_DECLARATIONS } = await import('../server/voiceTools.ts');
+  const declaredNames = VOICE_FUNCTION_DECLARATIONS.map((d) => d.name);
+  const requiredTools = [
+    'navigate_to_section',
+    'filter_workspace',
+    'search_employees',
+    'add_employee',
+    'update_employee',
+    'delete_employee',
+    'manage_incentive_adjustment',
+    'manage_payout_status',
+    'manage_salary_slip',
+    'manage_incentive_batches_and_months',
+    'upload_excel_from_local_folder',
+    'manage_branches_targets_loans',
+    'get_analytics_summary',
+    'download_report',
+    'prepare_whatsapp_dispatch',
+    'get_executive_briefing',
+  ];
+  assert.equal(VOICE_FUNCTION_DECLARATIONS.length, 16);
+  for (const toolName of requiredTools) {
+    assert.ok(declaredNames.includes(toolName), `Missing voice tool declaration: ${toolName}`);
+  }
+
+  // 3. Verify server/voiceService.ts uses official Gemini models, User-Agent header & optional ElevenLabs
+  const voiceSvcText = fs.readFileSync(
+    path.resolve(process.cwd(), 'server/voiceService.ts'),
+    'utf-8',
+  );
+  assert.ok(voiceSvcText.includes("'User-Agent': 'aistudio-build'"));
+  assert.ok(voiceSvcText.includes('gemini-4-hydrogen'));
+  assert.ok(voiceSvcText.includes('gemini-3.5-transcribe'));
+  assert.ok(voiceSvcText.includes('gemini-3.8-flash-lite-tts'));
+  assert.ok(voiceSvcText.includes('eleven_multilingual_v2'));
+  assert.ok(voiceSvcText.includes('process.env.GEMINI_API_KEY'));
+  assert.ok(voiceSvcText.includes('process.env.ELEVENLABS_API_KEY'));
+
+  // 4. Verify server.ts secures all 4 voice routes with authMiddleware + requireSuperAdmin
+  const serverText = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf-8');
+  assert.match(serverText, /router\.get\(\s*'\/voice\/status',\s*authMiddleware,\s*requireSuperAdmin/);
+  assert.match(serverText, /router\.post\(\s*'\/voice\/transcribe',\s*authMiddleware,\s*requireSuperAdmin/);
+  assert.match(serverText, /router\.post\(\s*'\/voice\/converse',\s*authMiddleware,\s*requireSuperAdmin/);
+  assert.match(serverText, /router\.post\(\s*'\/voice\/tts',\s*authMiddleware,\s*requireSuperAdmin/);
+
+  // 5. Verify metadata.json & AdminShell wiring
+  const metaJson = JSON.parse(
+    fs.readFileSync(path.resolve(process.cwd(), 'metadata.json'), 'utf-8'),
+  );
+  assert.ok(metaJson.requestFramePermissions?.includes('microphone'));
+  assert.ok(metaJson.majorCapabilities?.includes('MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API'));
+
+  const shellText = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/admin/AdminShell.tsx'),
+    'utf-8',
+  );
+  assert.ok(shellText.includes('MarathiVoiceAssistant'));
+  assert.ok(shellText.includes('Link Local Folder'));
+  assert.ok(shellText.includes('Folder Linked'));
+});
+
+// =========================================================================
+// TEST 82: Voice Service ThinkingLevel Safety & Devanagari Marathi Employee Lookup
+// =========================================================================
+test('82. Voice service uses valid ThinkingLevel.LOW on gemini-4-hydrogen and matches Devanagari Marathi employee names & digits', async () => {
+  // 1. Regression guard: ThinkingLevel.MINIMAL throws HTTP 400 on gemini-4-hydrogen
+  const voiceSvcText = fs.readFileSync(
+    path.resolve(process.cwd(), 'server/voiceService.ts'),
+    'utf-8',
+  );
+  assert.ok(
+    voiceSvcText.includes('thinkingLevel: ThinkingLevel.LOW'),
+    'gemini-4-hydrogen must use ThinkingLevel.LOW (not MINIMAL)',
+  );
+  assert.equal(
+    voiceSvcText.includes('thinkingLevel: ThinkingLevel.MINIMAL'),
+    false,
+    'ThinkingLevel.MINIMAL must never be passed to gemini-4-hydrogen',
+  );
+  assert.equal(
+    voiceSvcText.includes('delete copy.thoughtSignature'),
+    false,
+    'thoughtSignature must NEVER be stripped from functionCall parts (breaks Gemini 3.1/4 Turn 2 with HTTP 400)',
+  );
+  assert.ok(
+    voiceSvcText.includes('preferredModel') &&
+      voiceSvcText.includes('usedModel') &&
+      voiceSvcText.includes('flattenToolLoopForCrossModelFallback'),
+    'voiceService.ts must pin preferredModel across multi-turn tool loops and flatten history on cross-model failover',
+  );
+  assert.ok(
+    voiceSvcText.includes("apiVersion: 'v1beta'") &&
+      voiceSvcText.includes('getGeminiBetaClient()') &&
+      voiceSvcText.includes("GEMINI_TTS_FALLBACK_MODEL = 'gemini-3.8-flash-tts'") &&
+      voiceSvcText.includes('isPlausibleElevenLabsApiKey') &&
+      voiceSvcText.includes('synthesizeViaGoogleNeuralMarathiTts') &&
+      !voiceSvcText.includes("language_code = 'mr'"),
+    'Gemini 3.8 TTS must use apiVersion: v1beta with neural Marathi MP3 fallback and validate ElevenLabs sk_ API keys',
+  );
+
+  // 2. Verify Devanagari transliteration & phonetic employee matching ("शोभा लोंढे" -> SHOBHA POPAT LONDHE)
+  const { transliterateDevanagariToLatin, findMatchingEmployees } = await import(
+    '../src/services/voiceToolExecutor.ts'
+  );
+  assert.equal(transliterateDevanagariToLatin('शोभा लोंढे'), 'shobha londhe');
+  assert.equal(transliterateDevanagariToLatin('११३६'), '1136');
+
+  const sampleStaff: Employee[] = [
+    ...EMPLOYEES,
+    {
+      employeeId: '1136',
+      loginId: 'HOM1136',
+      authEmail: 'hom1136@staff.houseofmuktai.internal',
+      fullName: 'SHOBHA POPAT LONDHE',
+      branchId: 'DHARASHIV',
+      branchName: 'DHARASHIV',
+      departmentId: 'SAREE',
+      departmentName: 'Saree Dept.',
+      designation: 'Sales Executive',
+      role: 'EMPLOYEE',
+      status: 'ACTIVE',
+      mustChangePassword: false,
+      credentialsProvisioned: true,
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    },
+  ];
+
+  const byMarathiName = findMatchingEmployees('शोभा लोंढे', sampleStaff);
+  assert.equal(byMarathiName.exact?.employeeId, '1136');
+  assert.equal(byMarathiName.exact?.fullName, 'SHOBHA POPAT LONDHE');
+
+  const byMarathiDigits = findMatchingEmployees('११३६', sampleStaff);
+  assert.equal(byMarathiDigits.exact?.employeeId, '1136');
+
+  const byAnitaMarathi = findMatchingEmployees('अनिता शिंगाडे', sampleStaff);
+  assert.equal(byAnitaMarathi.exact?.employeeId, '459');
+});
+
+// =========================================================================
+// TEST 83: Pro Voice AI Upgrades — Wake-Word, Multi-Step Detection, WhatsApp & Executive Briefing
+// =========================================================================
+test('83. Pro Voice AI detects Hey Muktai wake-word, multi-step chains, and executes WhatsApp dispatch + Executive Briefing tools', async () => {
+  const {
+    extractWakeWordCommand,
+    isMultiStepVoiceCommand,
+    describeVoiceToolStepMr,
+  } = await import('../src/lib/voiceProHelpers.ts');
+
+  // 1. Wake-word detection (standalone & inline command in Marathi + English)
+  const w1 = extractWakeWordCommand('हे मुक्ताई');
+  assert.equal(w1.triggered, true);
+  assert.equal(w1.commandText, '');
+
+  const w2 = extractWakeWordCommand('हे मुक्ताई, शोभा लोंढे यांची माहिती सांग');
+  assert.equal(w2.triggered, true);
+  assert.equal(w2.commandText, 'शोभा लोंढे यांची माहिती सांग');
+
+  const w3 = extractWakeWordCommand('Hey Muktai show Dharashiv top performers');
+  assert.equal(w3.triggered, true);
+  assert.equal(w3.commandText, 'show Dharashiv top performers');
+
+  const w4 = extractWakeWordCommand('आजचा पगार किती आहे');
+  assert.equal(w4.triggered, false);
+
+  // 2. Multi-step connector detection
+  assert.equal(
+    isMultiStepVoiceCommand('धाराशिव शाखेचे पेआउट PAID करा आणि रिपोर्ट डाउनलोड करा'),
+    true,
+  );
+  assert.equal(isMultiStepVoiceCommand('Update 1136 to Saree and send WhatsApp slip'), true);
+  assert.equal(isMultiStepVoiceCommand('शोभा लोंढे यांच्याबद्दल माहिती पाहिजे'), false);
+
+  assert.ok(describeVoiceToolStepMr('prepare_whatsapp_dispatch', { employeeIdentifier: '1136' }).includes('WhatsApp'));
+  assert.ok(describeVoiceToolStepMr('get_executive_briefing', {}).includes('ब्रीफिंग'));
+
+  // 3. Execute prepare_whatsapp_dispatch & get_executive_briefing tools end-to-end
+  const { executeVoiceToolCall } = await import('../src/services/voiceToolExecutor.ts');
+  let capturedCard: unknown = null;
+  const mockEnv = {
+    isMainOwner: true,
+    branches: BRANCHES,
+    employees: [
+      {
+        ...EMPLOYEES[0],
+        phone: '9876543210',
+      },
+    ],
+    batches: [],
+    incentives: [],
+    monthlySummaries: [
+      {
+        summaryId: '2026-10__459',
+        monthKey: '2026-10',
+        employeeId: '459',
+        authUid: 'uid_459',
+        employeeName: EMPLOYEES[0].fullName,
+        branchId: EMPLOYEES[0].branchId,
+        branchName: EMPLOYEES[0].branchName,
+        component1TotalPaise: 120_000,
+        component2TotalPaise: 30_000,
+        component3TotalPaise: 10_000,
+        grandTotalPaise: 160_000,
+        totalSaleAmtPaise: 18_500_000,
+        totalSaleQty: 140,
+        publishedDaysCount: 28,
+        sourceType: 'DAILY_AGGREGATE' as const,
+        updatedAt: '2026-11-01T00:00:00Z',
+      },
+    ],
+    payoutRecords: [],
+    adjustments: [],
+    salesTargets: [],
+    employeeQueries: [],
+    salarySlips: [
+      {
+        slipId: '2026-10__459',
+        monthKey: '2026-10',
+        employeeId: '459',
+        authUid: 'uid_459',
+        employeeName: EMPLOYEES[0].fullName,
+        branchId: EMPLOYEES[0].branchId,
+        branchName: EMPLOYEES[0].branchName,
+        departmentId: 'SAREE' as const,
+        departmentName: 'Saree Dept.',
+        designation: 'Sales Executive',
+        totalDays: 31,
+        paidDays: 30,
+        lopDays: 1,
+        weeklyOffDays: 4,
+        paidLeaveDays: 0,
+        overtimeHours: 0,
+        basicPaise: 1_500_000,
+        hraPaise: 300_000,
+        conveyancePaise: 0,
+        specialAllowancePaise: 0,
+        overtimePaise: 0,
+        incentivePaise: 0,
+        otherEarningsPaise: 0,
+        grossEarningsPaise: 1_800_000,
+        pfPaise: 180_000,
+        esicPaise: 0,
+        ptPaise: 20_000,
+        advanceRecoveryPaise: 0,
+        tdsPaise: 0,
+        otherDeductionPaise: 0,
+        totalDeductionsPaise: 200_000,
+        netPayablePaise: 1_600_000,
+        paymentMode: 'BANK' as const,
+        employeeVisible: true,
+        uploadedByEmail: 'uhvishal41@gmail.com',
+        uploadedAt: '2026-11-01T00:00:00Z',
+        updatedAt: '2026-11-01T00:00:00Z',
+      },
+    ],
+    employeeLoans: [],
+    visibilitySettings: {
+      settingId: 'visibility' as const,
+      mode: 'ALL' as const,
+      visibleMonths: [],
+      salarySlipMode: 'ALL' as const,
+      salarySlipVisibleMonths: [],
+      updatedByEmail: 'uhvishal41@gmail.com',
+      updatedAt: '2026-11-01T00:00:00Z',
+    },
+    payrollLockSettings: {
+      settingId: 'payroll_locks' as const,
+      lockedMonths: [],
+      updatedByEmail: 'uhvishal41@gmail.com',
+      updatedAt: '2026-11-01T00:00:00Z',
+    },
+    linkedFolder: (await import('../src/lib/localFolderSync.ts')).EMPTY_LINKED_FOLDER,
+    setLinkedFolder: () => {},
+    navigateToTab: () => {},
+    openModal: () => {},
+    applyVoiceFilter: () => {},
+    refreshAll: async () => {},
+    onLiveStatus: () => {},
+    onPendingConfirmation: () => {},
+    onActionCard: (card: unknown) => {
+      capturedCard = card;
+    },
+  };
+
+  const waRes = await executeVoiceToolCall(
+    'prepare_whatsapp_dispatch',
+    { employeeIdentifier: 'अनिता शिंगाडे', monthKey: '2026-10' },
+    mockEnv,
+  );
+  assert.equal(waRes.ok, true);
+  assert.equal(waRes.hasPhone, true);
+  assert.ok(capturedCard && (capturedCard as { type: string }).type === 'whatsapp');
+  const waItem = (capturedCard as { items: Array<{ waUrl: string }> }).items[0];
+  assert.ok(waItem.waUrl.startsWith('https://wa.me/919876543210?text='));
+
+  const briefRes = await executeVoiceToolCall(
+    'get_executive_briefing',
+    { monthKey: '2026-10' },
+    mockEnv,
+  );
+  assert.equal(briefRes.ok, true);
+  assert.ok(capturedCard && (capturedCard as { type: string }).type === 'briefing');
+  assert.equal((capturedCard as { pendingPayoutCount: number }).pendingPayoutCount, 1);
+  assert.ok(typeof briefRes.directReplyMr === 'string' && briefRes.directReplyMr.includes('बिझनेस रिपोर्ट'));
+});
+
+// =========================================================================
+// TEST 84: Rule-Compliant SalarySlip Update Sanitizer (Zero Permission Denied on Legacy Docs)
+// =========================================================================
+test('84. buildSanitizedSalarySlipForRules strips unknown keys, normalizes legacy paymentMode/departmentId, bounds strings, and computes exact integer totals', async () => {
+  const { buildSanitizedSalarySlipForRules } = await import('../src/services/salarySlipService.ts');
+
+  const dirtyLegacySlip = {
+    slipId: '2026-10__0072',
+    monthKey: '2026-10',
+    employeeId: '0072',
+    authUid: null as unknown as string,
+    employeeName: 'Shobha Londhe',
+    branchId: 'DHARASHIV',
+    branchName: 'DHARASHIV',
+    departmentId: 'LEGACY_UNKNOWN_DEPT' as unknown as import('../src/types/incentive.ts').DepartmentId,
+    departmentName: 'A'.repeat(120),
+    designation: null as unknown as string,
+    dateOfJoining: 'Mon Apr 01 2023 00:00:00 GMT+0530', // > 20 chars
+    panNumber: 'ABCDE1234F_EXTRA_LONG_TEXT_999', // > 20 chars
+    bankIfsc: 'SBIN0001234_TOO_LONG_IFSC', // > 20 chars
+    bankName: 'B'.repeat(100), // > 80 chars
+    paymentMode: 'Bank Transfer' as unknown as import('../src/types/incentive.ts').SalarySlipPaymentMode,
+    remarks: 'R'.repeat(300), // > 240 chars
+    basicPaise: 1_500_000.4,
+    hraPaise: 300_000,
+    conveyancePaise: 0,
+    specialAllowancePaise: 0,
+    overtimePaise: 0,
+    incentivePaise: 120_000,
+    otherEarningsPaise: 0,
+    pfPaise: 180_000,
+    esicPaise: 0,
+    ptPaise: 20_000,
+    advanceRecoveryPaise: 0,
+    tdsPaise: 0,
+    otherDeductionPaise: 0,
+    totalDays: 35, // > 31
+    paidDays: 34, // > 31
+    lopDays: -2,
+    weeklyOffDays: 4,
+    paidLeaveDays: 0,
+    overtimeHours: 0,
+    unknownExtraLegacyKey: 'SHOULD_BE_STRIPPED',
+  } as unknown as import('../src/types/incentive.ts').SalarySlip;
+
+  const clean = buildSanitizedSalarySlipForRules(dirtyLegacySlip, {
+    slipId: '2026-10__0072',
+    monthKey: '2026-10',
+    employeeId: '0072',
+    uploadedByEmail: 'uhvishal41@gmail.com',
+    uploadedAt: '2026-11-01T00:00:00.000Z',
+    updatedAt: '2026-11-27T07:00:00.000Z',
+  });
+
+  assert.equal('unknownExtraLegacyKey' in clean, false, 'Extra unknown keys must be stripped');
+  assert.equal(clean.authUid, '');
+  assert.equal(clean.departmentId, '');
+  assert.equal(clean.departmentName?.length, 80);
+  assert.equal(clean.designation, 'Employee');
+  assert.equal(clean.dateOfJoining?.length, 20);
+  assert.equal(clean.panNumber?.length, 20);
+  assert.equal(clean.bankIfsc?.length, 20);
+  assert.equal(clean.bankName?.length, 80);
+  assert.equal(clean.remarks?.length, 240);
+  assert.equal(clean.paymentMode, 'BANK');
+  assert.equal(clean.employeeVisible, true);
+  assert.equal(clean.totalDays, 31);
+  assert.equal(clean.paidDays, 31);
+  assert.equal(clean.lopDays, 0);
+  assert.equal(clean.grossEarningsPaise, 1_920_000);
+  assert.equal(clean.totalDeductionsPaise, 200_000);
+  assert.equal(clean.netPayablePaise, 1_720_000);
+});
 
 
 

@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Building2, Edit3, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 import { sanitizeId } from '../../lib/format';
 import {
   DEFAULT_12_BRANCHES,
@@ -17,6 +18,7 @@ interface Props {
 }
 
 export function BranchMaster({ branches, employees, onRefresh }: Props) {
+  const { isMainOwner } = useAuth();
   const [search, setSearch] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Branch | null>(null);
@@ -210,11 +212,11 @@ export function BranchMaster({ branches, employees, onRefresh }: Props) {
               {syncing ? 'Linking...' : 'Link Official 12'}
             </button>
           )}
-          {(missingOfficialCount > 0 || extraUnreferencedCount > 0) && branches.length > 0 && (
+          {(missingOfficialCount > 0 || (isMainOwner && extraUnreferencedCount > 0)) && branches.length > 0 && (
             <button
               type="button"
               disabled={syncing}
-              onClick={() => handleSyncOfficial12(true)}
+              onClick={() => handleSyncOfficial12(isMainOwner)}
               className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-800 inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50 cursor-pointer"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
@@ -425,11 +427,12 @@ export function BranchMaster({ branches, employees, onRefresh }: Props) {
                             <Edit3 className="w-3.5 h-3.5" />
                             Edit
                           </button>
-                          {!isOfficial && staffCount === 0 && (
+                          {isMainOwner && !isOfficial && staffCount === 0 && (
                             <button
                               type="button"
                               onClick={() => setConfirmDelete(branch)}
                               className="inline-flex items-center gap-1 text-xs font-medium text-red-700 hover:underline cursor-pointer"
+                              title="Main Owner only: permanently remove unused branch"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                               Remove

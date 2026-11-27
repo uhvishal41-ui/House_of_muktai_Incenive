@@ -920,6 +920,51 @@ export async function resolveEmployeeQuery(params: {
   }
 }
 
+export async function deletePayoutRecordByOwner(payout: PayoutRecord): Promise<void> {
+  requireActor();
+  try {
+    await deleteDoc(doc(db, 'payout_records', payout.payoutId));
+    await writeOpsAuditLog({
+      action: 'PAYOUT_DELETED_BY_OWNER',
+      targetType: 'payout_records',
+      targetId: payout.payoutId,
+      summary: `Main Owner deleted payout record for ${payout.employeeName} (${payout.employeeId}, ${payout.monthKey})`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `payout_records/${payout.payoutId}`);
+  }
+}
+
+export async function deleteIncentiveAdjustmentByOwner(adj: IncentiveAdjustment): Promise<void> {
+  requireActor();
+  try {
+    await deleteDoc(doc(db, 'incentive_adjustments', adj.adjustmentId));
+    await writeOpsAuditLog({
+      action: 'ADJUSTMENT_DELETED_BY_OWNER',
+      targetType: 'incentive_adjustments',
+      targetId: adj.adjustmentId,
+      summary: `Main Owner deleted ${adj.type} adjustment (${adj.employeeName}, ${adj.monthKey})`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `incentive_adjustments/${adj.adjustmentId}`);
+  }
+}
+
+export async function deleteEmployeeQueryByOwner(queryRec: EmployeeQuery): Promise<void> {
+  requireActor();
+  try {
+    await deleteDoc(doc(db, 'employee_queries', queryRec.queryId));
+    await writeOpsAuditLog({
+      action: 'QUERY_DELETED_BY_OWNER',
+      targetType: 'employee_queries',
+      targetId: queryRec.queryId,
+      summary: `Main Owner deleted employee query ${queryRec.queryId} (${queryRec.employeeName})`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `employee_queries/${queryRec.queryId}`);
+  }
+}
+
 // =========================================================================
 // 5. FORMATTED MULTI-SHEET EXCEL MANAGEMENT REPORT DOWNLOAD
 // =========================================================================

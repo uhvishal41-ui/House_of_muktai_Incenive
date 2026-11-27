@@ -92,6 +92,175 @@ function validateSalarySlipDocForRules(slip: SalarySlip): string | null {
   return null;
 }
 
+function toBoundedString(value: unknown, maxLen: number): string {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, maxLen);
+}
+
+/**
+ * Constructs a strictly whitelisted, Firestore-rules-compliant SalarySlip payload
+ * (eliminating legacy extra keys, null fields, oversized strings, unnormalized paymentMode/departmentId,
+ * or non-integer paise that would otherwise trigger `Missing or insufficient permissions` on update).
+ */
+export function buildSanitizedSalarySlipForRules(
+  base: Partial<SalarySlip>,
+  overrides: Partial<SalarySlip> & {
+    slipId: string;
+    monthKey: string;
+    employeeId: string;
+    uploadedByEmail: string;
+    uploadedAt: string;
+    updatedAt: string;
+  },
+): SalarySlip {
+  const merged = { ...base, ...overrides };
+
+  const basicPaise = toSafeNonNegInt(merged.basicPaise);
+  const dearnessAllowancePaise = toSafeNonNegInt(merged.dearnessAllowancePaise);
+  const hraPaise = toSafeNonNegInt(merged.hraPaise);
+  const attendanceAllowancePaise = toSafeNonNegInt(merged.attendanceAllowancePaise);
+  const washingAllowancePaise = toSafeNonNegInt(merged.washingAllowancePaise);
+  const conveyancePaise = toSafeNonNegInt(merged.conveyancePaise);
+  const medicalAllowancePaise = toSafeNonNegInt(merged.medicalAllowancePaise);
+  const leaveTravelAllowancePaise = toSafeNonNegInt(merged.leaveTravelAllowancePaise);
+  const communicationExpensesPaise = toSafeNonNegInt(merged.communicationExpensesPaise);
+  const healthClubAllowancePaise = toSafeNonNegInt(merged.healthClubAllowancePaise);
+  const adhocAllowancePaise = toSafeNonNegInt(merged.adhocAllowancePaise);
+  const travelingAllowancePaise = toSafeNonNegInt(merged.travelingAllowancePaise);
+  const salesCommissionPaise = toSafeNonNegInt(merged.salesCommissionPaise);
+  const specialAllowancePaise = toSafeNonNegInt(merged.specialAllowancePaise);
+  const overtimePaise = toSafeNonNegInt(merged.overtimePaise);
+  const incentivePaise = toSafeNonNegInt(merged.incentivePaise);
+  const arrearsPaise = toSafeNonNegInt(merged.arrearsPaise);
+  const otherEarningsPaise = toSafeNonNegInt(merged.otherEarningsPaise);
+
+  const grossEarningsPaise =
+    basicPaise +
+    dearnessAllowancePaise +
+    hraPaise +
+    attendanceAllowancePaise +
+    washingAllowancePaise +
+    conveyancePaise +
+    medicalAllowancePaise +
+    leaveTravelAllowancePaise +
+    communicationExpensesPaise +
+    healthClubAllowancePaise +
+    adhocAllowancePaise +
+    travelingAllowancePaise +
+    salesCommissionPaise +
+    specialAllowancePaise +
+    overtimePaise +
+    incentivePaise +
+    arrearsPaise +
+    otherEarningsPaise;
+
+  const pfPaise = toSafeNonNegInt(merged.pfPaise);
+  const esicPaise = toSafeNonNegInt(merged.esicPaise);
+  const ptPaise = toSafeNonNegInt(merged.ptPaise);
+  const lwfPaise = toSafeNonNegInt(merged.lwfPaise);
+  const advanceRecoveryPaise = toSafeNonNegInt(merged.advanceRecoveryPaise);
+  const tdsPaise = toSafeNonNegInt(merged.tdsPaise);
+  const penaltyPaise = toSafeNonNegInt(merged.penaltyPaise);
+  const insurancePaise = toSafeNonNegInt(merged.insurancePaise);
+  const otherDeductionPaise = toSafeNonNegInt(merged.otherDeductionPaise);
+
+  const totalDeductionsPaise =
+    pfPaise +
+    esicPaise +
+    ptPaise +
+    lwfPaise +
+    advanceRecoveryPaise +
+    tdsPaise +
+    penaltyPaise +
+    insurancePaise +
+    otherDeductionPaise;
+
+  const netPayablePaise = grossEarningsPaise - totalDeductionsPaise;
+
+  const cleanSaleId = toBoundedString(merged.saleId, 40).toUpperCase();
+  const cleanGender = toBoundedString(merged.gender, 20);
+  const cleanCategory = toBoundedString(merged.category, 40);
+  const presentDays = toSafeAttendanceNumber(merged.presentDays, 31);
+  const overtimeDays = toSafeAttendanceNumber(merged.overtimeDays, 366);
+  const monthlySalaryRatePaise = toSafeNonNegInt(merged.monthlySalaryRatePaise);
+  const monthlyGrossRatePaise = toSafeNonNegInt(merged.monthlyGrossRatePaise);
+
+  const cleanEmployeeId = toBoundedString(merged.employeeId, 128);
+  const cleanBranchId = toBoundedString(merged.branchId, 128);
+
+  return {
+    slipId: toBoundedString(merged.slipId, 128),
+    monthKey: toBoundedString(merged.monthKey, 7),
+    employeeId: cleanEmployeeId,
+    ...(cleanSaleId ? { saleId: cleanSaleId } : {}),
+    authUid: toBoundedString(merged.authUid, 128),
+    employeeName: toBoundedString(merged.employeeName, 120) || cleanEmployeeId || 'Employee',
+    branchId: cleanBranchId,
+    branchName: toBoundedString(merged.branchName, 120) || cleanBranchId || 'Branch',
+    departmentId: sanitizeDepartmentId(merged.departmentId),
+    departmentName: toBoundedString(merged.departmentName, 80),
+    designation: toBoundedString(merged.designation, 80) || 'Employee',
+    ...(cleanGender ? { gender: cleanGender } : {}),
+    ...(cleanCategory ? { category: cleanCategory } : {}),
+    dateOfJoining: toBoundedString(merged.dateOfJoining, 20),
+    panNumber: toBoundedString(merged.panNumber, 20),
+    uanNumber: toBoundedString(merged.uanNumber, 24),
+    pfNumber: toBoundedString(merged.pfNumber, 32),
+    esicNumber: toBoundedString(merged.esicNumber, 32),
+    bankName: toBoundedString(merged.bankName, 80),
+    bankAccountMasked: toBoundedString(merged.bankAccountMasked, 32),
+    bankIfsc: toBoundedString(merged.bankIfsc, 20),
+    totalDays: toSafeAttendanceNumber(merged.totalDays, 31),
+    ...(presentDays > 0 || merged.presentDays === 0 ? { presentDays } : {}),
+    paidDays: toSafeAttendanceNumber(merged.paidDays, 31),
+    lopDays: toSafeAttendanceNumber(merged.lopDays, 31),
+    weeklyOffDays: toSafeAttendanceNumber(merged.weeklyOffDays, 31),
+    paidLeaveDays: toSafeAttendanceNumber(merged.paidLeaveDays, 31),
+    ...(overtimeDays > 0 || merged.overtimeDays === 0 ? { overtimeDays } : {}),
+    overtimeHours: toSafeAttendanceNumber(merged.overtimeHours, 500),
+    ...(monthlySalaryRatePaise > 0 ? { monthlySalaryRatePaise } : {}),
+    ...(monthlyGrossRatePaise > 0 ? { monthlyGrossRatePaise } : {}),
+    basicPaise,
+    dearnessAllowancePaise,
+    hraPaise,
+    attendanceAllowancePaise,
+    washingAllowancePaise,
+    conveyancePaise,
+    medicalAllowancePaise,
+    leaveTravelAllowancePaise,
+    communicationExpensesPaise,
+    healthClubAllowancePaise,
+    adhocAllowancePaise,
+    travelingAllowancePaise,
+    salesCommissionPaise,
+    specialAllowancePaise,
+    overtimePaise,
+    incentivePaise,
+    arrearsPaise,
+    otherEarningsPaise,
+    grossEarningsPaise,
+    pfPaise,
+    esicPaise,
+    ptPaise,
+    lwfPaise,
+    advanceRecoveryPaise,
+    tdsPaise,
+    penaltyPaise,
+    insurancePaise,
+    otherDeductionPaise,
+    totalDeductionsPaise,
+    netPayablePaise,
+    paymentMode: normalizeSalaryPaymentMode(String(merged.paymentMode || '')),
+    paymentReference: toBoundedString(merged.paymentReference, 120),
+    paymentDate: toBoundedString(merged.paymentDate, 30),
+    remarks: toBoundedString(merged.remarks, 240),
+    employeeVisible: merged.employeeVisible !== false,
+    uploadedByEmail: toBoundedString(merged.uploadedByEmail, 180) || 'admin@houseofmuktai.co.in',
+    uploadedAt: toBoundedString(merged.uploadedAt, 40) || new Date().toISOString().slice(0, 40),
+    updatedAt: toBoundedString(merged.updatedAt, 40) || new Date().toISOString().slice(0, 40),
+  };
+}
+
 function requireActor(): { uid: string; email: string } {
   const user = auth.currentUser;
   if (!user) throw new Error('Authentication required. Please sign in again.');
@@ -831,15 +1000,15 @@ export async function moveSalarySlipsToMonthBatch(params: {
       const newSlipId = buildSalarySlipId(cleanTargetMonth, cleanEmpId);
       const existingTarget = existingById.get(newSlipId);
 
-      const newSlipDoc: SalarySlip = {
-        ...oldSlip,
+      const newSlipDoc: SalarySlip = buildSanitizedSalarySlipForRules(oldSlip, {
         slipId: newSlipId,
         monthKey: cleanTargetMonth,
+        employeeId: cleanEmpId,
         employeeVisible: targetVisible,
         uploadedByEmail: actor.email,
         uploadedAt: (existingTarget?.uploadedAt || oldSlip.uploadedAt || now).slice(0, 40),
         updatedAt: now,
-      };
+      });
 
       const preflightErr = validateSalarySlipDocForRules(newSlipDoc);
       if (preflightErr) {
@@ -911,3 +1080,170 @@ export async function moveSalarySlipsToMonthBatch(params: {
   return { movedCount, deletedOldCount };
 }
 
+export interface OwnerSalarySlipEditInput {
+  totalDays: number;
+  presentDays: number;
+  paidDays: number;
+  lopDays: number;
+  weeklyOffDays: number;
+  paidLeaveDays: number;
+  overtimeDays: number;
+  overtimeHours: number;
+  basicPaise: number;
+  dearnessAllowancePaise: number;
+  hraPaise: number;
+  attendanceAllowancePaise: number;
+  washingAllowancePaise: number;
+  conveyancePaise: number;
+  medicalAllowancePaise: number;
+  leaveTravelAllowancePaise: number;
+  communicationExpensesPaise: number;
+  healthClubAllowancePaise: number;
+  adhocAllowancePaise: number;
+  travelingAllowancePaise: number;
+  salesCommissionPaise: number;
+  specialAllowancePaise: number;
+  overtimePaise: number;
+  incentivePaise: number;
+  arrearsPaise: number;
+  otherEarningsPaise: number;
+  pfPaise: number;
+  esicPaise: number;
+  ptPaise: number;
+  lwfPaise: number;
+  advanceRecoveryPaise: number;
+  tdsPaise: number;
+  penaltyPaise: number;
+  insurancePaise: number;
+  otherDeductionPaise: number;
+  paymentMode: SalarySlip['paymentMode'];
+  paymentReference: string;
+  paymentDate: string;
+  remarks: string;
+}
+
+/**
+ * Main Owner ONLY: Directly edits and updates a published SalarySlip with exact integer paise
+ * recalculation (matching Firestore rules arithmetic) and records an immutable audit log.
+ */
+export async function updatePublishedSalarySlipByOwner(
+  slip: SalarySlip,
+  patch: OwnerSalarySlipEditInput,
+): Promise<SalarySlip> {
+  const actor = requireActor();
+  const now = new Date().toISOString();
+
+  // Pre-check Payroll Lock so Main Owner gets a clear message instead of a raw Firestore permission error
+  try {
+    const lockSnap = await getDoc(doc(db, 'portal_settings', 'payroll_locks'));
+    if (lockSnap.exists()) {
+      const lockData = lockSnap.data() as { lockedMonths?: unknown };
+      if (
+        Array.isArray(lockData.lockedMonths) &&
+        lockData.lockedMonths.includes(slip.monthKey)
+      ) {
+        throw new Error(
+          `Month ${slip.monthKey} is Payroll-Locked. Unlock ${slip.monthKey} in Payroll Governance before editing salary slips.`,
+        );
+      }
+    }
+  } catch (lockErr) {
+    if (lockErr instanceof Error && lockErr.message.includes('Payroll-Locked')) {
+      throw lockErr;
+    }
+    // Non-blocking if settings read transiently fails
+  }
+
+  // Re-read live Firestore document so immutable fields (slipId, monthKey, employeeId, uploadedAt) match 100%
+  const slipRef = doc(db, 'salary_slips', slip.slipId);
+  let liveBase: Partial<SalarySlip> = slip;
+  try {
+    const liveSnap = await getDoc(slipRef);
+    if (liveSnap.exists()) {
+      liveBase = liveSnap.data() as Partial<SalarySlip>;
+    }
+  } catch {
+    // Fallback to in-memory slip
+  }
+
+  const immutableSlipId = toBoundedString(liveBase.slipId, 128) || slip.slipId;
+  const immutableMonthKey = toBoundedString(liveBase.monthKey, 7) || slip.monthKey;
+  const immutableEmployeeId = toBoundedString(liveBase.employeeId, 128) || slip.employeeId;
+  const immutableUploadedAt =
+    toBoundedString(liveBase.uploadedAt, 40) ||
+    toBoundedString(slip.uploadedAt, 40) ||
+    now;
+
+  const updated: SalarySlip = buildSanitizedSalarySlipForRules(liveBase, {
+    slipId: immutableSlipId,
+    monthKey: immutableMonthKey,
+    employeeId: immutableEmployeeId,
+    totalDays: toSafeAttendanceNumber(patch.totalDays, 31),
+    presentDays: toSafeAttendanceNumber(patch.presentDays, 31),
+    paidDays: toSafeAttendanceNumber(patch.paidDays, 31),
+    lopDays: toSafeAttendanceNumber(patch.lopDays, 31),
+    weeklyOffDays: toSafeAttendanceNumber(patch.weeklyOffDays, 31),
+    paidLeaveDays: toSafeAttendanceNumber(patch.paidLeaveDays, 31),
+    overtimeDays: toSafeAttendanceNumber(patch.overtimeDays, 366),
+    overtimeHours: toSafeAttendanceNumber(patch.overtimeHours, 500),
+    basicPaise: toSafeNonNegInt(patch.basicPaise),
+    dearnessAllowancePaise: toSafeNonNegInt(patch.dearnessAllowancePaise),
+    hraPaise: toSafeNonNegInt(patch.hraPaise),
+    attendanceAllowancePaise: toSafeNonNegInt(patch.attendanceAllowancePaise),
+    washingAllowancePaise: toSafeNonNegInt(patch.washingAllowancePaise),
+    conveyancePaise: toSafeNonNegInt(patch.conveyancePaise),
+    medicalAllowancePaise: toSafeNonNegInt(patch.medicalAllowancePaise),
+    leaveTravelAllowancePaise: toSafeNonNegInt(patch.leaveTravelAllowancePaise),
+    communicationExpensesPaise: toSafeNonNegInt(patch.communicationExpensesPaise),
+    healthClubAllowancePaise: toSafeNonNegInt(patch.healthClubAllowancePaise),
+    adhocAllowancePaise: toSafeNonNegInt(patch.adhocAllowancePaise),
+    travelingAllowancePaise: toSafeNonNegInt(patch.travelingAllowancePaise),
+    salesCommissionPaise: toSafeNonNegInt(patch.salesCommissionPaise),
+    specialAllowancePaise: toSafeNonNegInt(patch.specialAllowancePaise),
+    overtimePaise: toSafeNonNegInt(patch.overtimePaise),
+    incentivePaise: toSafeNonNegInt(patch.incentivePaise),
+    arrearsPaise: toSafeNonNegInt(patch.arrearsPaise),
+    otherEarningsPaise: toSafeNonNegInt(patch.otherEarningsPaise),
+    pfPaise: toSafeNonNegInt(patch.pfPaise),
+    esicPaise: toSafeNonNegInt(patch.esicPaise),
+    ptPaise: toSafeNonNegInt(patch.ptPaise),
+    lwfPaise: toSafeNonNegInt(patch.lwfPaise),
+    advanceRecoveryPaise: toSafeNonNegInt(patch.advanceRecoveryPaise),
+    tdsPaise: toSafeNonNegInt(patch.tdsPaise),
+    penaltyPaise: toSafeNonNegInt(patch.penaltyPaise),
+    insurancePaise: toSafeNonNegInt(patch.insurancePaise),
+    otherDeductionPaise: toSafeNonNegInt(patch.otherDeductionPaise),
+    paymentMode: normalizeSalaryPaymentMode(String(patch.paymentMode || '')),
+    paymentReference: toBoundedString(patch.paymentReference, 120),
+    paymentDate: toBoundedString(patch.paymentDate, 30),
+    remarks: toBoundedString(patch.remarks, 240),
+    uploadedByEmail: actor.email,
+    uploadedAt: immutableUploadedAt,
+    updatedAt: now,
+  });
+
+  const preflightErr = validateSalarySlipDocForRules(updated);
+  if (preflightErr) {
+    throw new Error(preflightErr);
+  }
+
+  try {
+    await setDoc(slipRef, updated);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `salary_slips/${updated.slipId}`);
+    throw error;
+  }
+
+  try {
+    await writeSalaryAuditLog({
+      action: 'SALARY_SLIP_OWNER_EDITED',
+      targetType: 'salary_slips',
+      targetId: updated.slipId,
+      summary: `Main Owner directly updated salary slip for ${updated.employeeName} (${updated.employeeId}, ${updated.monthKey}): Net ₹${(updated.netPayablePaise / 100).toFixed(2)}.`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
+  }
+
+  return updated;
+}

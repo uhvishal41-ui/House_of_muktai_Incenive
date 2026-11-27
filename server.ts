@@ -21,6 +21,14 @@ import {
   parseExcelBuffer,
 } from './server/excelEngine.ts';
 import {
+  getVoiceCapabilitiesStatus,
+  runMarathiVoiceTurn,
+  synthesizeMarathiSpeech,
+  transcribeMarathiVoiceAudio,
+} from './server/voiceService.ts';
+import type { VoiceWorkspaceContext } from './server/voiceTools.ts';
+import type { Content } from '@google/genai';
+import {
   authorizeEmployeeStatusChange,
   validateImportBatch,
 } from './src/lib/incentiveEngine.ts';
@@ -260,6 +268,58 @@ const managementReportSchema = z.object({
       }),
     )
     .max(5000),
+});
+
+const voiceTranscribeSchema = z.object({
+  audioBase64: z.string().min(16).max(5_500_000),
+  mimeType: z
+    .string()
+    .regex(/^audio\/[a-zA-Z0-9.+-]+(;\s*codecs=[a-zA-Z0-9.,_-]+)?$/)
+    .max(80),
+});
+
+const voiceContextSchema = z.object({
+  activeTab: z.string().max(60),
+  isMainOwner: z.boolean(),
+  actorLabel: z.string().max(200),
+  todayIst: z.string().max(24),
+  currentMonthKey: z.string().max(16),
+  branches: z
+    .array(
+      z.object({
+        branchId: z.string().max(80),
+        branchCode: z.string().max(64),
+        branchName: z.string().max(160),
+      }),
+    )
+    .max(200),
+  departments: z
+    .array(
+      z.object({
+        id: z.string().max(60),
+        name: z.string().max(100),
+      }),
+    )
+    .max(50),
+  nonSalesDepartments: z.array(z.string().max(100)).max(100),
+  employeeCount: z.number().int().min(0),
+  activeEmployeeCount: z.number().int().min(0),
+  availableIncentiveMonths: z.array(z.string().max(16)).max(60),
+  availableSalaryMonths: z.array(z.string().max(16)).max(60),
+  lockedMonths: z.array(z.string().max(16)).max(60),
+  folderLinked: z.boolean(),
+  folderName: z.string().max(200),
+  folderFiles: z.array(z.string().max(240)).max(200),
+});
+
+const voiceConverseSchema = z.object({
+  contents: z.array(z.record(z.string(), z.unknown())).min(1).max(32),
+  context: voiceContextSchema,
+  preferredModel: z.enum(['gemini-4-hydrogen', 'gemini-3.1-flash-lite']).optional(),
+});
+
+const voiceTtsSchema = z.object({
+  text: z.string().min(1).max(900),
 });
 
 export function createApiRouter(authMiddleware = verifyFirebaseBearerToken) {
@@ -515,6 +575,76 @@ export function createApiRouter(authMiddleware = verifyFirebaseBearerToken) {
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Failed to build management Excel report.';
+        res.status(400).json({ error: message });
+      }
+    },
+  );
+
+  // --- MARATHI VOICE ASSISTANT ROUTES (Server-Side Gemini API + Optional ElevenLabs TTS) ---
+  router.get(
+    '/voice/status',
+    authMiddleware,
+    requireSuperAdmin,
+    (_req: AuthenticatedRequest, res) => {
+      res.json(getVoiceCapabilitiesStatus());
+    },
+  );
+
+  router.post(
+    '/voice/transcribe',
+    authMiddleware,
+    requireSuperAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const parsed = voiceTranscribeSchema.parse(req.body ?? {});
+        const result = await transcribeMarathiVoiceAudio({
+          audioBase64: parsed.audioBase64,
+          mimeType: parsed.mimeType,
+        });
+        res.json(result);
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Failed to transcribe voice audio.';
+        console.error('[Voice Transcribe Error]', message.slice(0, 260));
+        res.status(400).json({ error: message });
+      }
+    },
+  );
+
+  router.post(
+    '/voice/converse',
+    authMiddleware,
+    requireSuperAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const parsed = voiceConverseSchema.parse(req.body ?? {});
+        const result = await runMarathiVoiceTurn({
+          contents: parsed.contents as unknown as Content[],
+          context: parsed.context as VoiceWorkspaceContext,
+          preferredModel: parsed.preferredModel,
+        });
+        res.json(result);
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Failed to process voice assistant command.';
+        console.error('[Voice Converse Error]', message.slice(0, 320));
+        res.status(400).json({ error: message });
+      }
+    },
+  );
+
+  router.post(
+    '/voice/tts',
+    authMiddleware,
+    requireSuperAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const parsed = voiceTtsSchema.parse(req.body ?? {});
+        const result = await synthesizeMarathiSpeech(parsed.text);
+        res.json(result);
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Speech synthesis unavailable.';
         res.status(400).json({ error: message });
       }
     },

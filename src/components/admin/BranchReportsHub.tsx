@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Archive,
   Building2,
@@ -60,6 +60,8 @@ import type {
   SalarySlip,
 } from '../../types/incentive';
 
+import type { VoiceFilterCommand } from '../../services/voiceToolExecutor';
+
 interface Props {
   branches: Branch[];
   employees: Employee[];
@@ -68,6 +70,7 @@ interface Props {
   payoutRecords: PayoutRecord[];
   adjustments: IncentiveAdjustment[];
   payrollLockSettings?: PayrollLockSettings;
+  voiceFilter?: VoiceFilterCommand | null;
 }
 
 export function BranchReportsHub({
@@ -78,6 +81,7 @@ export function BranchReportsHub({
   payoutRecords,
   adjustments,
   payrollLockSettings,
+  voiceFilter,
 }: Props) {
   const availableMonths = useMemo(() => {
     const set = new Set<string>([getCurrentMonthKeyIST()]);
@@ -95,6 +99,18 @@ export function BranchReportsHub({
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [zipProgress, setZipProgress] = useState<{ done: number; total: number } | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!voiceFilter || voiceFilter.targetTab !== 'branch-reports') return;
+    if (voiceFilter.clearFilters) {
+      setSelectedBranchId('ALL');
+      return;
+    }
+    if (voiceFilter.branchId !== undefined) setSelectedBranchId(voiceFilter.branchId);
+    if (voiceFilter.monthKey && voiceFilter.monthKey !== 'ALL') {
+      setSelectedMonth(voiceFilter.monthKey);
+    }
+  }, [voiceFilter]);
 
   const effectiveMonth = availableMonths.includes(selectedMonth)
     ? selectedMonth

@@ -780,6 +780,64 @@ export function OwnerAdminAccessManager({ onRefreshShell }: Props) {
           </div>
         )}
       </div>
+
+      {/* Role & Permissions Matrix: Main Owner vs Super Admin (Enforced by Firestore Rules + UI) */}
+      <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+        <div className="px-5 py-4 border-b border-slate-100 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-bold text-[#0F1F3D] flex items-center gap-2">
+              <Crown className="w-4 h-4 text-[#B8923A]" />
+              Role &amp; Permissions Matrix · Main Owner vs Super Admin
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              मुख्य मालक (Main Owner) आणि सुपर अॅडमिन (Super Admin) यांचे स्वतंत्र अधिकार — UI आणि Firestore Rules दोन्हीवर कडकपणे लागू.
+            </p>
+          </div>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr className="border-b border-slate-200 bg-slate-50 text-slate-600 font-semibold">
+                <th className="py-2.5 px-4">Module / Capability</th>
+                <th className="py-2.5 px-4">Super Admin (Daily Operations)</th>
+                <th className="py-2.5 px-4">Main Owner (Full Governance &amp; Control)</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 text-slate-700">
+              <tr>
+                <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Employees &amp; Branches</td>
+                <td className="py-2.5 px-4">Add, Edit, Activate/Deactivate, Provision Logins</td>
+                <td className="py-2.5 px-4 font-medium text-emerald-800">All Admin rights + <strong>Permanent Delete</strong> Employee &amp; Branch</td>
+              </tr>
+              <tr>
+                <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Incentive Excel Batches</td>
+                <td className="py-2.5 px-4">Upload, Validate, Approve, Publish; Edit/Delete unpublished drafts</td>
+                <td className="py-2.5 px-4 font-medium text-emerald-800">All Admin rights + <strong>Edit/Delete PUBLISHED Batches</strong> &amp; <strong>Delete Whole Month</strong></td>
+              </tr>
+              <tr>
+                <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Monthly Salary Slips</td>
+                <td className="py-2.5 px-4">Upload Paysheet, Publish, 1-Click Sync, PDF/WhatsApp Dispatch</td>
+                <td className="py-2.5 px-4 font-medium text-emerald-800">All Admin rights + <strong>Direct Edit Slip</strong>, <strong>Move Month</strong>, <strong>Single &amp; Bulk Delete</strong></td>
+              </tr>
+              <tr>
+                <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Payouts, Adjustments &amp; Queries</td>
+                <td className="py-2.5 px-4">Mark Approved/Paid, Add/Void Adjustments, Reply &amp; Resolve Queries</td>
+                <td className="py-2.5 px-4 font-medium text-emerald-800">All Admin rights + <strong>Permanent Delete</strong> Payouts, Adjustments &amp; Queries</td>
+              </tr>
+              <tr>
+                <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Loans &amp; Sales Targets</td>
+                <td className="py-2.5 px-4">Create &amp; Update Targets, Issue Loans, Record EMI &amp; Settle</td>
+                <td className="py-2.5 px-4 font-medium text-emerald-800">All Admin rights + <strong>Permanent Delete</strong> Loans &amp; Sales Targets</td>
+              </tr>
+              <tr>
+                <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Master Governance</td>
+                <td className="py-2.5 px-4 text-slate-400">Restricted (View-Only / No Access)</td>
+                <td className="py-2.5 px-4 font-medium text-[#9A7625]"><strong>Admin Account Control</strong>, <strong>Month Payroll Lock/Unlock</strong>, <strong>Fresh Start Reset</strong></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }

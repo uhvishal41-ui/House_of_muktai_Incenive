@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   AlertTriangle,
@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   Copy,
   Download,
+  Edit3,
   ExternalLink,
   FileDown,
   FileSpreadsheet,
@@ -26,6 +27,7 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 import { getShareableStaffAppUrl } from '../../lib/companyBrand';
 import { OFFICIAL_DEPARTMENTS } from '../../lib/departmentLeaderboardEngine';
 import {
@@ -78,6 +80,7 @@ import {
   type MissingEmployeeActionMode,
 } from './MissingSalaryEmployeeModal';
 import { MonthVisibilityControlCard } from './MonthVisibilityControlCard';
+import { OwnerSalarySlipEditModal } from './OwnerSalarySlipEditModal';
 import type {
   Branch,
   DepartmentId,
@@ -90,6 +93,8 @@ import type {
   SalarySlip,
 } from '../../types/incentive';
 
+import type { VoiceFilterCommand } from '../../services/voiceToolExecutor';
+
 interface Props {
   branches: Branch[];
   employees: Employee[];
@@ -99,6 +104,7 @@ interface Props {
   salarySlips: SalarySlip[];
   visibilitySettings?: PortalVisibilitySettings;
   payrollLockSettings?: PayrollLockSettings;
+  voiceFilter?: VoiceFilterCommand | null;
   onRefresh: () => Promise<void>;
 }
 
@@ -111,8 +117,11 @@ export function SalarySlipsManager({
   salarySlips,
   visibilitySettings,
   payrollLockSettings,
+  voiceFilter,
   onRefresh,
 }: Props) {
+  const { isMainOwner } = useAuth();
+  const [editingSlip, setEditingSlip] = useState<SalarySlip | null>(null);
   const [uploadMonth, setUploadMonth] = useState<string>(getCurrentMonthKeyIST());
   const [syncMasterData, setSyncMasterData] = useState<boolean>(true);
   const [fileName, setFileName] = useState<string>('');
@@ -182,6 +191,21 @@ export function SalarySlipsManager({
   const [filterBranch, setFilterBranch] = useState<string>('ALL');
   const [filterDept, setFilterDept] = useState<'ALL' | 'UNASSIGNED' | 'NON_SALES' | DepartmentId>('ALL');
   const [search, setSearch] = useState<string>('');
+
+  useEffect(() => {
+    if (!voiceFilter || voiceFilter.targetTab !== 'salary') return;
+    if (voiceFilter.clearFilters) {
+      setFilterMonth('ALL');
+      setFilterBranch('ALL');
+      setFilterDept('ALL');
+      setSearch('');
+      return;
+    }
+    if (voiceFilter.monthKey !== undefined) setFilterMonth(voiceFilter.monthKey);
+    if (voiceFilter.branchId !== undefined) setFilterBranch(voiceFilter.branchId);
+    if (voiceFilter.department !== undefined) setFilterDept(voiceFilter.department);
+    if (voiceFilter.searchQuery !== undefined) setSearch(voiceFilter.searchQuery);
+  }, [voiceFilter]);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [showMoveMonthBar, setShowMoveMonthBar] = useState(false);
@@ -1503,41 +1527,45 @@ export function SalarySlipsManager({
               <span>WhatsApp Dispatch</span>
             </button>
 
-            <button
-              type="button"
-              disabled={filteredSlips.length === 0 || filteredSlipsHaveLockedMonth}
-              onClick={() => {
-                setConfirmBulkDeleteOpen(false);
-                if (!showMoveMonthBar && filterMonth !== 'ALL') {
-                  setMoveTargetMonth(getPreviousMonthKey(filterMonth));
-                }
-                setShowMoveMonthBar((v) => !v);
-              }}
-              className="h-9 px-3 rounded-lg border border-[#B8923A]/50 bg-[#FDF8EC] hover:bg-[#FAF0D7] text-[#0F1F3D] text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50"
-              title="Move all currently filtered salary slips to a different month (e.g. Nov -> Oct)"
-            >
-              <ArrowRightLeft className="w-3.5 h-3.5 text-[#9A7625]" />
-              <span>Move Month ({filteredSlips.length})</span>
-            </button>
+            {isMainOwner && (
+              <>
+                <button
+                  type="button"
+                  disabled={filteredSlips.length === 0 || filteredSlipsHaveLockedMonth}
+                  onClick={() => {
+                    setConfirmBulkDeleteOpen(false);
+                    if (!showMoveMonthBar && filterMonth !== 'ALL') {
+                      setMoveTargetMonth(getPreviousMonthKey(filterMonth));
+                    }
+                    setShowMoveMonthBar((v) => !v);
+                  }}
+                  className="h-9 px-3 rounded-lg border border-[#B8923A]/50 bg-[#FDF8EC] hover:bg-[#FAF0D7] text-[#0F1F3D] text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50"
+                  title="Main Owner only: move all currently filtered salary slips to a different month"
+                >
+                  <ArrowRightLeft className="w-3.5 h-3.5 text-[#9A7625]" />
+                  <span>Move Month ({filteredSlips.length})</span>
+                </button>
 
-            <button
-              type="button"
-              disabled={filteredSlips.length === 0 || filteredSlipsHaveLockedMonth}
-              onClick={() => {
-                setShowMoveMonthBar(false);
-                setConfirmBulkDeleteOpen((v) => !v);
-              }}
-              className="h-9 px-3 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50"
-              title="Delete all currently filtered salary slips in one click"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>Delete All ({filteredSlips.length})</span>
-            </button>
+                <button
+                  type="button"
+                  disabled={filteredSlips.length === 0 || filteredSlipsHaveLockedMonth}
+                  onClick={() => {
+                    setShowMoveMonthBar(false);
+                    setConfirmBulkDeleteOpen((v) => !v);
+                  }}
+                  className="h-9 px-3 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50"
+                  title="Main Owner only: delete all currently filtered salary slips in one click"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Delete All ({filteredSlips.length})</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
 
-        {/* Inline 1-Click Move Slips to Correct Month Bar (e.g. Nov -> Oct) */}
-        {showMoveMonthBar && filteredSlips.length > 0 && (
+        {/* Inline 1-Click Move Slips to Correct Month Bar (Main Owner ONLY) */}
+        {isMainOwner && showMoveMonthBar && filteredSlips.length > 0 && (
           <div className="px-4 py-3 bg-[#FDF8EC] border-b border-[#B8923A]/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="text-xs text-[#0F1F3D]">
               <p className="font-bold flex items-center gap-1.5">
@@ -1578,8 +1606,8 @@ export function SalarySlipsManager({
           </div>
         )}
 
-        {/* Inline 1-Click Bulk Delete Filtered Slips Confirmation Bar */}
-        {confirmBulkDeleteOpen && filteredSlips.length > 0 && (
+        {/* Inline 1-Click Bulk Delete Filtered Slips Confirmation Bar (Main Owner ONLY) */}
+        {isMainOwner && confirmBulkDeleteOpen && filteredSlips.length > 0 && (
           <div className="px-4 py-3 bg-red-50 border-b border-red-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="text-xs text-red-950">
               <p className="font-bold flex items-center gap-1.5">
@@ -1716,34 +1744,47 @@ export function SalarySlipsManager({
                           >
                             <Lock className="w-3.5 h-3.5" />
                           </span>
-                        ) : confirmDeleteId === slip.slipId ? (
-                          <div className="inline-flex items-center gap-1">
+                        ) : isMainOwner ? (
+                          <>
                             <button
                               type="button"
-                              disabled={deletingId === slip.slipId}
-                              onClick={() => void handleDeleteSlip(slip)}
-                              className="h-8 px-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                              onClick={() => setEditingSlip(slip)}
+                              title="Main Owner: Directly edit & update this published salary slip"
+                              className="h-8 px-2 rounded-lg border border-[#B8923A]/50 bg-[#FDF8EC] hover:bg-[#FAF0D7] text-[#0F1F3D] text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
                             >
-                              {deletingId === slip.slipId ? '...' : 'Confirm'}
+                              <Edit3 className="w-3.5 h-3.5 text-[#9A7625]" />
+                              <span>Edit</span>
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => setConfirmDeleteId(null)}
-                              className="h-8 px-2 rounded-lg border border-slate-200 text-[11px] text-slate-600 cursor-pointer"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => setConfirmDeleteId(slip.slipId)}
-                            title="Delete Salary Slip"
-                            className="h-8 w-8 rounded-lg border border-slate-200 text-slate-400 hover:text-red-600 hover:border-red-200 inline-flex items-center justify-center cursor-pointer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        )}
+                            {confirmDeleteId === slip.slipId ? (
+                              <div className="inline-flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  disabled={deletingId === slip.slipId}
+                                  onClick={() => void handleDeleteSlip(slip)}
+                                  className="h-8 px-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                                >
+                                  {deletingId === slip.slipId ? '...' : 'Confirm'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteId(null)}
+                                  className="h-8 px-2 rounded-lg border border-slate-200 text-[11px] text-slate-600 cursor-pointer"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteId(slip.slipId)}
+                                title="Main Owner only: permanently delete salary slip"
+                                className="h-8 w-8 rounded-lg border border-slate-200 text-slate-400 hover:text-red-600 hover:border-red-200 inline-flex items-center justify-center cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </>
+                        ) : null}
                       </div>
                     </td>
                   </tr>
@@ -1851,6 +1892,22 @@ export function SalarySlipsManager({
           employees={effectiveEmployees}
           onClose={() => setActiveMissingAction(null)}
           onResolved={handleMissingEmployeeResolved}
+        />
+      )}
+
+      {/* Main Owner ONLY: Direct Inline Salary Slip Edit & Update Modal */}
+      {isMainOwner && editingSlip && (
+        <OwnerSalarySlipEditModal
+          slip={editingSlip}
+          onClose={() => setEditingSlip(null)}
+          onSaved={async (updated) => {
+            setEditingSlip(null);
+            setFeedback({
+              type: 'ok',
+              text: `Main Owner updated salary slip for ${updated.employeeName} (${formatMonthLabel(updated.monthKey)}) · Net Payable ${formatINRFromPaise(updated.netPayablePaise)}.`,
+            });
+            await onRefresh();
+          }}
         />
       )}
     </div>

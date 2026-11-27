@@ -209,6 +209,33 @@ export async function deleteBranch(branch: Branch): Promise<void> {
 }
 
 /**
+ * Main Owner ONLY: Permanently deletes an Employee Master record and atomically cleans up
+ * their active_auth_uids gate and birthday_profiles entry, recording an immutable audit log.
+ */
+export async function deleteEmployeeByOwner(emp: Employee, reason?: string): Promise<void> {
+  try {
+    const wb = writeBatch(db);
+    wb.delete(doc(db, 'employees', emp.employeeId));
+    if (emp.authUid && emp.authUid.trim()) {
+      wb.delete(doc(db, 'active_auth_uids', emp.authUid.trim()));
+    }
+    wb.delete(doc(db, 'birthday_profiles', emp.employeeId));
+    await wb.commit();
+    const cleanReason = (reason || '').trim().slice(0, 200);
+    await recordAuditLog({
+      action: 'EMPLOYEE_DELETED_BY_OWNER',
+      targetType: 'employee',
+      targetId: emp.employeeId,
+      summary: `Main Owner permanently deleted employee ${emp.fullName} (${emp.employeeId} / ${emp.loginId})${
+        cleanReason ? ` · Reason: ${cleanReason}` : ''
+      }`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `employees/${emp.employeeId}`);
+  }
+}
+
+/**
  * Links the exact 12 official House of Muktai branches by default, safely remaps any alias duplicate
  * references (e.g. BARAMATI_MOTIBAG -> BARAMATI_MOTIBAGH) across employees/incentives/summaries,
  * and removes obsolete placeholder/duplicate branches (preserving any custom user-added branches

@@ -1765,8 +1765,13 @@ export function HistoryAndReports({
                       const bType = b.importType || 'DAILY';
                       const bStart = b.periodStart || b.businessDate;
                       const bEnd = b.periodEnd || b.businessDate;
-                      const canEdit = b.status !== 'PROCESSING' && b.status !== 'REJECTED';
-                      const canDelete = b.status !== 'PROCESSING';
+                      const canEdit =
+                        b.status !== 'PROCESSING' &&
+                        b.status !== 'REJECTED' &&
+                        (b.status !== 'PUBLISHED' || isMainOwner);
+                      const canDelete =
+                        b.status !== 'PROCESSING' &&
+                        (b.status !== 'PUBLISHED' || isMainOwner);
                       return (
                         <tr key={b.batchId} className="hover:bg-slate-50/60">
                           <td className="py-3 px-4">
@@ -2033,13 +2038,14 @@ export function HistoryAndReports({
                 <Printer className="w-3.5 h-3.5" />
                 Print
               </button>
-              {selectedMonth && (
+              {isMainOwner && selectedMonth && (
                 <button
                   type="button"
                   onClick={() => {
                     setPurgingMonth(selectedMonth);
                     setPurgeReason('');
                   }}
+                  title="Main Owner only: delete all incentive records for selected month"
                   className="h-8 px-3 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -2049,7 +2055,7 @@ export function HistoryAndReports({
             </div>
           </div>
 
-          {purgingMonth && (
+          {isMainOwner && purgingMonth && (
             <div className="no-print bg-white border-2 border-red-200 rounded-xl p-4 sm:p-5 space-y-3.5">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-2.5">
