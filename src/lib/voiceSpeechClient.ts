@@ -38,16 +38,19 @@ export interface VoiceConverseResponse {
 export type VoiceTtsProvider = 'elevenlabs';
 export type ElevenLabsHealthStatus =
   | 'ready'
-  | 'premade_fallback_active'
   | 'missing_key'
   | 'invalid_key_format'
+  | 'missing_voice_id'
   | 'auth_rejected'
+  | 'voice_paid_plan_required'
   | 'free_tier_ip_blocked'
   | 'quota_cooldown';
 export type ElevenLabsFallbackReason =
   | 'missing_key'
   | 'invalid_key_format'
+  | 'missing_voice_id'
   | 'auth_rejected'
+  | 'voice_paid_plan_required'
   | 'free_tier_ip_blocked'
   | 'quota_cooldown'
   | 'voice_error';
@@ -60,7 +63,7 @@ export interface VoiceCapabilitiesStatus {
   elevenLabsVoiceId: string;
   elevenLabsVoiceIdCustom: boolean;
   elevenLabsModelId: 'eleven_v3' | 'eleven_flash_v2_5' | 'eleven_multilingual_v2';
-  activeVoiceLabel?: string;
+  statusMessageMr?: string;
   ttsPrimaryProvider: VoiceTtsProvider;
 }
 
@@ -68,9 +71,6 @@ export interface SpeechPlaybackMeta {
   provider: VoiceTtsProvider;
   modelUsed?: string;
   voiceId?: string;
-  voiceLabel?: string;
-  usedPremadeFallback?: boolean;
-  fallbackReason?: ElevenLabsFallbackReason;
 }
 
 async function getAdminAuthToken(): Promise<string> {
@@ -273,8 +273,6 @@ interface CachedElevenLabsAudio {
   bytes: Uint8Array;
   modelUsed?: string;
   voiceId?: string;
-  voiceLabel?: string;
-  usedPremadeFallback?: boolean;
 }
 
 type FetchElevenLabsTtsResult =
@@ -303,15 +301,13 @@ async function fetchElevenLabsTtsAudio(
         bytes: lastCachedSpeech.bytes,
         modelUsed: lastCachedSpeech.modelUsed,
         voiceId: lastCachedSpeech.voiceId,
-        voiceLabel: lastCachedSpeech.voiceLabel,
-        usedPremadeFallback: lastCachedSpeech.usedPremadeFallback,
       },
     };
   }
 
   const token = await getAdminAuthToken();
   let lastReason: ElevenLabsFallbackReason = 'voice_error';
-  let lastErrorMessage = 'ElevenLabs आवाज सध्या उपलब्ध नाही.';
+  let lastErrorMessage = 'तुमचा निवडलेला ElevenLabs आवाज सध्या उपलब्ध नाही.';
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (attempt > 0) {
@@ -336,8 +332,6 @@ async function fetchElevenLabsTtsAudio(
         audioBase64?: string;
         modelUsed?: string;
         voiceId?: string;
-        voiceLabel?: string;
-        usedPremadeFallback?: boolean;
       };
       if (data.audioBase64 && data.mimeType) {
         const bytes = base64ToUint8Array(data.audioBase64);
@@ -348,8 +342,6 @@ async function fetchElevenLabsTtsAudio(
           bytes,
           modelUsed: data.modelUsed,
           voiceId: data.voiceId,
-          voiceLabel: data.voiceLabel,
-          usedPremadeFallback: data.usedPremadeFallback,
         };
         return {
           ok: true,
@@ -359,8 +351,6 @@ async function fetchElevenLabsTtsAudio(
             bytes,
             modelUsed: data.modelUsed,
             voiceId: data.voiceId,
-            voiceLabel: data.voiceLabel,
-            usedPremadeFallback: data.usedPremadeFallback,
           },
         };
       }
@@ -379,11 +369,13 @@ async function fetchElevenLabsTtsAudio(
         `[Voice TTS Client] ElevenLabs attempt ${attempt + 1} HTTP ${resp.status}:`,
         lastErrorMessage,
       );
-      // Do not retry non-transient configuration/quota/auth rejections
+      // Do not retry non-transient configuration/quota/plan/auth rejections
       if (
         lastReason === 'missing_key' ||
         lastReason === 'invalid_key_format' ||
+        lastReason === 'missing_voice_id' ||
         lastReason === 'auth_rejected' ||
+        lastReason === 'voice_paid_plan_required' ||
         lastReason === 'free_tier_ip_blocked' ||
         lastReason === 'quota_cooldown'
       ) {
@@ -399,8 +391,8 @@ async function fetchElevenLabsTtsAudio(
 }
 
 /**
- * Strictly plays ONLY ElevenLabs audio (female Marathi voice).
- * Zero robotic OS / browser TTS fallback is ever used.
+ * Strictly plays ONLY the owner's selected ElevenLabs voice (from Render ELEVENLABS_VOICE_ID).
+ * Zero alternate voices and zero robotic OS / browser TTS fallback are ever used.
  */
 export async function speakNaturalMarathi(
   text: string,
@@ -423,26 +415,16 @@ export async function speakNaturalMarathi(
     if (!fetchResult.ok) {
       options?.onUnavailable?.(
         fetchResult.fallbackReason || 'voice_error',
-        fetchResult.errorMessage || 'ElevenLabs आवाज सध्या उपलब्ध नाही.',
+        fetchResult.errorMessage || 'तुमचा निवडलेला ElevenLabs आवाज सध्या उपलब्ध नाही.',
       );
       return 'unavailable';
     }
 
-    const {
-      provider,
-      mimeType,
-      bytes,
-      modelUsed,
-      voiceId,
-      voiceLabel,
-      usedPremadeFallback,
-    } = fetchResult.audio;
+    const { provider, mimeType, bytes, modelUsed, voiceId } = fetchResult.audio;
     const meta: SpeechPlaybackMeta = {
       provider,
       modelUsed,
       voiceId,
-      voiceLabel,
-      usedPremadeFallback,
     };
 
     // Method 1: Unlocked Web Audio API (immune to iframe/async HTMLAudio autoplay blocks)

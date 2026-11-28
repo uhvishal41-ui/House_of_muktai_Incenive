@@ -125,9 +125,8 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
   const [pendingConfirm, setPendingConfirm] = useState<VoicePendingConfirmation | null>(null);
   const [ttsBadge, setTtsBadge] = useState<VoiceTtsProvider | null>(null);
   const [voiceCaps, setVoiceCaps] = useState<VoiceCapabilitiesStatus | null>(null);
-  const [lastFallbackReason, setLastFallbackReason] = useState<ElevenLabsFallbackReason | null>(null);
-  const [lastVoiceLabel, setLastVoiceLabel] = useState<string>('');
-  const [usedPremadeFallback, setUsedPremadeFallback] = useState(false);
+  const [ttsAlertReason, setTtsAlertReason] = useState<ElevenLabsFallbackReason | null>(null);
+  const [ttsAlertMessage, setTtsAlertMessage] = useState<string>('');
   const [testingVoice, setTestingVoice] = useState(false);
   const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
@@ -228,12 +227,14 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     const caps = await fetchVoiceCapabilitiesStatus();
     if (caps) {
       setVoiceCaps(caps);
-      if (caps.elevenLabsStatus === 'ready' || caps.elevenLabsStatus === 'premade_fallback_active') {
-        setLastFallbackReason(null);
-      }
-      if (caps.elevenLabsStatus === 'premade_fallback_active') {
-        setUsedPremadeFallback(true);
-        if (caps.activeVoiceLabel) setLastVoiceLabel(caps.activeVoiceLabel);
+      if (caps.elevenLabsStatus === 'ready') {
+        setTtsAlertReason(null);
+        setTtsAlertMessage('');
+      } else {
+        setTtsAlertReason(caps.elevenLabsStatus);
+        if (caps.statusMessageMr) {
+          setTtsAlertMessage(caps.statusMessageMr);
+        }
       }
     }
   }, []);
@@ -245,7 +246,10 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
   }, [overlayOpen, refreshVoiceCaps]);
 
   const speakReply = useCallback(
-    async (replyText: string, options?: { forceRefresh?: boolean }) => {
+    async (
+      replyText: string,
+      options?: { forceRefresh?: boolean; showUnavailableInReplyBox?: boolean },
+    ) => {
       if (!replyText.trim()) {
         setPhase('idle');
         return;
@@ -259,23 +263,26 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
         const result = await speakNaturalMarathi(replyText, {
           muted: mutedRef.current,
           forceRefresh: options?.forceRefresh,
-          onStart: (p, meta?: SpeechPlaybackMeta) => {
+          onStart: (p, _meta?: SpeechPlaybackMeta) => {
             setTtsBadge(p);
-            setLastFallbackReason(null);
-            setUsedPremadeFallback(Boolean(meta?.usedPremadeFallback));
-            setLastVoiceLabel(meta?.voiceLabel || '');
+            setTtsAlertReason(null);
+            setTtsAlertMessage('');
           },
-          onUnavailable: (reason) => {
+          onUnavailable: (reason, errorMessage) => {
             setTtsBadge(null);
-            setLastFallbackReason(reason);
-            setUsedPremadeFallback(false);
+            setTtsAlertReason(reason);
+            setTtsAlertMessage(errorMessage);
+            if (options?.showUnavailableInReplyBox) {
+              setAssistantReply(errorMessage);
+              setErrorNote(errorMessage);
+            }
           },
         });
         if (result === 'elevenlabs') {
           setTtsBadge('elevenlabs');
         }
       } catch {
-        // Strict ElevenLabs-only: never fall back to robotic browser voice
+        // Strict selected ElevenLabs voice only: never fall back to any other or robotic voice
       } finally {
         setPhase((cur) => (cur === 'speaking' ? 'idle' : cur));
       }
@@ -287,11 +294,13 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     if (testingVoice || phase === 'processing') return;
     unlockVoiceAudioPlayback();
     setTestingVoice(true);
+    setErrorNote('');
     try {
       await speakReply(
         'नमस्कार! मी मुक्ताई, तुमची मराठी व्हॉइस असिस्टंट. सांगा, मी तुमची काय मदत करू शकते?',
         {
           forceRefresh: true,
+          showUnavailableInReplyBox: true,
         },
       );
       await refreshVoiceCaps();
@@ -988,11 +997,7 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
                       : phase === 'processing'
                         ? 'मल्टी-स्टेप कृती सुरू आहे...'
                         : phase === 'speaking'
-                          ? `बोलत आहे${
-                              ttsBadge === 'elevenlabs'
-                                ? ` · ElevenLabs${lastVoiceLabel ? ` (${lastVoiceLabel})` : ''}`
-                                : ''
-                            }`
+                          ? `बोलत आहे${ttsBadge === 'elevenlabs' ? ' · ElevenLabs (निवडलेला आवाज)' : ''}`
                           : wakeWordEnabled
                             ? 'हँड्स-फ्री चालू · “हे मुक्ताई...” म्हणून बोला'
                             : 'बोलण्यासाठी माईक दाबा किंवा खाली टाईप करा'}
@@ -1051,41 +1056,42 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
               {voiceCaps && (
                 <div
                   className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-[11px] ${
-                    voiceCaps.elevenLabsConfigured && !lastFallbackReason
+                    voiceCaps.elevenLabsConfigured && !ttsAlertReason
                       ? 'bg-emerald-50/90 border-emerald-200/80 text-emerald-950'
-                      : 'bg-amber-50/90 border-amber-200/90 text-amber-950'
+                      : (ttsAlertReason || voiceCaps.elevenLabsStatus) === 'quota_cooldown'
+                        ? 'bg-rose-50/95 border-rose-300 text-rose-950'
+                        : 'bg-amber-50/90 border-amber-200/90 text-amber-950'
                   }`}
-                  title={
-                    voiceCaps.elevenLabsStatus === 'premade_fallback_active' || usedPremadeFallback
-                      ? 'तुमचा Custom Library Voice Free Plan वर बंद असल्याने मोफत Premade महिला आवाज आपोआप सुरू आहे.'
-                      : undefined
-                  }
                 >
                   <div className="min-w-0 flex items-center gap-1.5">
                     <span
                       className={`w-2 h-2 rounded-full shrink-0 ${
-                        voiceCaps.elevenLabsConfigured && !lastFallbackReason
+                        voiceCaps.elevenLabsConfigured && !ttsAlertReason
                           ? 'bg-emerald-600'
-                          : 'bg-amber-500'
+                          : (ttsAlertReason || voiceCaps.elevenLabsStatus) === 'quota_cooldown'
+                            ? 'bg-rose-600'
+                            : 'bg-amber-500'
                       }`}
                     />
                     <span className="truncate font-medium">
-                      {voiceCaps.elevenLabsConfigured && !lastFallbackReason
-                        ? voiceCaps.elevenLabsStatus === 'premade_fallback_active' ||
-                          usedPremadeFallback
-                          ? `ElevenLabs (${lastVoiceLabel || voiceCaps.activeVoiceLabel || 'Sarah'} · मोफत महिला आवाज)`
-                          : `ElevenLabs (${voiceCaps.activeVoiceLabel || voiceCaps.elevenLabsModelId}) · ID …${voiceCaps.elevenLabsVoiceId.slice(-4)}`
-                        : (lastFallbackReason || voiceCaps.elevenLabsStatus) === 'invalid_key_format'
-                          ? 'ElevenLabs Key चुकीची (sk_... हवी) · आवाज बंद'
-                          : (lastFallbackReason || voiceCaps.elevenLabsStatus) === 'auth_rejected'
-                            ? 'ElevenLabs Key नाकारली · आवाज बंद'
-                            : (lastFallbackReason || voiceCaps.elevenLabsStatus) ===
-                                'free_tier_ip_blocked'
-                              ? 'Render IP वर ElevenLabs फ्री ब्लॉक · आवाज बंद'
-                              : (lastFallbackReason || voiceCaps.elevenLabsStatus) ===
-                                  'quota_cooldown'
-                                ? 'ElevenLabs क्रेडिट्स संपले · आवाज बंद'
-                                : 'ElevenLabs Key सेट नाही · आवाज बंद'}
+                      {voiceCaps.elevenLabsConfigured && !ttsAlertReason
+                        ? `ElevenLabs · निवडलेला आवाज (ID …${voiceCaps.elevenLabsVoiceId.slice(-4)})`
+                        : (ttsAlertReason || voiceCaps.elevenLabsStatus) === 'quota_cooldown'
+                          ? 'आजचा कोटा संपला आहे · आवाज बंद'
+                          : (ttsAlertReason || voiceCaps.elevenLabsStatus) === 'missing_voice_id'
+                            ? 'Render मध्ये ELEVENLABS_VOICE_ID सेट नाही'
+                            : (ttsAlertReason || voiceCaps.elevenLabsStatus) ===
+                                'voice_paid_plan_required'
+                              ? 'निवडलेला Voice ID Paid Plan साठी आहे'
+                              : (ttsAlertReason || voiceCaps.elevenLabsStatus) ===
+                                  'invalid_key_format'
+                                ? 'ElevenLabs Key चुकीची (sk_... हवी) · आवाज बंद'
+                                : (ttsAlertReason || voiceCaps.elevenLabsStatus) === 'auth_rejected'
+                                  ? 'ElevenLabs Key नाकारली · आवाज बंद'
+                                  : (ttsAlertReason || voiceCaps.elevenLabsStatus) ===
+                                      'free_tier_ip_blocked'
+                                    ? 'Render IP वर ElevenLabs फ्री ब्लॉक · आवाज बंद'
+                                    : 'ElevenLabs Key सेट नाही · आवाज बंद'}
                     </span>
                   </div>
                   <button
@@ -1093,7 +1099,7 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
                     disabled={testingVoice || phase === 'processing'}
                     onClick={() => void handleTestVoice()}
                     className="shrink-0 h-6 px-2 rounded-md bg-white/90 hover:bg-white border border-slate-200/90 text-[#0F1F3D] text-[10.5px] font-semibold inline-flex items-center gap-1 cursor-pointer transition-colors disabled:opacity-60"
-                    title="ElevenLabs मराठी महिला आवाज लगेच तपासा"
+                    title="तुमचा निवडलेला ElevenLabs आवाज लगेच तपासा"
                   >
                     {testingVoice ? (
                       <Loader2 className="w-3 h-3 animate-spin" />
@@ -1102,6 +1108,41 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
                     )}
                     <span>आवाज तपासा</span>
                   </button>
+                </div>
+              )}
+
+              {/* Prominent Screen Alert Banner when Quota Exhausted or Selected Voice Blocked */}
+              {ttsAlertReason && (
+                <div
+                  role="alert"
+                  className={`rounded-xl px-3 py-2.5 border flex items-start gap-2 text-xs ${
+                    ttsAlertReason === 'quota_cooldown'
+                      ? 'bg-rose-50 border-rose-300 text-rose-950'
+                      : 'bg-amber-50 border-amber-300 text-amber-950'
+                  }`}
+                >
+                  <AlertTriangle
+                    className={`w-4 h-4 shrink-0 mt-0.5 ${
+                      ttsAlertReason === 'quota_cooldown' ? 'text-rose-600' : 'text-amber-600'
+                    }`}
+                  />
+                  <div className="min-w-0 space-y-0.5">
+                    <p className="font-bold leading-snug">
+                      {ttsAlertReason === 'quota_cooldown'
+                        ? 'आजचा कोटा संपला आहे'
+                        : ttsAlertReason === 'voice_paid_plan_required'
+                          ? 'निवडलेला Voice ID Paid Plan साठी आहे'
+                          : ttsAlertReason === 'missing_voice_id'
+                            ? 'Render मध्ये Voice ID सेट नाही'
+                            : 'निवडलेला ElevenLabs आवाज बंद आहे'}
+                    </p>
+                    <p className="text-[11px] leading-relaxed opacity-90">
+                      {ttsAlertMessage ||
+                        (ttsAlertReason === 'quota_cooldown'
+                          ? 'आजचा कोटा संपला आहे. कृपया उद्या किंवा ElevenLabs क्रेडिट्स रिचार्ज केल्यानंतर पुन्हा प्रयत्न करा.'
+                          : 'इतर कोणताही पर्यायी किंवा रोबोटिक आवाज वापरला गेला नाही.')}
+                    </p>
+                  </div>
                 </div>
               )}
 
@@ -1232,6 +1273,13 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
                     </div>
                   </div>
                   <p className="font-medium text-[13px] leading-relaxed">{assistantReply}</p>
+                  {ttsAlertReason === 'quota_cooldown' &&
+                    !assistantReply.includes('आजचा कोटा संपला आहे') && (
+                      <div className="mt-2 pt-2 border-t border-rose-200/90 flex items-center gap-1.5 text-[11px] font-semibold text-rose-700">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                        <span>आजचा कोटा संपला आहे — आवाज बंद आहे.</span>
+                      </div>
+                    )}
                 </div>
               )}
 

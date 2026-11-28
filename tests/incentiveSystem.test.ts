@@ -6128,14 +6128,14 @@ test('85. ElevenLabs voice engine validates sk_ keys, uses eleven_v3 with langua
   assert.equal(isPlausibleElevenLabsApiKey('pNInz6obpgDQGcFmaJgB'), false);
   assert.equal(isPlausibleElevenLabsApiKey(''), false);
 
-  // 2. Custom Voice ID preservation & sanitization (default is Free-Tier Premade Female Sarah)
+  // 2. Strict single selected Voice ID sanitization (NEVER substitutes Sarah or any other default voice)
   const customVoice = sanitizeElevenLabsVoiceId('CustomVoiceId1234567');
   assert.equal(customVoice.voiceId, 'CustomVoiceId1234567');
   assert.equal(customVoice.isCustom, true);
 
-  const fallbackVoice = sanitizeElevenLabsVoiceId('   ');
-  assert.equal(fallbackVoice.voiceId, 'EXAVITQu4vr4xnSDxMaL');
-  assert.equal(fallbackVoice.isCustom, false);
+  const missingVoice = sanitizeElevenLabsVoiceId('   ');
+  assert.equal(missingVoice.voiceId, '');
+  assert.equal(missingVoice.isCustom, false);
 
   // 3. Model priority chain defaults to eleven_v3 (native Marathi) -> eleven_flash_v2_5 -> eleven_multilingual_v2
   assert.deepEqual(resolveElevenLabsModelChain(undefined), [
@@ -6164,11 +6164,17 @@ test('85. ElevenLabs voice engine validates sk_ keys, uses eleven_v3 with langua
   assert.equal(flashPayload.model_id, 'eleven_flash_v2_5');
   assert.equal('language_code' in flashPayload, false);
 
-  // 5. Status resolution for missing, invalid format, and ready keys
+  // 5. Status resolution for missing key, invalid format, missing Voice ID, and ready selected Voice ID
   assert.equal(resolveElevenLabsConfig({}).status, 'missing_key');
   assert.equal(
     resolveElevenLabsConfig({ ELEVENLABS_API_KEY: 'pNInz6obpgDQGcFmaJgB' }).status,
     'invalid_key_format',
+  );
+  assert.equal(
+    resolveElevenLabsConfig({
+      ELEVENLABS_API_KEY: ['sk', 'unit', 'ready', 'abcdefghijklmnopqrst1234'].join('_'),
+    }).status,
+    'missing_voice_id',
   );
   const readyCfg = resolveElevenLabsConfig({
     ELEVENLABS_API_KEY: ['sk', 'unit', 'ready', 'abcdefghijklmnopqrst1234'].join('_'),
@@ -6190,12 +6196,13 @@ test('85. ElevenLabs voice engine validates sk_ keys, uses eleven_v3 with langua
 });
 
 // =========================================================================
-// TEST 86: ElevenLabs Free Plan HTTP 402 Classification & Auto-Switch to Premade Female Voice (Sarah)
+// TEST 86: Strict Single Selected Voice Lock (Zero Alternate Voices) & "आजचा कोटा संपला आहे" Alert
 // =========================================================================
-test('86. ElevenLabs classifies HTTP 402 Library Voice restriction accurately and auto-switches to Premade Female Sarah without false quota cooldown', async () => {
+test('86. ElevenLabs strictly uses ONLY selected ELEVENLABS_VOICE_ID (never switches voices) and reports "आजचा कोटा संपला आहे" on quota exhaustion', async () => {
   const {
     classifyElevenLabsHttpError,
     synthesizeMarathiSpeech,
+    ElevenLabsSpeechError,
     getVoiceCapabilitiesStatus,
     resetElevenLabsRuntimeStateForTest,
   } = await import('../server/voiceService.ts');
@@ -6242,7 +6249,9 @@ test('86. ElevenLabs classifies HTTP 402 Library Voice restriction accurately an
     'auth_rejected',
   );
 
-  // 2. Live auto-switch test: custom Library voice returns 402 -> immediately switches to Sarah (EXAVITQu4vr4xnSDxMaL)
+  // 2. Live strict single-voice test:
+  //    (a) HTTP 402 on selected Voice ID MUST stop immediately with voice_paid_plan_required (ZERO fallback to Sarah/Rachel/etc.)
+  //    (b) Quota exceeded MUST throw ElevenLabsSpeechError('quota_cooldown') with exact "आजचा कोटा संपला आहे" Marathi message
   resetElevenLabsRuntimeStateForTest();
   const prevKey = process.env.ELEVENLABS_API_KEY;
   const prevVoice = process.env.ELEVENLABS_VOICE_ID;
@@ -6250,45 +6259,60 @@ test('86. ElevenLabs classifies HTTP 402 Library Voice restriction accurately an
 
   const calledUrls: string[] = [];
   process.env.ELEVENLABS_API_KEY = ['sk', 'unit', 'freetier', '1234567890abcdefghij'].join('_');
-  process.env.ELEVENLABS_VOICE_ID = 'LibraryVoicePaidOnly12';
+  process.env.ELEVENLABS_VOICE_ID = 'SelectedCustomVoice999';
 
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     calledUrls.push(url);
-    if (url.includes('LibraryVoicePaidOnly12')) {
-      return new Response(
-        JSON.stringify({
-          detail: {
-            status: 'payment_required',
-            message: 'Free users cannot use library voices via the API.',
-          },
-        }),
-        { status: 402, headers: { 'Content-Type': 'application/json' } },
-      );
-    }
-    if (url.includes('EXAVITQu4vr4xnSDxMaL')) {
-      return new Response(new Uint8Array([0x49, 0x44, 0x33, 0x03, 0x00, 0x00]), {
-        status: 200,
-        headers: { 'Content-Type': 'audio/mpeg' },
-      });
-    }
-    return new Response('unexpected', { status: 500 });
+    return new Response(
+      JSON.stringify({
+        detail: {
+          status: 'payment_required',
+          message: 'Free users cannot use library voices via the API.',
+        },
+      }),
+      { status: 402, headers: { 'Content-Type': 'application/json' } },
+    );
   }) as typeof fetch;
 
   try {
-    const result = await synthesizeMarathiSpeech('नमस्कार मुक्ताई!', { forceRefresh: true });
-    assert.equal(result.provider, 'elevenlabs');
-    assert.equal(result.voiceId, 'EXAVITQu4vr4xnSDxMaL');
-    assert.equal(result.voiceLabel, 'Sarah');
-    assert.equal(result.usedPremadeFallback, true);
-    assert.equal(calledUrls.length, 2);
-    assert.ok(calledUrls[0].includes('LibraryVoicePaidOnly12'));
-    assert.ok(calledUrls[1].includes('EXAVITQu4vr4xnSDxMaL'));
+    await assert.rejects(
+      async () => {
+        await synthesizeMarathiSpeech('नमस्कार मुक्ताई!', { forceRefresh: true });
+      },
+      (err: unknown) =>
+        err instanceof ElevenLabsSpeechError && err.reason === 'voice_paid_plan_required',
+    );
+    assert.equal(calledUrls.length, 1, 'Must call ONLY the selected Voice ID and NEVER switch to another voice');
+    assert.ok(calledUrls[0].includes('SelectedCustomVoice999'));
 
-    const status = getVoiceCapabilitiesStatus();
-    assert.equal(status.elevenLabsConfigured, true);
-    assert.equal(status.elevenLabsStatus, 'premade_fallback_active');
-    assert.equal(status.activeVoiceLabel, 'Sarah');
+    const status402 = getVoiceCapabilitiesStatus();
+    assert.equal(status402.elevenLabsConfigured, false);
+    assert.equal(status402.elevenLabsStatus, 'voice_paid_plan_required');
+
+    // Now test quota exhaustion -> must return exact "आजचा कोटा संपला आहे" message
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calledUrls.push(String(input));
+      return new Response(
+        JSON.stringify({
+          detail: { status: 'quota_exceeded', message: 'This request exceeds your remaining quota' },
+        }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+
+    await assert.rejects(
+      async () => {
+        await synthesizeMarathiSpeech('आजचा रिपोर्ट सांग', { forceRefresh: true });
+      },
+      (err: unknown) =>
+        err instanceof ElevenLabsSpeechError &&
+        err.reason === 'quota_cooldown' &&
+        err.message.includes('आजचा कोटा संपला आहे'),
+    );
+    const statusQuota = getVoiceCapabilitiesStatus();
+    assert.equal(statusQuota.elevenLabsStatus, 'quota_cooldown');
+    assert.ok(statusQuota.statusMessageMr?.includes('आजचा कोटा संपला आहे'));
   } finally {
     globalThis.fetch = prevFetch;
     if (prevKey === undefined) delete process.env.ELEVENLABS_API_KEY;
@@ -6300,9 +6324,13 @@ test('86. ElevenLabs classifies HTTP 402 Library Voice restriction accurately an
 });
 
 // =========================================================================
-// TEST 87: Strict ElevenLabs-Only Audio (Zero Robotic Fallback) & 100% Feminine Marathi Persona
+// TEST 87: Strict ElevenLabs-Only Single Voice (Zero Robotic/Alternate Fallback) & 100% Feminine Marathi Persona
 // =========================================================================
-test('87. Voice assistant enforces strict ElevenLabs-only audio (zero speechSynthesis/robotic fallback) and 100% feminine Marathi persona', async () => {
+test('87. Voice assistant enforces strict ElevenLabs-only single voice (zero speechSynthesis/premade fallback) and 100% feminine Marathi persona', async () => {
+  const voiceServiceSrc = fs.readFileSync(
+    path.resolve(process.cwd(), 'server/voiceService.ts'),
+    'utf-8',
+  );
   const speechClientSrc = fs.readFileSync(
     path.resolve(process.cwd(), 'src/lib/voiceSpeechClient.ts'),
     'utf-8',
@@ -6320,12 +6348,15 @@ test('87. Voice assistant enforces strict ElevenLabs-only audio (zero speechSynt
     'utf-8',
   );
 
-  // 1. Zero browser speechSynthesis / SpeechSynthesisUtterance robotic fallback anywhere
+  // 1. Zero browser speechSynthesis / SpeechSynthesisUtterance / alternate premade voice fallback anywhere
   assert.equal(speechClientSrc.includes('speechSynthesis'), false);
   assert.equal(speechClientSrc.includes('SpeechSynthesisUtterance'), false);
   assert.equal(assistantUiSrc.includes('window.speechSynthesis'), false);
+  assert.equal(voiceServiceSrc.includes('FREE_PREMADE_FEMALE_VOICES'), false);
+  assert.equal(voiceServiceSrc.includes('EXAVITQu4vr4xnSDxMaL'), false);
 
-  // 2. Strict feminine Marathi persona ("मी तुमची काय मदत करू शकते?", zero masculine "अपलोड करतो"/"सेव्ह करतो")
+  // 2. Exact Marathi quota message & strict feminine Marathi persona
+  assert.ok(assistantUiSrc.includes('आजचा कोटा संपला आहे'));
   assert.ok(assistantUiSrc.includes('मी तुमची काय मदत करू शकते?'));
   assert.ok(voiceToolsSrc.includes('मी तुमची काय मदत करू शकते?'));
   assert.ok(voiceToolsSrc.includes('मी फाईल लगेच अपलोड करते.'));

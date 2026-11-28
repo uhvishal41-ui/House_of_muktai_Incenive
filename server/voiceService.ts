@@ -8,29 +8,24 @@ import {
 const GEMINI_CONVERSE_MODEL = 'gemini-4-hydrogen';
 const GEMINI_CONVERSE_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
 const GEMINI_TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
-const DEFAULT_ELEVENLABS_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'; // Sarah — ElevenLabs Free-Tier Premade Female Voice
 const DEFAULT_ELEVENLABS_MODEL_ID: ElevenLabsModelId = 'eleven_v3';
-
-export const FREE_PREMADE_FEMALE_VOICES: ReadonlyArray<{ voiceId: string; label: string }> = [
-  { voiceId: 'EXAVITQu4vr4xnSDxMaL', label: 'Sarah' },
-  { voiceId: '21m00Tcm4TlvDq8ikWAM', label: 'Rachel' },
-  { voiceId: 'Xb7hH8MSUJpSbSDYk0k2', label: 'Alice' },
-  { voiceId: 'FGY2WhTYpPnrIDTdsKH5', label: 'Laura' },
-];
 
 export type ElevenLabsModelId = 'eleven_v3' | 'eleven_flash_v2_5' | 'eleven_multilingual_v2';
 export type ElevenLabsHealthStatus =
   | 'ready'
-  | 'premade_fallback_active'
   | 'missing_key'
   | 'invalid_key_format'
+  | 'missing_voice_id'
   | 'auth_rejected'
+  | 'voice_paid_plan_required'
   | 'free_tier_ip_blocked'
   | 'quota_cooldown';
 export type ElevenLabsFallbackReason =
   | 'missing_key'
   | 'invalid_key_format'
+  | 'missing_voice_id'
   | 'auth_rejected'
+  | 'voice_paid_plan_required'
   | 'free_tier_ip_blocked'
   | 'quota_cooldown'
   | 'voice_error';
@@ -54,7 +49,6 @@ let elevenLabsCooldownUntil = 0;
 let freeTierIpBlockedCooldownUntil = 0;
 let invalidElevenLabsKeyCached = '';
 let paidOnlyVoiceIdCached = '';
-let activePremadeVoiceLabel = '';
 const ttsAudioCache = new Map<string, SynthesizedSpeechResult>();
 const MAX_TTS_CACHE_ITEMS = 40;
 
@@ -65,6 +59,10 @@ export function isPlausibleElevenLabsApiKey(key: string): boolean {
   return /^sk_[a-zA-Z0-9_]{20,120}$/.test(key) || /^[a-f0-9]{32}$/i.test(key);
 }
 
+/**
+ * Strictly validates the owner's selected ELEVENLABS_VOICE_ID from Render Environment Variables.
+ * Never substitutes any alternate/premade voice ID.
+ */
 export function sanitizeElevenLabsVoiceId(raw: string | undefined): {
   voiceId: string;
   isCustom: boolean;
@@ -73,17 +71,13 @@ export function sanitizeElevenLabsVoiceId(raw: string | undefined): {
   if (trimmed && /^[a-zA-Z0-9_-]{8,64}$/.test(trimmed)) {
     return {
       voiceId: trimmed,
-      isCustom: trimmed !== DEFAULT_ELEVENLABS_VOICE_ID,
+      isCustom: true,
     };
   }
   return {
-    voiceId: DEFAULT_ELEVENLABS_VOICE_ID,
+    voiceId: '',
     isCustom: false,
   };
-}
-
-export function getPremadeVoiceLabel(voiceId: string): string | undefined {
-  return FREE_PREMADE_FEMALE_VOICES.find((v) => v.voiceId === voiceId)?.label;
 }
 
 /**
@@ -163,7 +157,6 @@ export function resolveElevenLabsConfig(env: NodeJS.ProcessEnv = process.env): {
   primaryModelId: ElevenLabsModelId;
   modelChain: ElevenLabsModelId[];
   status: ElevenLabsHealthStatus;
-  activeVoiceLabel?: string;
 } {
   const apiKey = (env.ELEVENLABS_API_KEY || '').trim();
   const { voiceId, isCustom: voiceIdIsCustom } = sanitizeElevenLabsVoiceId(env.ELEVENLABS_VOICE_ID);
@@ -171,21 +164,21 @@ export function resolveElevenLabsConfig(env: NodeJS.ProcessEnv = process.env): {
   const primaryModelId = modelChain[0];
 
   let status: ElevenLabsHealthStatus = 'ready';
-  let activeVoiceLabel = getPremadeVoiceLabel(voiceId);
 
   if (!apiKey) {
     status = 'missing_key';
   } else if (!isPlausibleElevenLabsApiKey(apiKey)) {
     status = 'invalid_key_format';
+  } else if (!voiceId) {
+    status = 'missing_voice_id';
   } else if (apiKey === invalidElevenLabsKeyCached) {
     status = 'auth_rejected';
+  } else if (paidOnlyVoiceIdCached && paidOnlyVoiceIdCached === voiceId) {
+    status = 'voice_paid_plan_required';
   } else if (Date.now() < freeTierIpBlockedCooldownUntil) {
     status = 'free_tier_ip_blocked';
   } else if (Date.now() < elevenLabsCooldownUntil) {
     status = 'quota_cooldown';
-  } else if (paidOnlyVoiceIdCached && paidOnlyVoiceIdCached === voiceId) {
-    status = 'premade_fallback_active';
-    activeVoiceLabel = activePremadeVoiceLabel || FREE_PREMADE_FEMALE_VOICES[0].label;
   }
 
   return {
@@ -195,7 +188,6 @@ export function resolveElevenLabsConfig(env: NodeJS.ProcessEnv = process.env): {
     primaryModelId,
     modelChain,
     status,
-    ...(activeVoiceLabel ? { activeVoiceLabel } : {}),
   };
 }
 
@@ -235,7 +227,6 @@ export function resetElevenLabsRuntimeStateForTest(): void {
   freeTierIpBlockedCooldownUntil = 0;
   invalidElevenLabsKeyCached = '';
   paidOnlyVoiceIdCached = '';
-  activePremadeVoiceLabel = '';
   ttsAudioCache.clear();
 }
 
@@ -288,15 +279,14 @@ export interface VoiceCapabilitiesStatus {
   elevenLabsVoiceId: string;
   elevenLabsVoiceIdCustom: boolean;
   elevenLabsModelId: ElevenLabsModelId;
-  activeVoiceLabel?: string;
+  statusMessageMr?: string;
   ttsPrimaryProvider: 'elevenlabs';
 }
 
 export function getVoiceCapabilitiesStatus(): VoiceCapabilitiesStatus {
   const geminiConfigured = Boolean((process.env.GEMINI_API_KEY || '').trim());
   const el = resolveElevenLabsConfig(process.env);
-  const elevenLabsConfigured =
-    el.status === 'ready' || el.status === 'premade_fallback_active';
+  const elevenLabsConfigured = el.status === 'ready';
   return {
     geminiConfigured,
     elevenLabsConfigured,
@@ -305,7 +295,7 @@ export function getVoiceCapabilitiesStatus(): VoiceCapabilitiesStatus {
     elevenLabsVoiceId: el.voiceId,
     elevenLabsVoiceIdCustom: el.voiceIdIsCustom,
     elevenLabsModelId: el.primaryModelId,
-    ...(el.activeVoiceLabel ? { activeVoiceLabel: el.activeVoiceLabel } : {}),
+    ...(el.status !== 'ready' ? { statusMessageMr: getElevenLabsErrorMessageMr(el.status) } : {}),
     ttsPrimaryProvider: 'elevenlabs',
   };
 }
@@ -535,8 +525,6 @@ export interface SynthesizedSpeechResult {
   audioBase64: string;
   modelUsed?: string;
   voiceId?: string;
-  voiceLabel?: string;
-  usedPremadeFallback?: boolean;
 }
 
 export class ElevenLabsSpeechError extends Error {
@@ -548,28 +536,30 @@ export class ElevenLabsSpeechError extends Error {
   }
 }
 
-function getElevenLabsErrorMessageMr(reason: ElevenLabsFallbackReason): string {
+export function getElevenLabsErrorMessageMr(reason: ElevenLabsFallbackReason): string {
   switch (reason) {
     case 'missing_key':
-      return 'ElevenLabs API Key सेट केलेली नाही. कृपया Render Environment किंवा Secrets मध्ये sk_ ने सुरू होणारी ElevenLabs Secret Key अ‍ॅड करा.';
+      return 'ElevenLabs API Key सेट केलेली नाही. कृपया Render Environment Variables मध्ये sk_ ने सुरू होणारी Secret Key अ‍ॅड करा.';
     case 'invalid_key_format':
       return 'ElevenLabs API Key चुकीच्या फॉरमॅटमध्ये आहे. कृपया API Key ID ऐवजी sk_ ने सुरू होणारी मूळ Secret Key टाका.';
+    case 'missing_voice_id':
+      return 'Render मध्ये तुमचा ELEVENLABS_VOICE_ID सेट केलेला नाही. कृपया तुमचा निवडलेला Voice ID Render Environment Variables मध्ये अ‍ॅड करा.';
     case 'auth_rejected':
       return 'ElevenLabs ने ही API Key नाकारली आहे. कृपया वैध sk_ Secret Key तपासा.';
+    case 'voice_paid_plan_required':
+      return 'तुम्ही निवडलेला Voice ID वापरण्यासाठी ElevenLabs चा Paid Plan आवश्यक आहे. इतर कोणताही आवाज वापरला गेला नाही.';
     case 'free_tier_ip_blocked':
-      return 'Render च्या शेअर्ड सर्व्हर IP वर ElevenLabs Free Plan तात्पुरता ब्लॉक झाला आहे (पेड प्लॅनवर हा प्रश्न येत नाही).';
+      return 'Render च्या शेअर्ड सर्व्हर IP वर ElevenLabs Free Plan तात्पुरता ब्लॉक झाला आहे (Paid Plan वर हा प्रश्न येत नाही).';
     case 'quota_cooldown':
-      return 'ElevenLabs चे क्रेडिट्स किंवा रेट लिमिट संपले आहे. कृपया ElevenLabs डॅशबोर्डवर क्रेडिट्स तपासा.';
+      return 'आजचा कोटा संपला आहे. कृपया उद्या किंवा ElevenLabs क्रेडिट्स रिचार्ज केल्यानंतर पुन्हा प्रयत्न करा.';
     default:
-      return 'ElevenLabs आवाज सध्या उपलब्ध नाही. कृपया काही सेकंदांनी पुन्हा प्रयत्न करा.';
+      return 'तुमचा निवडलेला ElevenLabs आवाज सध्या उपलब्ध नाही. कृपया काही सेकंदांनी पुन्हा प्रयत्न करा.';
   }
 }
 
 async function callElevenLabsModel(params: {
   apiKey: string;
   voiceId: string;
-  voiceLabel?: string;
-  usedPremadeFallback?: boolean;
   text: string;
   modelId: ElevenLabsModelId;
   timeoutMs: number;
@@ -622,8 +612,6 @@ async function callElevenLabsModel(params: {
         audioBase64: Buffer.from(arrayBuf).toString('base64'),
         modelUsed: params.modelId,
         voiceId: params.voiceId,
-        ...(params.voiceLabel ? { voiceLabel: params.voiceLabel } : {}),
-        ...(params.usedPremadeFallback ? { usedPremadeFallback: true } : {}),
       },
     };
   } catch {
@@ -633,6 +621,11 @@ async function callElevenLabsModel(params: {
   }
 }
 
+/**
+ * STRICT SINGLE SELECTED VOICE ONLY:
+ * Calls ElevenLabs ONLY with the owner's configured Render ELEVENLABS_VOICE_ID.
+ * Never switches to Sarah, Rachel, Alice, Laura, or any other voice.
+ */
 async function synthesizeViaElevenLabs(
   text: string,
   options?: { forceRefresh?: boolean },
@@ -641,7 +634,7 @@ async function synthesizeViaElevenLabs(
   fallbackReason?: ElevenLabsFallbackReason;
 }> {
   if (options?.forceRefresh) {
-    // Allow explicit "Test Voice" checks to re-verify ElevenLabs cleanly
+    // Allow explicit "आवाज तपासा" checks to re-verify ElevenLabs cleanly
     elevenLabsCooldownUntil = 0;
     freeTierIpBlockedCooldownUntil = 0;
     paidOnlyVoiceIdCached = '';
@@ -649,89 +642,43 @@ async function synthesizeViaElevenLabs(
   }
 
   const config = resolveElevenLabsConfig(process.env);
-  if (config.status !== 'ready' && config.status !== 'premade_fallback_active') {
+  if (config.status !== 'ready') {
     return { result: null, fallbackReason: config.status };
   }
 
-  // Build candidate voice queue:
-  // 1. User's configured Voice ID (unless already known to require a Paid Plan on this Free key)
-  // 2. Free-Tier Premade Female Voices (Sarah -> Rachel -> Alice -> Laura) if Library Voice returns HTTP 402
-  const candidateVoices: Array<{
-    voiceId: string;
-    label?: string;
-    isPremadeFallback: boolean;
-  }> = [];
-
-  const skipCustomBecausePaidOnly =
-    paidOnlyVoiceIdCached && paidOnlyVoiceIdCached === config.voiceId;
-  if (!skipCustomBecausePaidOnly) {
-    candidateVoices.push({
+  for (const modelId of config.modelChain) {
+    const attempt = await callElevenLabsModel({
+      apiKey: config.apiKey,
       voiceId: config.voiceId,
-      label: getPremadeVoiceLabel(config.voiceId),
-      isPremadeFallback: false,
+      text,
+      modelId,
+      timeoutMs: modelId === 'eleven_v3' ? 11000 : modelId === 'eleven_flash_v2_5' ? 8000 : 10000,
     });
-  }
 
-  for (const premade of FREE_PREMADE_FEMALE_VOICES) {
-    if (!candidateVoices.some((c) => c.voiceId === premade.voiceId)) {
-      candidateVoices.push({
-        voiceId: premade.voiceId,
-        label: premade.label,
-        isPremadeFallback: config.voiceId !== premade.voiceId,
-      });
-    }
-  }
-
-  for (const candidate of candidateVoices) {
-    let moveToNextVoice = false;
-
-    for (const modelId of config.modelChain) {
-      const attempt = await callElevenLabsModel({
-        apiKey: config.apiKey,
-        voiceId: candidate.voiceId,
-        voiceLabel: candidate.label,
-        usedPremadeFallback: candidate.isPremadeFallback,
-        text,
-        modelId,
-        timeoutMs: modelId === 'eleven_v3' ? 11000 : modelId === 'eleven_flash_v2_5' ? 8000 : 10000,
-      });
-
-      if (attempt.result) {
-        if (candidate.isPremadeFallback && candidate.label) {
-          activePremadeVoiceLabel = candidate.label;
-        }
-        return { result: attempt.result };
-      }
-
-      if (attempt.errorKind === 'library_voice_paid_only') {
-        if (!candidate.isPremadeFallback) {
-          paidOnlyVoiceIdCached = candidate.voiceId;
-        }
-        // Immediately switch to the Free-Tier Premade Female voice chain without setting quota cooldown!
-        moveToNextVoice = true;
-        break;
-      }
-
-      if (attempt.errorKind === 'free_tier_ip_blocked') {
-        freeTierIpBlockedCooldownUntil = Date.now() + 5 * 60_000;
-        return { result: null, fallbackReason: 'free_tier_ip_blocked' };
-      }
-
-      if (attempt.errorKind === 'auth_rejected') {
-        invalidElevenLabsKeyCached = config.apiKey;
-        return { result: null, fallbackReason: 'auth_rejected' };
-      }
-
-      if (attempt.errorKind === 'quota_exceeded') {
-        elevenLabsCooldownUntil = Date.now() + 5 * 60_000;
-        return { result: null, fallbackReason: 'quota_cooldown' };
-      }
-      // Otherwise 'voice_error': try next model in modelChain (e.g., eleven_v3 -> eleven_flash_v2_5)
+    if (attempt.result) {
+      return { result: attempt.result };
     }
 
-    if (!moveToNextVoice) {
-      continue;
+    if (attempt.errorKind === 'library_voice_paid_only') {
+      paidOnlyVoiceIdCached = config.voiceId;
+      return { result: null, fallbackReason: 'voice_paid_plan_required' };
     }
+
+    if (attempt.errorKind === 'free_tier_ip_blocked') {
+      freeTierIpBlockedCooldownUntil = Date.now() + 5 * 60_000;
+      return { result: null, fallbackReason: 'free_tier_ip_blocked' };
+    }
+
+    if (attempt.errorKind === 'auth_rejected') {
+      invalidElevenLabsKeyCached = config.apiKey;
+      return { result: null, fallbackReason: 'auth_rejected' };
+    }
+
+    if (attempt.errorKind === 'quota_exceeded') {
+      elevenLabsCooldownUntil = Date.now() + 5 * 60_000;
+      return { result: null, fallbackReason: 'quota_cooldown' };
+    }
+    // Otherwise 'voice_error': try next model in modelChain on the EXACT SAME selected voiceId
   }
 
   return { result: null, fallbackReason: 'voice_error' };
