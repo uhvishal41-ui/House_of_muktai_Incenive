@@ -82,7 +82,7 @@ interface SpeechRecognitionEventLike {
 
 const MAX_HISTORY_MESSAGES = 6;
 const MAX_TOOL_LOOPS = 10;
-const SILENCE_AUTO_SUBMIT_MS = 2600;
+const SILENCE_AUTO_SUBMIT_MS = 1450;
 const MAX_LISTEN_DURATION_MS = 35000;
 const WAKE_WORD_STORAGE_KEY = 'hom_voice_wake_word_enabled';
 
@@ -295,19 +295,22 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     unlockVoiceAudioPlayback();
     setTestingVoice(true);
     setErrorNote('');
+    const needsLiveRecoveryCheck = Boolean(ttsAlertReason || !voiceCaps?.elevenLabsConfigured);
     try {
       await speakReply(
         'नमस्कार! मी मुक्ताई, तुमची मराठी व्हॉइस असिस्टंट. सांगा, मी तुमची काय मदत करू शकते?',
         {
-          forceRefresh: true,
+          forceRefresh: needsLiveRecoveryCheck,
           showUnavailableInReplyBox: true,
         },
       );
-      await refreshVoiceCaps();
+      if (needsLiveRecoveryCheck) {
+        void refreshVoiceCaps();
+      }
     } finally {
       setTestingVoice(false);
     }
-  }, [phase, refreshVoiceCaps, speakReply, testingVoice]);
+  }, [phase, refreshVoiceCaps, speakReply, testingVoice, ttsAlertReason, voiceCaps]);
 
   const processUserCommand = useCallback(
     async (spokenText: string) => {
@@ -374,9 +377,7 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
           }
 
           if (!resp.functionCalls || resp.functionCalls.length === 0) {
-            finalReplyText =
-              resp.text ||
-              'तुम्ही दिलेला टास्क मी पूर्ण केला आहे. आणखी काही मदत हवी असेल तर सांगा, मी तयार आहे.';
+            finalReplyText = resp.text || 'तुम्ही दिलेला टास्क पूर्ण झाला आहे.';
             break;
           }
 
@@ -555,7 +556,7 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     // Flush MediaRecorder cleanly so we get the full noise-suppressed Marathi audio clip
     if (mr && mr.state !== 'inactive') {
       await new Promise<void>((resolve) => {
-        const safeTimeout = setTimeout(() => resolve(), 600);
+        const safeTimeout = setTimeout(() => resolve(), 250);
         mr.onstop = () => {
           clearTimeout(safeTimeout);
           resolve();
@@ -585,8 +586,15 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     const chunks = audioChunksRef.current;
     audioChunksRef.current = [];
 
-    // Priority 1: High-accuracy Gemini Marathi/Minglish audio transcription on recorded audio
-    // (dramatically more accurate than browser mr-IN for numbers, branches, and mixed English terms)
+    // Priority 1: Immediate live browser Marathi speech when already captured cleanly
+    // (saves a 1.5-2s audio upload + transcription round-trip on every voice command)
+    if (capturedLiveSpeech.length >= 2) {
+      setUserTranscript(capturedLiveSpeech);
+      await processUserCommand(capturedLiveSpeech);
+      return;
+    }
+
+    // Priority 2: High-accuracy server audio transcription fallback (when browser speech is unsupported/silent)
     if (chunks.length > 0) {
       const mime = chunks[0]?.type || 'audio/webm';
       const blob = new Blob(chunks, { type: mime });
@@ -605,15 +613,9 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
             return;
           }
         } catch {
-          // Gracefully fall back to live browser transcript below if audio transcribe fails
+          // Gracefully show friendly retry message below
         }
       }
-    }
-
-    // Priority 2: Accumulated continuous live browser speech transcript
-    if (capturedLiveSpeech) {
-      await processUserCommand(capturedLiveSpeech);
-      return;
     }
 
     setLiveAction('');

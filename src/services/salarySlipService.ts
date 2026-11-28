@@ -454,16 +454,23 @@ export async function publishSalarySlipsBatch(params: {
   }
 
   try {
-    const liveAllSnap = await getDocs(collection(db, 'salary_slips'));
-    for (const d of liveAllSnap.docs) {
-      const rec = d.data() as SalarySlip;
-      existingSlipById.set(d.id, rec);
-      if (rec.slipId) {
-        existingSlipById.set(rec.slipId, rec);
+    const monthList = Array.from(affectedMonths);
+    const monthSnaps = await Promise.all(
+      monthList.map((mk) =>
+        getDocs(query(collection(db, 'salary_slips'), where('monthKey', '==', mk))),
+      ),
+    );
+    for (const snap of monthSnaps) {
+      for (const d of snap.docs) {
+        const rec = d.data() as SalarySlip;
+        existingSlipById.set(d.id, rec);
+        if (rec.slipId) {
+          existingSlipById.set(rec.slipId, rec);
+        }
       }
     }
   } catch {
-    // Fall back to in-memory existingSlips if collection read fails
+    // Fall back to in-memory existingSlips if month-scoped query fails
   }
 
   const slipOps: Array<{ ref: ReturnType<typeof doc>; data: SalarySlip }> = [];

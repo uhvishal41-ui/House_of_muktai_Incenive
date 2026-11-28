@@ -1,4 +1,5 @@
 import { getDepartmentById } from './departmentLeaderboardEngine';
+import { maskAadhaarNumber } from './employeeMasterExport';
 import { sanitizeId } from './format';
 import { maskBankAccountNumber } from './salarySlipEngine';
 import type { ActiveAuthUidRecord, DepartmentId, Employee } from '../types/incentive';
@@ -56,8 +57,8 @@ export function buildActiveAuthUidRecord(params: {
 /**
  * Builds a schema-valid Employee Master document when provisioning/activating
  * a pending employee's Firebase Auth login.
- * Preserves ALL employee master fields — including `saleId`, `gender`, `category`,
- * `isBranchManager`, `address`, `emergencyContact`, and `customFields`.
+ * Preserves ALL employee master fields — including personal, KYC, statutory,
+ * banking, compensation, floor ops, emergency/nominee, and customFields.
  */
 export function buildCleanProvisionedEmployeeDoc(
   emp: Employee,
@@ -97,8 +98,32 @@ export function buildCleanProvisionedEmployeeDoc(
     designation: (emp.designation || 'Employee').trim().slice(0, 80),
     ...(emp.gender?.trim() ? { gender: emp.gender.trim().slice(0, 20) } : {}),
     ...(emp.category?.trim() ? { category: emp.category.trim().slice(0, 40) } : {}),
+    ...(emp.fatherOrSpouseName?.trim()
+      ? { fatherOrSpouseName: emp.fatherOrSpouseName.trim().slice(0, 120) }
+      : {}),
+    ...(emp.maritalStatus?.trim()
+      ? { maritalStatus: emp.maritalStatus.trim().slice(0, 24) }
+      : {}),
+    ...(emp.bloodGroup?.trim() ? { bloodGroup: emp.bloodGroup.trim().slice(0, 12) } : {}),
+    ...(emp.qualification?.trim()
+      ? { qualification: emp.qualification.trim().slice(0, 80) }
+      : {}),
     ...(emp.dateOfBirth?.trim() ? { dateOfBirth: emp.dateOfBirth.trim().slice(0, 20) } : {}),
     ...(emp.dateOfJoining?.trim() ? { dateOfJoining: emp.dateOfJoining.trim().slice(0, 20) } : {}),
+    ...(emp.dateOfExit?.trim() ? { dateOfExit: emp.dateOfExit.trim().slice(0, 20) } : {}),
+    ...(emp.exitReason?.trim() ? { exitReason: emp.exitReason.trim().slice(0, 200) } : {}),
+    ...(emp.employmentType?.trim()
+      ? { employmentType: emp.employmentType.trim().slice(0, 32) }
+      : {}),
+    ...(emp.reportingManager?.trim()
+      ? { reportingManager: emp.reportingManager.trim().slice(0, 120) }
+      : {}),
+    ...(emp.shiftTiming?.trim() ? { shiftTiming: emp.shiftTiming.trim().slice(0, 60) } : {}),
+    ...(emp.weeklyOffDay?.trim() ? { weeklyOffDay: emp.weeklyOffDay.trim().slice(0, 24) } : {}),
+    ...(emp.uniformSize?.trim() ? { uniformSize: emp.uniformSize.trim().slice(0, 16) } : {}),
+    ...(emp.aadhaarMasked?.trim()
+      ? { aadhaarMasked: maskAadhaarNumber(emp.aadhaarMasked) }
+      : {}),
     ...(emp.panNumber?.trim()
       ? { panNumber: emp.panNumber.trim().toUpperCase().slice(0, 20) }
       : {}),
@@ -106,11 +131,21 @@ export function buildCleanProvisionedEmployeeDoc(
     ...(emp.pfNumber?.trim() ? { pfNumber: emp.pfNumber.trim().slice(0, 32) } : {}),
     ...(emp.esicNumber?.trim() ? { esicNumber: emp.esicNumber.trim().slice(0, 32) } : {}),
     ...(emp.bankName?.trim() ? { bankName: emp.bankName.trim().slice(0, 80) } : {}),
+    ...(emp.bankBranchName?.trim()
+      ? { bankBranchName: emp.bankBranchName.trim().slice(0, 100) }
+      : {}),
     ...(emp.bankAccountMasked?.trim()
       ? { bankAccountMasked: maskBankAccountNumber(emp.bankAccountMasked) }
       : {}),
     ...(emp.bankIfsc?.trim()
       ? { bankIfsc: emp.bankIfsc.trim().toUpperCase().slice(0, 20) }
+      : {}),
+    ...(emp.upiId?.trim() ? { upiId: emp.upiId.trim().slice(0, 80) } : {}),
+    ...(emp.paymentMode?.trim() ? { paymentMode: emp.paymentMode.trim().slice(0, 24) } : {}),
+    ...(typeof emp.monthlyGrossSalaryPaise === 'number' &&
+    Number.isFinite(emp.monthlyGrossSalaryPaise) &&
+    emp.monthlyGrossSalaryPaise >= 0
+      ? { monthlyGrossSalaryPaise: Math.round(emp.monthlyGrossSalaryPaise) }
       : {}),
     role: 'EMPLOYEE',
     ...(emp.isBranchManager !== undefined
@@ -125,10 +160,27 @@ export function buildCleanProvisionedEmployeeDoc(
       ? { linkedGoogleEmail: emp.linkedGoogleEmail.trim().toLowerCase().slice(0, 180) }
       : {}),
     ...(emp.phone?.trim() ? { phone: emp.phone.trim().slice(0, 24) } : {}),
+    ...(emp.alternatePhone?.trim()
+      ? { alternatePhone: emp.alternatePhone.trim().slice(0, 24) }
+      : {}),
+    ...(emp.personalEmail?.trim()
+      ? { personalEmail: emp.personalEmail.trim().toLowerCase().slice(0, 180) }
+      : {}),
     ...(emp.address?.trim() ? { address: emp.address.trim().slice(0, 240) } : {}),
+    ...(emp.permanentAddress?.trim()
+      ? { permanentAddress: emp.permanentAddress.trim().slice(0, 240) }
+      : {}),
+    ...(emp.emergencyContactName?.trim()
+      ? { emergencyContactName: emp.emergencyContactName.trim().slice(0, 120) }
+      : {}),
     ...(emp.emergencyContact?.trim()
       ? { emergencyContact: emp.emergencyContact.trim().slice(0, 120) }
       : {}),
+    ...(emp.nomineeName?.trim() ? { nomineeName: emp.nomineeName.trim().slice(0, 120) } : {}),
+    ...(emp.nomineeRelation?.trim()
+      ? { nomineeRelation: emp.nomineeRelation.trim().slice(0, 60) }
+      : {}),
+    ...(emp.hrRemarks?.trim() ? { hrRemarks: emp.hrRemarks.trim().slice(0, 300) } : {}),
     ...(Object.keys(cleanCustomFields).length > 0
       ? { customFields: cleanCustomFields }
       : {}),

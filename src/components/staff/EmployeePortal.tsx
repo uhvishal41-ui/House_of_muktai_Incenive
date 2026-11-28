@@ -284,6 +284,7 @@ export function EmployeePortal() {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [pwdSaving, setPwdSaving] = useState(false);
   const [pwdMessage, setPwdMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [authPasswordAlreadyUpdated, setAuthPasswordAlreadyUpdated] = useState(false);
   const [justUnlockedPortal, setJustUnlockedPortal] = useState(false);
 
   const toggleLang = (next: AppLang) => {
@@ -991,12 +992,20 @@ export function EmployeePortal() {
     setPwdMessage(null);
     const wasFirstLogin = Boolean(employeeProfile?.mustChangePassword);
     try {
-      await changeOwnPassword(newPassword, wasFirstLogin ? DEFAULT_EMPLOYEE_PASSWORD : undefined);
+      if (!authPasswordAlreadyUpdated) {
+        await changeOwnPassword(newPassword, wasFirstLogin ? DEFAULT_EMPLOYEE_PASSWORD : undefined);
+        if (wasFirstLogin) {
+          setAuthPasswordAlreadyUpdated(true);
+        }
+      }
       if (wasFirstLogin && employeeProfile) {
-        await updateOwnEmployeeProfile(employeeProfile.employeeId, {
-          mustChangePassword: false,
-        });
+        await updateOwnEmployeeProfile(
+          employeeProfile.employeeId,
+          { mustChangePassword: false },
+          { newPasswordForReauth: newPassword },
+        );
         await refreshEmployeeProfile();
+        setAuthPasswordAlreadyUpdated(false);
         setJustUnlockedPortal(true);
       }
       setNewPassword('');
@@ -1008,12 +1017,17 @@ export function EmployeePortal() {
           : 'Password updated successfully! Your incentive portal is now unlocked.',
       });
     } catch (err) {
+      const rawMsg = err instanceof Error ? err.message : '';
+      const isPermError =
+        rawMsg.includes('Missing or insufficient permissions') ||
+        rawMsg.includes('permission-denied');
       setPwdMessage({
         type: 'err',
-        text:
-          err instanceof Error
-            ? err.message
-            : 'Please sign out and sign in again before changing your password.',
+        text: isPermError
+          ? isMr
+            ? 'तुमचा नवीन पासवर्ड सेव्ह झाला आहे, पण प्रोफाईल अपडेट करताना तात्पुरती अडचण आली. कृपया पुन्हा "सेव्ह" दाबा किंवा लॉगआउट करून नवीन पासवर्डने लॉगिन करा.'
+            : 'Your new password was saved, but updating your profile hit a temporary permission sync delay. Please tap Save again or sign out and sign in with your new password.'
+          : rawMsg || 'Please sign out and sign in again before changing your password.',
       });
     } finally {
       setPwdSaving(false);

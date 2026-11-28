@@ -16,11 +16,13 @@ import {
   buildEmployeeImportDiagnosticsCsv,
   buildEmployeeMasterCsvTemplate,
   detectEmployeeHeaderRowIndex,
+  EMPLOYEE_MASTER_TEMPLATE_HEADERS,
   parseEmployeeMasterCsvText,
   parseEmployeeMasterRows,
   type EmployeeMasterParseSummary,
   type ParsedEmployeeMasterRow,
 } from '../../lib/employeeBulkImportEngine';
+import { downloadEmployeeMasterTemplateExcel } from '../../lib/employeeMasterExport';
 import { OFFICIAL_DEPARTMENTS } from '../../lib/departmentLeaderboardEngine';
 import { commitEmployeeMasterBulkImport } from '../../services/employeeBulkImportService';
 import type {
@@ -93,11 +95,23 @@ export function BulkEmployeeMasterDrawer({
   const handleDownloadTemplate = (mode: 'blank' | 'prefilled') => {
     const csv = buildEmployeeMasterCsvTemplate(branches, employees, mode, customColumns);
     triggerCsvDownload(
-      csv,
+      `\uFEFF${csv}`,
       mode === 'prefilled'
         ? 'House_of_Muktai_Employee_Master_Current.csv'
         : 'House_of_Muktai_Employee_Master_Template.csv',
     );
+  };
+
+  const handleDownloadExcelTemplate = async (mode: 'blank' | 'prefilled') => {
+    const csv = buildEmployeeMasterCsvTemplate(branches, employees, mode, customColumns);
+    await downloadEmployeeMasterTemplateExcel({
+      branches,
+      employees,
+      mode,
+      extraCustomColumns: customColumns,
+      templateHeaders: EMPLOYEE_MASTER_TEMPLATE_HEADERS,
+      sampleCsvLines: csv,
+    });
   };
 
   const handleDownloadDiagnostics = () => {
@@ -316,9 +330,7 @@ export function BulkEmployeeMasterDrawer({
                 Step 1 · Download Official Employee Master Template
               </p>
               <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
-                Includes <strong>Employee ID (Official Master ID), Sale ID (Optional POS Code for Sales Staff), Login ID, Full Name, Branch, Department, Designation</strong>,
-                Gender, Category, Status, DOB, DOJ, Phone, PAN, UAN, PF, ESIC, Bank, IFSC, Address &amp; Emergency Contact.
-                <strong> Plus:</strong> Any custom columns you add to the Excel/CSV sheet are automatically imported into Employee Master!
+                Includes only the <strong>essential HR &amp; Payroll columns</strong>: Employee ID, Sale ID, Login ID, Full Name, Branch, Department, Designation, Status, Mobile, Gender, DOB, DOJ, Date of Exit, Address, Emergency Contact, Aadhaar (auto-masked), PAN, UAN, PF, ESIC, Monthly Salary, Bank Name, Account, IFSC &amp; Google Email.
               </p>
               <p className="text-[10px] text-slate-500 mt-1">
                 Sales Counter Depts: {OFFICIAL_DEPARTMENTS.map((d) => d.name).join(' · ')} ·
@@ -328,20 +340,28 @@ export function BulkEmployeeMasterDrawer({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={() => handleDownloadTemplate('blank')}
-                className="h-9 px-3.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1.5 cursor-pointer"
+                onClick={() => void handleDownloadExcelTemplate('blank')}
+                className="h-9 px-3 rounded-lg border border-[#0F1F3D]/30 bg-white hover:bg-slate-100 text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
               >
-                <Download className="w-3.5 h-3.5 text-[#B8923A]" />
-                Blank Template (.csv)
+                <FileSpreadsheet className="w-3.5 h-3.5 text-[#B8923A]" />
+                Blank Template (.xlsx)
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDownloadTemplate('blank')}
+                className="h-9 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-slate-500" />
+                Blank (.csv)
               </button>
               <button
                 type="button"
                 disabled={employees.length === 0}
-                onClick={() => handleDownloadTemplate('prefilled')}
-                className="h-9 px-3.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                onClick={() => void handleDownloadExcelTemplate('prefilled')}
+                className="h-9 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50"
               >
-                <Download className="w-3.5 h-3.5 text-slate-500" />
-                Export Current Master ({employees.length})
+                <Download className="w-3.5 h-3.5 text-[#0F1F3D]" />
+                Current Master (.xlsx · {employees.length})
               </button>
             </div>
           </div>

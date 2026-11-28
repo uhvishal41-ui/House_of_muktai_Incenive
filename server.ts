@@ -23,6 +23,7 @@ import {
 import {
   ElevenLabsSpeechError,
   getVoiceCapabilitiesStatus,
+  openMarathiSpeechStream,
   runMarathiVoiceTurn,
   synthesizeMarathiSpeech,
   transcribeMarathiVoiceAudio,
@@ -662,6 +663,95 @@ export function createApiRouter(authMiddleware = verifyFirebaseBearerToken) {
     },
   );
 
+  // Ultra-low-latency streaming MP3 audio proxy (ElevenLabs /stream -> browser chunk-by-chunk)
+  router.post(
+    '/voice/tts/stream',
+    authMiddleware,
+    requireSuperAdmin,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const parsed = voiceTtsSchema.parse(req.body ?? {});
+        const opened = await openMarathiSpeechStream(parsed.text, {
+          forceRefresh: parsed.forceRefresh,
+        });
+
+        res.status(200);
+        res.setHeader('Content-Type', opened.mimeType);
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('Cache-Control', 'private, max-age=600');
+        res.setHeader('X-Voice-Provider', opened.provider);
+        res.setHeader('X-Voice-Model', opened.modelUsed);
+        res.setHeader('X-Voice-Id', opened.voiceId);
+        res.setHeader('X-Voice-Cache', opened.cacheHit ? 'HIT' : 'MISS');
+
+        if (opened.buffer) {
+          res.setHeader('Content-Length', String(opened.buffer.byteLength));
+          res.end(opened.buffer);
+          return;
+        }
+
+        if (opened.stream) {
+          res.flushHeaders?.();
+          const reader = opened.stream.getReader();
+          const chunks: Uint8Array[] = [];
+          let totalBytes = 0;
+          let clientClosed = false;
+
+          req.on('close', () => {
+            clientClosed = true;
+            void reader.cancel().catch(() => {});
+          });
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (value && value.byteLength > 0) {
+                chunks.push(value);
+                totalBytes += value.byteLength;
+                if (!clientClosed && !res.writableEnded) {
+                  res.write(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+                }
+              }
+            }
+          } finally {
+            reader.releaseLock();
+          }
+
+          if (!clientClosed && totalBytes > 0) {
+            opened.onCompleteBuffer?.(Buffer.concat(chunks, totalBytes));
+          }
+          if (!res.writableEnded) {
+            res.end();
+          }
+          return;
+        }
+
+        res.status(503).json({
+          error: 'तुमचा निवडलेला ElevenLabs आवाज सध्या उपलब्ध नाही.',
+          elevenLabsStatus: 'voice_error',
+          elevenLabsOnly: true,
+        });
+      } catch (err) {
+        if (res.headersSent) {
+          if (!res.writableEnded) res.end();
+          return;
+        }
+        if (err instanceof ElevenLabsSpeechError) {
+          res.status(503).json({
+            error: err.message,
+            elevenLabsStatus: err.reason,
+            elevenLabsOnly: true,
+          });
+          return;
+        }
+        const message =
+          err instanceof Error ? err.message : 'ElevenLabs speech synthesis unavailable.';
+        res.status(503).json({ error: message, elevenLabsOnly: true });
+      }
+    },
+  );
+
   return router;
 }
 
@@ -691,6 +781,7 @@ export function createExpressApp(authMiddleware = verifyFirebaseBearerToken) {
           origin: true,
           credentials: false,
           allowedHeaders: ['Content-Type', 'Authorization'],
+          exposedHeaders: ['X-Voice-Provider', 'X-Voice-Model', 'X-Voice-Id', 'X-Voice-Cache'],
         });
         return;
       }
@@ -698,7 +789,7 @@ export function createExpressApp(authMiddleware = verifyFirebaseBearerToken) {
     }),
   );
 
-  app.use(express.json({ limit: '5mb' }));
+  app.use(express.json({ limit: '15mb' }));
 
   const apiLimiter = rateLimit({
     windowMs: 60 * 1000,
@@ -711,9 +802,34 @@ export function createExpressApp(authMiddleware = verifyFirebaseBearerToken) {
   app.use('/api/v1', apiLimiter);
   app.use('/api/v1', createApiRouter(authMiddleware));
 
-  // Centralized Express error handler (catches Multer and CORS errors cleanly)
-  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    res.status(400).json({ error: err.message || 'Unexpected server error.' });
+  // Centralized Express error handler (accurate status codes for CORS, Payload Too Large, Multer, and malformed JSON)
+  app.use((err: Error & { status?: number; statusCode?: number; type?: string; code?: string }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (err.message === 'CORS origin not allowed') {
+      res.status(403).json({ error: 'CORS origin not allowed.' });
+      return;
+    }
+    if (err.type === 'entity.too.large' || err.code === 'LIMIT_FILE_SIZE' || err.status === 413 || err.statusCode === 413) {
+      res.status(413).json({ error: 'Request payload or uploaded file is too large. Please reduce the size and try again.' });
+      return;
+    }
+    if (err.type === 'entity.parse.failed') {
+      res.status(400).json({ error: 'Malformed JSON request body.' });
+      return;
+    }
+    if (err instanceof multer.MulterError) {
+      res.status(400).json({ error: err.message || 'File upload failed.' });
+      return;
+    }
+    const explicitStatus = err.status || err.statusCode;
+    if (typeof explicitStatus === 'number' && explicitStatus >= 400 && explicitStatus < 500) {
+      res.status(explicitStatus).json({ error: err.message || 'Invalid request.' });
+      return;
+    }
+    if (err.message && err.message.startsWith('Only .xlsx')) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: 'Unexpected server error.' });
   });
 
   return app;
@@ -787,11 +903,6 @@ async function startServer() {
         setHeaders: (res, filePath) => {
           if (filePath.endsWith('.webmanifest')) {
             res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
-          } else if (filePath.endsWith('.pptx')) {
-            res.setHeader(
-              'Content-Type',
-              'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-            );
           }
         },
       }),

@@ -196,7 +196,7 @@ export async function saveEmployeeColumnSettings(params: {
   const payload: EmployeeColumnSettings = {
     settingId: 'employee_columns',
     customColumns: sanitizeStringList(params.customColumns, 25, 60),
-    visibleColumns: sanitizeStringList(params.visibleColumns, 45, 70),
+    visibleColumns: sanitizeStringList(params.visibleColumns, 75, 70),
     updatedByEmail: actor.email,
     updatedAt: now,
   };

@@ -13,12 +13,15 @@ import {
 import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 import {
   adminUsernameToAuthEmail,
+  adminUsernameToRotatedAuthEmail,
   auth,
   BOOTSTRAPPED_ADMIN_EMAIL,
   db,
+  employeeLoginIdToRotatedAuthEmail,
   googleProvider,
   isAdminAuthEmail,
   loginIdToAuthEmail,
+  MAX_AUTH_ROTATION_SLOTS,
 } from '../lib/firebase';
 import { markOwnAdminPasswordChanged } from '../services/adminAccessService';
 import {
@@ -301,16 +304,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!trimmed || !password) {
       throw new Error('Enter both Admin Username and Password.');
     }
-    const authEmail = adminUsernameToAuthEmail(trimmed);
-    const cred = await signInWithEmailAndPassword(auth, authEmail, password);
-    const access = await resolveAdminAccess(cred.user);
-    if (!access.isSuperAdmin) {
-      await signOut(auth).catch(() => undefined);
-      throw new Error(
-        access.blockedReason ||
-          'This Admin account is suspended or not active. Contact the Main Owner.',
-      );
+
+    // Check primary email first, then any Owner-rotated slots (__r2..__r8) so Admin always uses the exact same Username
+    const candidateEmails: string[] = [adminUsernameToAuthEmail(trimmed)];
+    for (let slot = 2; slot <= MAX_AUTH_ROTATION_SLOTS; slot += 1) {
+      candidateEmails.push(adminUsernameToRotatedAuthEmail(trimmed, slot));
     }
+
+    let firstError: unknown = null;
+    let lastBlockedReason: string | null = null;
+
+    for (let i = 0; i < candidateEmails.length; i += 1) {
+      const candidateEmail = candidateEmails[i];
+      try {
+        const cred = await signInWithEmailAndPassword(auth, candidateEmail, password);
+        const access = await resolveAdminAccess(cred.user);
+        if (access.isSuperAdmin) {
+          return;
+        }
+        // Signed into an old revoked/suspended rotation slot: sign out and check if a newer active slot matches
+        lastBlockedReason = access.blockedReason;
+        await signOut(auth).catch(() => undefined);
+      } catch (err: unknown) {
+        if (i === 0) firstError = err;
+        const code = (err as { code?: string })?.code || '';
+        const canRetryNext =
+          code === 'auth/invalid-credential' || code === 'auth/user-not-found';
+        if (!canRetryNext) {
+          throw err;
+        }
+      }
+    }
+
+    if (lastBlockedReason) {
+      throw new Error(lastBlockedReason);
+    }
+    throw (
+      firstError ||
+      new Error('Invalid Admin Username or Password. Please check with the Main Owner.')
+    );
   };
 
   const signInEmployeeWithGoogle = async () => {
@@ -324,33 +356,57 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const cleanUpper = trimmed.toUpperCase().replace(/[^A-Z0-9_-]/g, '');
 
     // Build ordered candidate Login IDs:
-    // 1. Exact typed ID
-    // 2. If bare numeric/code (e.g. "459" or "0065"), try "HOM459" / "HOM0065"
-    // 3. If admin auto-reissued Login ID during auth/email-already-in-use recovery (e.g. "HOM0065A", "HOM0065B", "HOM0065_R1"), try those seamlessly
-    const candidates: string[] = [];
-    const pushUnique = (id: string) => {
-      if (id && !candidates.includes(id)) {
-        candidates.push(id);
+    // 1. Exact typed ID & canonical HOM-prefixed ID
+    // 2. Owner-rotated auth email slots (__p2..__p8) keeping exact visible Login ID unchanged
+    // 3. Legacy auto-reissued Login IDs (HOM0065A, HOM0065B, HOM0065_R1)
+    const candidateEmails: string[] = [];
+    const pushEmailUnique = (email: string) => {
+      const norm = email.trim().toLowerCase();
+      if (norm && !candidateEmails.includes(norm)) {
+        candidateEmails.push(norm);
       }
     };
-    pushUnique(trimmed);
+
+    const baseIds: string[] = [];
+    const pushBaseId = (id: string) => {
+      if (id && !baseIds.includes(id)) baseIds.push(id);
+    };
+    pushBaseId(trimmed);
     if (cleanUpper) {
-      pushUnique(cleanUpper);
+      pushBaseId(cleanUpper);
       const homBase = cleanUpper.startsWith('HOM') ? cleanUpper : `HOM${cleanUpper}`;
-      pushUnique(homBase);
+      pushBaseId(homBase);
       if (!/[A-Z]$/.test(homBase) && !/_R\d+$/.test(homBase)) {
-        pushUnique(`${homBase}A`);
-        pushUnique(`${homBase}B`);
-        pushUnique(`${homBase}_R1`);
+        pushBaseId(`${homBase}A`);
+        pushBaseId(`${homBase}B`);
+        pushBaseId(`${homBase}_R1`);
+      }
+    }
+
+    // First try slot 1 for all base IDs (fastest path for standard logins)
+    for (const id of baseIds) {
+      pushEmailUnique(loginIdToAuthEmail(id));
+    }
+    // Next try Owner-rotated password slots (__p2..__p8) for the primary typed/HOM IDs
+    const primaryIdsForRotation = baseIds.slice(0, 3);
+    for (let slot = 2; slot <= MAX_AUTH_ROTATION_SLOTS; slot += 1) {
+      for (const id of primaryIdsForRotation) {
+        pushEmailUnique(employeeLoginIdToRotatedAuthEmail(id, slot));
       }
     }
 
     let firstError: unknown = null;
-    for (let i = 0; i < candidates.length; i++) {
-      const candidate = candidates[i];
+    for (let i = 0; i < candidateEmails.length; i += 1) {
+      const candidateEmail = candidateEmails[i];
       try {
-        await signInWithEmailAndPassword(auth, loginIdToAuthEmail(candidate), password);
-        return;
+        await signInWithEmailAndPassword(auth, candidateEmail, password);
+        // Verify this signed-in UID maps to an active/current employee record (skip stale rotated slots)
+        const matchedProfile = await fetchOwnEmployeeProfile();
+        if (matchedProfile) {
+          return;
+        }
+        // Signed into an old revoked password slot whose authUid was rotated away -> sign out and check newer slots
+        await signOut(auth).catch(() => undefined);
       } catch (err: unknown) {
         if (i === 0) firstError = err;
         const code = (err as { code?: string })?.code || '';
@@ -369,6 +425,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       await updatePassword(auth.currentUser, newPassword);
       await auth.currentUser.getIdToken(true);
+      await new Promise((resolve) => setTimeout(resolve, 300));
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
       if (
@@ -380,6 +437,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await reauthenticateWithCredential(auth.currentUser, cred);
         await updatePassword(auth.currentUser, newPassword);
         await auth.currentUser.getIdToken(true);
+        await new Promise((resolve) => setTimeout(resolve, 300));
         return;
       }
       throw err;

@@ -1,6 +1,6 @@
 import { jsPDF } from 'jspdf';
 import { COMPANY_BRAND, DEFAULT_EMPLOYEE_PASSWORD } from './companyBrand';
-import { formatMonthLabel, formatQty, formatShortDate } from './format';
+import { formatMonthLabel, formatQty, formatShortDate, getTodayIST } from './format';
 import {
   getSalarySlipDeductionBreakdown,
   getSalarySlipEarningBreakdown,
@@ -686,7 +686,7 @@ export async function downloadCredentialSheetPdf(params: {
     });
   }
 
-  doc.save(`house-of-muktai-staff-logins-${new Date().toISOString().slice(0, 10)}.pdf`);
+  doc.save(`house-of-muktai-staff-logins-${getTodayIST()}.pdf`);
 }
 
 export async function loadBrandLogoPngDataUrlPublic(): Promise<string | null> {

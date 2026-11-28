@@ -18,15 +18,19 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signOut,
+  updatePassword,
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
   auth,
   db,
+  employeeLoginIdToRotatedAuthEmail,
+  extractAuthEmailRotationIndex,
   getSecondaryProvisioningAuth,
   handleFirestoreError,
   loginIdToAuthEmail,
   MAIN_OWNER_EMAIL,
+  MAX_AUTH_ROTATION_SLOTS,
   OperationType,
 } from '../lib/firebase';
 import { COMPANY_BRAND, DEFAULT_EMPLOYEE_PASSWORD } from '../lib/companyBrand';
@@ -49,6 +53,7 @@ import {
   buildCleanProvisionedEmployeeDoc,
   sanitizeEmployeeCustomFields,
 } from '../lib/employeeRecordHelpers';
+import { maskAadhaarNumber } from '../lib/employeeMasterExport';
 import { generateNextAvailableLoginId } from '../lib/loginProvisionHelper';
 import { maskBankAccountNumber } from '../lib/salarySlipEngine';
 import {
@@ -796,6 +801,261 @@ export async function provisionSingleEmployeeDefaultLogin(
   };
 }
 
+/**
+ * Main Owner ONLY: Set or reset ANY Employee's portal password directly from Employee Master
+ * — whether their login is pending, on default password, or already customized/forgotten.
+ *
+ * Keeps the employee's visible Login ID (e.g. HOM001) completely unchanged:
+ *  - Path 1: If already provisioned and still on DEFAULT_EMPLOYEE_PASSWORD, updates password in place.
+ *  - Path 2/3: Otherwise creates/activates a clean internal auth credential slot (`__p2..__p8`)
+ *    via isolated secondary Firebase Auth (never disturbing Main Owner's session), atomically
+ *    swaps `employees/{employeeId}` + `active_auth_uids` in one Firestore batch (instantly
+ *    revoking the old password), and migrates all historical employee records to the new authUid.
+ *
+ * Security: Strictly enforced for verified MAIN_OWNER_EMAIL only; NEVER stores or logs plaintext passwords.
+ */
+export async function ownerSetEmployeePassword(params: {
+  employee: Employee;
+  newPassword: string;
+  mustChangePassword?: boolean;
+}): Promise<{ employee: Employee; rotated: boolean }> {
+  const actor = auth.currentUser;
+  if (
+    !actor ||
+    !actor.emailVerified ||
+    (actor.email || '').trim().toLowerCase() !== MAIN_OWNER_EMAIL
+  ) {
+    throw new Error(
+      `Only the verified Main Owner (${MAIN_OWNER_EMAIL}) can set or reset employee passwords.`,
+    );
+  }
+
+  const cleanPassword = String(params.newPassword || '').trim();
+  if (cleanPassword.length < 8) {
+    throw new Error('Password must be at least 8 characters long.');
+  }
+  if (cleanPassword.length > 128) {
+    throw new Error('Password must not exceed 128 characters.');
+  }
+
+  const emp = params.employee;
+  const rawLogin = sanitizeId(emp.loginId || `HOM${emp.employeeId}`).slice(0, 40);
+  const safeLoginId =
+    rawLogin.length >= 3 ? rawLogin : `HOM${sanitizeId(emp.employeeId)}`.slice(0, 40);
+  if (safeLoginId.length < 3) {
+    throw new Error(
+      'Employee must have a valid Login ID (minimum 3 characters) before setting a password.',
+    );
+  }
+
+  const secondaryAuth = getSecondaryProvisioningAuth();
+  const now = new Date().toISOString();
+  const mustChange = Boolean(params.mustChangePassword);
+  const currentAuthEmail = (emp.authEmail || loginIdToAuthEmail(safeLoginId))
+    .trim()
+    .toLowerCase();
+  const currentUid = String(emp.authUid || '').trim();
+  const hasExistingCredential = Boolean(emp.credentialsProvisioned && currentUid);
+
+  // Path 1: Fast in-place update when employee is already provisioned and still on default password
+  if (hasExistingCredential && currentAuthEmail) {
+    try {
+      const cred = await signInWithEmailAndPassword(
+        secondaryAuth,
+        currentAuthEmail,
+        DEFAULT_EMPLOYEE_PASSWORD,
+      );
+      try {
+        if (cred.user.uid === currentUid) {
+          if (cleanPassword !== DEFAULT_EMPLOYEE_PASSWORD) {
+            await updatePassword(cred.user, cleanPassword);
+          }
+          const updatedEmp: Employee = {
+            ...buildCleanProvisionedEmployeeDoc(emp, currentUid, now, () => currentAuthEmail),
+            mustChangePassword: mustChange,
+          };
+          const wb = writeBatch(db);
+          wb.set(doc(db, 'employees', updatedEmp.employeeId), updatedEmp);
+          if (updatedEmp.status === 'ACTIVE') {
+            wb.set(
+              doc(db, 'active_auth_uids', currentUid),
+              buildActiveAuthUidRecord({
+                authUid: currentUid,
+                employeeId: updatedEmp.employeeId,
+                departmentId: updatedEmp.departmentId,
+                branchId: updatedEmp.branchId,
+                branchName: updatedEmp.branchName,
+                isBranchManager: updatedEmp.isBranchManager,
+                updatedAt: now,
+              }),
+            );
+          } else {
+            wb.delete(doc(db, 'active_auth_uids', currentUid));
+          }
+          await wb.commit();
+          await recordAuditLog({
+            action: 'OWNER_SET_EMPLOYEE_PASSWORD',
+            targetType: 'employee_auth',
+            targetId: updatedEmp.employeeId,
+            summary: `Main Owner set a new portal password for ${updatedEmp.fullName} (${updatedEmp.loginId}) in place${mustChange ? ' (change required on next login)' : ''}.`,
+          });
+          return { employee: updatedEmp, rotated: false };
+        }
+      } finally {
+        await signOut(secondaryAuth).catch(() => undefined);
+      }
+    } catch {
+      // Employee already changed password or auth record differs — proceed to clean slot rotation
+      await signOut(secondaryAuth).catch(() => undefined);
+    }
+  }
+
+  // Path 2/3: Provision first-time credential or atomically rotate internal auth email slot
+  const currentSlot = hasExistingCredential
+    ? extractAuthEmailRotationIndex(currentAuthEmail, '__p')
+    : 0;
+  const candidateSlots: number[] = [];
+  if (!hasExistingCredential) {
+    for (let s = 1; s <= MAX_AUTH_ROTATION_SLOTS; s += 1) {
+      candidateSlots.push(s);
+    }
+  } else {
+    for (let s = currentSlot + 1; s <= MAX_AUTH_ROTATION_SLOTS; s += 1) {
+      candidateSlots.push(s);
+    }
+    for (let s = 1; s < currentSlot; s += 1) {
+      candidateSlots.push(s);
+    }
+  }
+
+  let resolvedUid = '';
+  let resolvedAuthEmail = '';
+
+  for (const slot of candidateSlots) {
+    const candidateEmail = employeeLoginIdToRotatedAuthEmail(safeLoginId, slot);
+    if (hasExistingCredential && candidateEmail === currentAuthEmail) continue;
+
+    try {
+      const cred = await createUserWithEmailAndPassword(
+        secondaryAuth,
+        candidateEmail,
+        cleanPassword,
+      );
+      resolvedUid = cred.user.uid;
+      resolvedAuthEmail = candidateEmail;
+      await signOut(secondaryAuth).catch(() => undefined);
+      break;
+    } catch (err) {
+      const code = (err as { code?: string })?.code || '';
+      if (code === 'auth/email-already-in-use') {
+        // Attempt reuse only if this slot matches the target password (or default password on first-time activation)
+        try {
+          const existingCred = await signInWithEmailAndPassword(
+            secondaryAuth,
+            candidateEmail,
+            cleanPassword,
+          );
+          const existingUid = existingCred.user.uid;
+          await signOut(secondaryAuth).catch(() => undefined);
+          if (!hasExistingCredential || existingUid !== currentUid) {
+            resolvedUid = existingUid;
+            resolvedAuthEmail = candidateEmail;
+            break;
+          }
+        } catch {
+          await signOut(secondaryAuth).catch(() => undefined);
+          if (!hasExistingCredential) {
+            try {
+              const defCred = await signInWithEmailAndPassword(
+                secondaryAuth,
+                candidateEmail,
+                DEFAULT_EMPLOYEE_PASSWORD,
+              );
+              try {
+                if (cleanPassword !== DEFAULT_EMPLOYEE_PASSWORD) {
+                  await updatePassword(defCred.user, cleanPassword);
+                }
+                resolvedUid = defCred.user.uid;
+                resolvedAuthEmail = candidateEmail;
+              } finally {
+                await signOut(secondaryAuth).catch(() => undefined);
+              }
+              if (resolvedUid) break;
+            } catch {
+              await signOut(secondaryAuth).catch(() => undefined);
+            }
+          }
+        }
+        continue;
+      }
+      if (code === 'auth/operation-not-allowed') {
+        throw new Error(
+          'Email/Password Sign-In is disabled in Firebase Console. Enable Authentication -> Sign-in method -> Email/Password first.',
+        );
+      }
+      if (code === 'auth/weak-password') {
+        throw new Error('Password is too weak. Please choose at least 8 characters.');
+      }
+      if (code === 'auth/too-many-requests') {
+        throw new Error(
+          'Firebase Auth rate limit reached. Please wait a few minutes and try again.',
+        );
+      }
+      throw err;
+    }
+  }
+
+  if (!resolvedUid || !resolvedAuthEmail) {
+    throw new Error(
+      `All ${MAX_AUTH_ROTATION_SLOTS} password reset slots for Login ID "${safeLoginId}" are used. Please update the employee's Login ID or contact support.`,
+    );
+  }
+
+  const updatedEmp: Employee = {
+    ...buildCleanProvisionedEmployeeDoc(emp, resolvedUid, now, () => resolvedAuthEmail),
+    mustChangePassword: mustChange,
+  };
+
+  const wb = writeBatch(db);
+  wb.set(doc(db, 'employees', updatedEmp.employeeId), updatedEmp);
+  if (updatedEmp.status === 'ACTIVE') {
+    wb.set(
+      doc(db, 'active_auth_uids', resolvedUid),
+      buildActiveAuthUidRecord({
+        authUid: resolvedUid,
+        employeeId: updatedEmp.employeeId,
+        departmentId: updatedEmp.departmentId,
+        branchId: updatedEmp.branchId,
+        branchName: updatedEmp.branchName,
+        isBranchManager: updatedEmp.isBranchManager,
+        updatedAt: now,
+      }),
+    );
+  } else {
+    wb.delete(doc(db, 'active_auth_uids', resolvedUid));
+  }
+  if (
+    currentUid &&
+    currentUid !== resolvedUid &&
+    /^[a-zA-Z0-9_-]{1,128}$/.test(currentUid)
+  ) {
+    wb.delete(doc(db, 'active_auth_uids', currentUid));
+  }
+  await wb.commit();
+
+  // Migrate historical employee records so incentives, salary slips, payouts & notifications stay visible
+  await syncEmployeeAuthUidToExistingRecords(updatedEmp.employeeId, resolvedUid);
+
+  await recordAuditLog({
+    action: 'OWNER_SET_EMPLOYEE_PASSWORD',
+    targetType: 'employee_auth',
+    targetId: updatedEmp.employeeId,
+    summary: `Main Owner ${hasExistingCredential ? 'reset' : 'activated and set'} portal password for ${updatedEmp.fullName} (${updatedEmp.loginId}); previous credential revoked${mustChange ? ' (change required on next login)' : ''}.`,
+  });
+
+  return { employee: updatedEmp, rotated: hasExistingCredential };
+}
+
 export async function provisionAllPendingEmployeeLogins(
   employees: Employee[],
   options?: {
@@ -997,7 +1257,8 @@ export async function provisionAllPendingEmployeeLogins(
 /**
  * Helper: Synchronizes a newly linked/provisioned authUid onto all legacy records for that employee
  * (published_incentives, monthly_summaries, notifications, payout_records, incentive_adjustments,
- * and employee sales_targets) so historical statements, paid status, and targets appear immediately.
+ * employee sales_targets, salary_slips, employee_department_ranks, employee_queries, and employee_loans)
+ * so historical statements, paid status, targets, support tickets, and loans appear immediately.
  */
 async function syncEmployeeAuthUidToExistingRecords(
   employeeId: string,
@@ -1005,7 +1266,7 @@ async function syncEmployeeAuthUidToExistingRecords(
 ): Promise<number> {
   if (!authUid) return 0;
   const cleanEmpId = sanitizeId(employeeId);
-  const [incSnap, sumSnap, ntfSnap, payoutSnap, adjSnap, tgtSnap, slipSnap, rankSnap] =
+  const [incSnap, sumSnap, ntfSnap, payoutSnap, adjSnap, tgtSnap, slipSnap, rankSnap, querySnap, loanSnap] =
     await Promise.all([
       getDocs(query(collection(db, 'published_incentives'), where('employeeId', '==', cleanEmpId))),
       getDocs(query(collection(db, 'monthly_summaries'), where('employeeId', '==', cleanEmpId))),
@@ -1015,6 +1276,8 @@ async function syncEmployeeAuthUidToExistingRecords(
       getDocs(query(collection(db, 'sales_targets'), where('employeeId', '==', cleanEmpId))),
       getDocs(query(collection(db, 'salary_slips'), where('employeeId', '==', cleanEmpId))),
       getDocs(query(collection(db, 'employee_department_ranks'), where('employeeId', '==', cleanEmpId))),
+      getDocs(query(collection(db, 'employee_queries'), where('employeeId', '==', cleanEmpId))),
+      getDocs(query(collection(db, 'employee_loans'), where('employeeId', '==', cleanEmpId))),
     ]);
 
   const refsToUpdate: Array<ReturnType<typeof doc>> = [];
@@ -1043,6 +1306,12 @@ async function syncEmployeeAuthUidToExistingRecords(
   for (const d of rankSnap.docs) {
     if ((d.data() as { authUid?: string }).authUid !== authUid) refsToUpdate.push(d.ref);
   }
+  for (const d of querySnap.docs) {
+    if ((d.data() as { authUid?: string }).authUid !== authUid) refsToUpdate.push(d.ref);
+  }
+  for (const d of loanSnap.docs) {
+    if ((d.data() as { authUid?: string }).authUid !== authUid) refsToUpdate.push(d.ref);
+  }
 
   for (let i = 0; i < refsToUpdate.length; i += 400) {
     const wb = writeBatch(db);
@@ -1067,18 +1336,41 @@ export async function saveEmployee(input: {
   designation: string;
   gender?: string;
   category?: string;
+  fatherOrSpouseName?: string;
+  maritalStatus?: string;
+  bloodGroup?: string;
+  qualification?: string;
   dateOfBirth?: string;
   dateOfJoining?: string;
+  dateOfExit?: string;
+  exitReason?: string;
+  employmentType?: string;
+  reportingManager?: string;
+  shiftTiming?: string;
+  weeklyOffDay?: string;
+  uniformSize?: string;
+  aadhaarMasked?: string;
   panNumber?: string;
   uanNumber?: string;
   pfNumber?: string;
   esicNumber?: string;
   bankName?: string;
+  bankBranchName?: string;
   bankAccountMasked?: string;
   bankIfsc?: string;
+  upiId?: string;
+  paymentMode?: string;
+  monthlyGrossSalaryPaise?: number;
   phone?: string;
+  alternatePhone?: string;
+  personalEmail?: string;
   address?: string;
+  permanentAddress?: string;
+  emergencyContactName?: string;
   emergencyContact?: string;
+  nomineeName?: string;
+  nomineeRelation?: string;
+  hrRemarks?: string;
   customFields?: Record<string, string>;
   linkedGoogleEmail?: string;
   role?: 'EMPLOYEE';
@@ -1223,6 +1515,98 @@ export async function saveEmployee(input: {
     .trim()
     .slice(0, 120);
 
+  const pickOptStr = (
+    incoming: string | undefined,
+    existingVal: string | undefined,
+    maxLen: number,
+  ) => (incoming !== undefined ? incoming : existingVal || '').trim().slice(0, maxLen);
+
+  const resolvedFatherOrSpouseName = pickOptStr(
+    input.fatherOrSpouseName,
+    input.existing?.fatherOrSpouseName,
+    120,
+  );
+  const resolvedMaritalStatus = pickOptStr(
+    input.maritalStatus,
+    input.existing?.maritalStatus,
+    24,
+  );
+  const resolvedBloodGroup = pickOptStr(
+    input.bloodGroup,
+    input.existing?.bloodGroup,
+    12,
+  ).toUpperCase();
+  const resolvedQualification = pickOptStr(
+    input.qualification,
+    input.existing?.qualification,
+    80,
+  );
+  const resolvedDateOfExit = pickOptStr(input.dateOfExit, input.existing?.dateOfExit, 20);
+  const resolvedExitReason = pickOptStr(input.exitReason, input.existing?.exitReason, 200);
+  const resolvedEmploymentType = pickOptStr(
+    input.employmentType,
+    input.existing?.employmentType,
+    32,
+  );
+  const resolvedReportingManager = pickOptStr(
+    input.reportingManager,
+    input.existing?.reportingManager,
+    120,
+  );
+  const resolvedShiftTiming = pickOptStr(input.shiftTiming, input.existing?.shiftTiming, 60);
+  const resolvedWeeklyOffDay = pickOptStr(input.weeklyOffDay, input.existing?.weeklyOffDay, 24);
+  const resolvedUniformSize = pickOptStr(input.uniformSize, input.existing?.uniformSize, 16);
+  const resolvedAadhaarMasked = maskAadhaarNumber(
+    input.aadhaarMasked !== undefined
+      ? input.aadhaarMasked
+      : input.existing?.aadhaarMasked || '',
+  );
+  const resolvedBankBranchName = pickOptStr(
+    input.bankBranchName,
+    input.existing?.bankBranchName,
+    100,
+  );
+  const resolvedUpiId = pickOptStr(input.upiId, input.existing?.upiId, 80);
+  const resolvedPaymentMode = pickOptStr(input.paymentMode, input.existing?.paymentMode, 24);
+  const resolvedAlternatePhone = pickOptStr(
+    input.alternatePhone,
+    input.existing?.alternatePhone,
+    24,
+  );
+  const resolvedPersonalEmail = pickOptStr(
+    input.personalEmail,
+    input.existing?.personalEmail,
+    180,
+  ).toLowerCase();
+  const resolvedPermanentAddress = pickOptStr(
+    input.permanentAddress,
+    input.existing?.permanentAddress,
+    240,
+  );
+  const resolvedEmergencyContactName = pickOptStr(
+    input.emergencyContactName,
+    input.existing?.emergencyContactName,
+    120,
+  );
+  const resolvedNomineeName = pickOptStr(input.nomineeName, input.existing?.nomineeName, 120);
+  const resolvedNomineeRelation = pickOptStr(
+    input.nomineeRelation,
+    input.existing?.nomineeRelation,
+    60,
+  );
+  const resolvedHrRemarks = pickOptStr(input.hrRemarks, input.existing?.hrRemarks, 300);
+
+  const rawMonthlySalary =
+    input.monthlyGrossSalaryPaise !== undefined
+      ? input.monthlyGrossSalaryPaise
+      : input.existing?.monthlyGrossSalaryPaise;
+  const resolvedMonthlyGrossSalaryPaise =
+    typeof rawMonthlySalary === 'number' &&
+    Number.isFinite(rawMonthlySalary) &&
+    rawMonthlySalary > 0
+      ? Math.round(rawMonthlySalary)
+      : undefined;
+
   const rawCustomFields =
     input.customFields !== undefined
       ? input.customFields
@@ -1247,15 +1631,33 @@ export async function saveEmployee(input: {
     designation: input.designation.trim().slice(0, 80),
     ...(resolvedGender ? { gender: resolvedGender } : {}),
     ...(resolvedCategory ? { category: resolvedCategory } : {}),
+    ...(resolvedFatherOrSpouseName ? { fatherOrSpouseName: resolvedFatherOrSpouseName } : {}),
+    ...(resolvedMaritalStatus ? { maritalStatus: resolvedMaritalStatus } : {}),
+    ...(resolvedBloodGroup ? { bloodGroup: resolvedBloodGroup } : {}),
+    ...(resolvedQualification ? { qualification: resolvedQualification } : {}),
     ...(resolvedDob ? { dateOfBirth: resolvedDob } : {}),
     ...(resolvedDoj ? { dateOfJoining: resolvedDoj } : {}),
+    ...(resolvedDateOfExit ? { dateOfExit: resolvedDateOfExit } : {}),
+    ...(resolvedExitReason ? { exitReason: resolvedExitReason } : {}),
+    ...(resolvedEmploymentType ? { employmentType: resolvedEmploymentType } : {}),
+    ...(resolvedReportingManager ? { reportingManager: resolvedReportingManager } : {}),
+    ...(resolvedShiftTiming ? { shiftTiming: resolvedShiftTiming } : {}),
+    ...(resolvedWeeklyOffDay ? { weeklyOffDay: resolvedWeeklyOffDay } : {}),
+    ...(resolvedUniformSize ? { uniformSize: resolvedUniformSize } : {}),
+    ...(resolvedAadhaarMasked ? { aadhaarMasked: resolvedAadhaarMasked } : {}),
     ...(resolvedPan ? { panNumber: resolvedPan } : {}),
     ...(resolvedUan ? { uanNumber: resolvedUan } : {}),
     ...(resolvedPf ? { pfNumber: resolvedPf } : {}),
     ...(resolvedEsic ? { esicNumber: resolvedEsic } : {}),
     ...(resolvedBankName ? { bankName: resolvedBankName } : {}),
+    ...(resolvedBankBranchName ? { bankBranchName: resolvedBankBranchName } : {}),
     ...(resolvedBankAcc ? { bankAccountMasked: resolvedBankAcc } : {}),
     ...(resolvedBankIfsc ? { bankIfsc: resolvedBankIfsc } : {}),
+    ...(resolvedUpiId ? { upiId: resolvedUpiId } : {}),
+    ...(resolvedPaymentMode ? { paymentMode: resolvedPaymentMode } : {}),
+    ...(resolvedMonthlyGrossSalaryPaise !== undefined
+      ? { monthlyGrossSalaryPaise: resolvedMonthlyGrossSalaryPaise }
+      : {}),
     role: 'EMPLOYEE',
     ...(input.isBranchManager !== undefined
       ? { isBranchManager: Boolean(input.isBranchManager) }
@@ -1272,8 +1674,17 @@ export async function saveEmployee(input: {
       ? { linkedGoogleEmail: input.linkedGoogleEmail.trim().toLowerCase().slice(0, 180) }
       : {}),
     ...(resolvedPhone ? { phone: resolvedPhone } : {}),
+    ...(resolvedAlternatePhone ? { alternatePhone: resolvedAlternatePhone } : {}),
+    ...(resolvedPersonalEmail ? { personalEmail: resolvedPersonalEmail } : {}),
     ...(resolvedAddress ? { address: resolvedAddress } : {}),
+    ...(resolvedPermanentAddress ? { permanentAddress: resolvedPermanentAddress } : {}),
+    ...(resolvedEmergencyContactName
+      ? { emergencyContactName: resolvedEmergencyContactName }
+      : {}),
     ...(resolvedEmergencyContact ? { emergencyContact: resolvedEmergencyContact } : {}),
+    ...(resolvedNomineeName ? { nomineeName: resolvedNomineeName } : {}),
+    ...(resolvedNomineeRelation ? { nomineeRelation: resolvedNomineeRelation } : {}),
+    ...(resolvedHrRemarks ? { hrRemarks: resolvedHrRemarks } : {}),
     ...(Object.keys(resolvedCustomFields).length > 0
       ? { customFields: resolvedCustomFields }
       : {}),
@@ -1949,6 +2360,9 @@ export async function updateOwnEmployeeProfile(
     emergencyContact?: string;
     mustChangePassword?: boolean;
   },
+  options?: {
+    newPasswordForReauth?: string;
+  },
 ): Promise<void> {
   const payload: Record<string, string | boolean> = {
     updatedAt: new Date().toISOString(),
@@ -1966,24 +2380,45 @@ export async function updateOwnEmployeeProfile(
     payload.mustChangePassword = updates.mustChangePassword;
   }
 
-  try {
-    await updateDoc(doc(db, 'employees', employeeId), payload);
-  } catch (firstError: unknown) {
-    const code = (firstError as { code?: string })?.code || '';
-    // Right after Firebase Auth updatePassword(), Firestore's active channel may still hold the pre-change token briefly.
-    // Force a fresh ID token and retry once cleanly before surfacing a permission error.
-    if (code === 'permission-denied' && auth.currentUser) {
-      try {
-        await auth.currentUser.getIdToken(true);
-        await sleepMs(350);
-        await updateDoc(doc(db, 'employees', employeeId), payload);
-        return;
-      } catch (retryError) {
-        handleFirestoreError(retryError, OperationType.UPDATE, `employees/${employeeId}`);
+  const targetRef = doc(db, 'employees', employeeId);
+  const retryDelaysMs = [400, 900, 1500];
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      await updateDoc(targetRef, payload);
+      return;
+    } catch (err: unknown) {
+      lastError = err;
+      const code = (err as { code?: string })?.code || '';
+      const isPermissionDenied = code === 'permission-denied';
+      if (!isPermissionDenied || !auth.currentUser || attempt === retryDelaysMs.length) {
+        break;
       }
+
+      // Right after Firebase Auth updatePassword(), Firestore's active channel can briefly retain
+      // the pre-change token. Refresh token + backoff, and on final retry re-sign-in cleanly if possible.
+      try {
+        if (
+          attempt === retryDelaysMs.length - 1 &&
+          options?.newPasswordForReauth &&
+          auth.currentUser.email
+        ) {
+          await signInWithEmailAndPassword(
+            auth,
+            auth.currentUser.email,
+            options.newPasswordForReauth,
+          );
+        }
+        await auth.currentUser?.getIdToken(true);
+      } catch {
+        // Proceed with backoff retry
+      }
+      await sleepMs(retryDelaysMs[attempt]);
     }
-    handleFirestoreError(firstError, OperationType.UPDATE, `employees/${employeeId}`);
   }
+
+  handleFirestoreError(lastError, OperationType.UPDATE, `employees/${employeeId}`);
 }
 
 function toCleanTitleCase(raw: string): string {

@@ -2,19 +2,25 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Cake,
   Camera,
+  Check,
   ChevronDown,
   Columns,
+  Copy,
   Download,
   Edit3,
+  Eye,
+  EyeOff,
   FileSpreadsheet,
   FileText,
   Gift,
   KeyRound,
+  MessageCircle,
   Plus,
   Power,
   RefreshCw,
   Search,
   ShieldCheck,
+  Sparkles,
   Trash2,
   Upload,
   UserCheck,
@@ -39,6 +45,13 @@ import {
   parseBulkDepartmentRows,
   type BulkDepartmentParseRow,
 } from '../../lib/departmentLeaderboardEngine';
+import {
+  downloadEmployeeMasterCsvFile,
+  downloadEmployeeMasterExcelFile,
+  formatSalaryRupeesPlain,
+  parseMonthlySalaryToPaise,
+} from '../../lib/employeeMasterExport';
+import { formatINRFromPaise } from '../../lib/format';
 import { downloadCredentialSheetPdf } from '../../lib/pdfGenerator';
 import {
   bulkUpdateEmployeeDobs,
@@ -51,9 +64,11 @@ import {
   subscribeEmployeeColumnSettings,
 } from '../../services/departmentVisibilityService';
 import { useAuth } from '../../context/AuthContext';
+import { generateStrongTemporaryPassword } from '../../lib/firebase';
 import {
   backfillAuthUidAndActiveRegistry,
   deleteEmployeeByOwner,
+  ownerSetEmployeePassword,
   provisionAllPendingEmployeeLogins,
   provisionSingleEmployeeDefaultLogin,
   saveEmployee,
@@ -62,6 +77,7 @@ import {
 } from '../../services/incentiveService';
 import { BirthdayWishingCardModal } from '../common/BirthdayWishingCardModal';
 import { BulkEmployeeMasterDrawer } from './BulkEmployeeMasterDrawer';
+import { EmployeeProfileDrawer } from './EmployeeProfileDrawer';
 import type {
   Branch,
   DepartmentId,
@@ -85,30 +101,35 @@ const CUSTOM_COLUMNS_STORAGE_KEY = 'hom_emp_master_custom_columns';
 const VISIBLE_COLUMNS_STORAGE_KEY = 'hom_emp_master_visible_columns';
 
 const BUILTIN_EXTRA_TABLE_COLUMNS: Array<{ id: string; label: string }> = [
-  { id: 'saleId', label: 'Sales ID (POS Code)' },
-  { id: 'gender', label: 'Gender' },
-  { id: 'category', label: 'Category' },
-  { id: 'phone', label: 'Mobile Number' },
+  { id: 'saleId', label: 'Sale ID (POS Code)' },
   { id: 'dateOfJoining', label: 'Date of Joining' },
+  { id: 'dateOfExit', label: 'Date of Exit' },
   { id: 'dateOfBirth', label: 'Date of Birth' },
+  { id: 'gender', label: 'Gender' },
+  { id: 'monthlyGrossSalaryPaise', label: 'Monthly Salary' },
+  { id: 'bankName', label: 'Bank Name' },
+  { id: 'bankAccountMasked', label: 'Bank Account' },
+  { id: 'bankIfsc', label: 'Bank IFSC' },
+  { id: 'aadhaarMasked', label: 'Aadhaar (Masked)' },
   { id: 'panNumber', label: 'PAN Number' },
   { id: 'uanNumber', label: 'UAN Number' },
-  { id: 'pfNumber', label: 'Provident Fund Number' },
+  { id: 'pfNumber', label: 'PF Number' },
   { id: 'esicNumber', label: 'ESIC Number' },
-  { id: 'bankName', label: 'Bank Name' },
-  { id: 'bankAccountMasked', label: 'Bank Account Number' },
-  { id: 'bankIfsc', label: 'Bank IFSC Code' },
-  { id: 'address', label: 'Residential Address' },
+  { id: 'address', label: 'Address' },
   { id: 'emergencyContact', label: 'Emergency Contact' },
 ];
 
+const VALID_BUILTIN_COLUMN_IDS = new Set(BUILTIN_EXTRA_TABLE_COLUMNS.map((c) => c.id));
+
+function pruneValidVisibleColumns(cols: string[]): string[] {
+  return cols.filter((id) => id.startsWith('custom:') || VALID_BUILTIN_COLUMN_IDS.has(id));
+}
+
 const QUICK_CUSTOM_COLUMN_SUGGESTIONS = [
-  'Aadhaar Card Number',
-  'Blood Group',
-  'Weekly Off Day',
-  'Base Salary',
-  'Qualification',
-  'Uniform Size',
+  'Reference Name',
+  'Vehicle Number',
+  'Locker Number',
+  'Tally / ERP Code',
 ];
 
 function loadSavedStringArray(key: string): string[] {
@@ -136,6 +157,24 @@ export function EmployeeMaster({
   const [confirmDeleteEmp, setConfirmDeleteEmp] = useState<Employee | null>(null);
   const [deleteEmpReason, setDeleteEmpReason] = useState('');
   const [deletingEmpBusy, setDeletingEmpBusy] = useState(false);
+
+  // Main Owner ONLY: Set / Reset Employee Password modal & transient handoff card
+  const [pwdTargetEmp, setPwdTargetEmp] = useState<Employee | null>(null);
+  const [pwdNewValue, setPwdNewValue] = useState('');
+  const [showPwdNewValue, setShowPwdNewValue] = useState(true);
+  const [pwdMustChange, setPwdMustChange] = useState(false);
+  const [savingEmpPwd, setSavingEmpPwd] = useState(false);
+  const [pwdModalErr, setPwdModalErr] = useState<string | null>(null);
+  const [updatedEmpCreds, setUpdatedEmpCreds] = useState<{
+    employeeId: string;
+    fullName: string;
+    loginId: string;
+    password: string;
+    phone?: string;
+    mustChangePassword: boolean;
+  } | null>(null);
+  const [copiedEmpCreds, setCopiedEmpCreds] = useState(false);
+
   const [search, setSearch] = useState('');
   const [branchFilter, setBranchFilter] = useState('ALL');
   const [departmentFilter, setDepartmentFilter] = useState<
@@ -145,6 +184,7 @@ export function EmployeeMaster({
   const [authFilter, setAuthFilter] = useState<'ALL' | 'PENDING' | 'ACTIVE'>('ALL');
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Employee | null>(null);
+  const [profileDrawerEmp, setProfileDrawerEmp] = useState<Employee | null>(null);
 
   useEffect(() => {
     if (!voiceFilter || voiceFilter.targetTab !== 'employees') return;
@@ -179,9 +219,10 @@ export function EmployeeMaster({
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [designation, setDesignation] = useState('');
   const [gender, setGender] = useState('');
-  const [category, setCategory] = useState('');
   const [dateOfBirth, setDateOfBirth] = useState('');
   const [dateOfJoining, setDateOfJoining] = useState('');
+  const [dateOfExit, setDateOfExit] = useState('');
+  const [aadhaarMasked, setAadhaarMasked] = useState('');
   const [panNumber, setPanNumber] = useState('');
   const [uanNumber, setUanNumber] = useState('');
   const [pfNumber, setPfNumber] = useState('');
@@ -189,6 +230,7 @@ export function EmployeeMaster({
   const [bankName, setBankName] = useState('');
   const [bankAccountMasked, setBankAccountMasked] = useState('');
   const [bankIfsc, setBankIfsc] = useState('');
+  const [monthlyGrossSalaryRupees, setMonthlyGrossSalaryRupees] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
   const [emergencyContact, setEmergencyContact] = useState('');
@@ -215,25 +257,31 @@ export function EmployeeMaster({
   const [toggleReason, setToggleReason] = useState('');
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'warn' | 'err'; text: string } | null>(null);
 
-  // Custom & Extra Table Columns + Bulk Menu state
+  // Custom & Extra Table Columns + Bulk & Export Menu state
   const [showColumnManager, setShowColumnManager] = useState(false);
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
   const bulkMenuRef = useRef<HTMLDivElement | null>(null);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    if (!bulkMenuOpen) return;
+    if (!bulkMenuOpen && !exportMenuOpen) return;
     const onDocClick = (ev: MouseEvent) => {
       if (bulkMenuRef.current && !bulkMenuRef.current.contains(ev.target as Node)) {
         setBulkMenuOpen(false);
       }
+      if (exportMenuRef.current && !exportMenuRef.current.contains(ev.target as Node)) {
+        setExportMenuOpen(false);
+      }
     };
     document.addEventListener('mousedown', onDocClick);
     return () => document.removeEventListener('mousedown', onDocClick);
-  }, [bulkMenuOpen]);
+  }, [bulkMenuOpen, exportMenuOpen]);
   const [savedCustomColumns, setSavedCustomColumns] = useState<string[]>(() =>
     loadSavedStringArray(CUSTOM_COLUMNS_STORAGE_KEY),
   );
   const [visibleExtraColumns, setVisibleExtraColumns] = useState<string[]>(() =>
-    loadSavedStringArray(VISIBLE_COLUMNS_STORAGE_KEY),
+    pruneValidVisibleColumns(loadSavedStringArray(VISIBLE_COLUMNS_STORAGE_KEY)),
   );
   const [newColumnInput, setNewColumnInput] = useState('');
   const [inlineFormColumnInput, setInlineFormColumnInput] = useState('');
@@ -244,15 +292,16 @@ export function EmployeeMaster({
   latestVisibleColsRef.current = visibleExtraColumns;
 
   const persistColumnConfigToCloud = (nextCustom: string[], nextVisible: string[]) => {
+    const cleanVisible = pruneValidVisibleColumns(nextVisible);
     try {
       localStorage.setItem(CUSTOM_COLUMNS_STORAGE_KEY, JSON.stringify(nextCustom));
-      localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(nextVisible));
+      localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(cleanVisible));
     } catch {
       // Ignore storage error
     }
     void saveEmployeeColumnSettings({
       customColumns: nextCustom,
-      visibleColumns: nextVisible,
+      visibleColumns: cleanVisible,
     }).catch(() => {
       // Non-blocking: localStorage retains changes if offline
     });
@@ -261,9 +310,8 @@ export function EmployeeMaster({
   useEffect(() => {
     const unsub = subscribeEmployeeColumnSettings((cloud) => {
       if (!cloud) {
-        // First-time migration: push any locally saved columns to Firestore so all devices stay synced
         const localCustom = latestCustomColsRef.current;
-        const localVisible = latestVisibleColsRef.current;
+        const localVisible = pruneValidVisibleColumns(latestVisibleColsRef.current);
         if (localCustom.length > 0 || localVisible.length > 0) {
           void saveEmployeeColumnSettings({
             customColumns: localCustom,
@@ -274,11 +322,12 @@ export function EmployeeMaster({
         }
         return;
       }
+      const cleanVisible = pruneValidVisibleColumns(cloud.visibleColumns);
       setSavedCustomColumns(cloud.customColumns);
-      setVisibleExtraColumns(cloud.visibleColumns);
+      setVisibleExtraColumns(cleanVisible);
       try {
         localStorage.setItem(CUSTOM_COLUMNS_STORAGE_KEY, JSON.stringify(cloud.customColumns));
-        localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(cloud.visibleColumns));
+        localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(cleanVisible));
       } catch {
         // Ignore storage error
       }
@@ -402,6 +451,20 @@ export function EmployeeMaster({
   const unassignedDeptCount = employees.filter((e) => !e.departmentId && !e.departmentName).length;
   const nonSalesDeptCount = employees.filter((e) => !e.departmentId && Boolean(e.departmentName)).length;
 
+  const masterStats = useMemo(() => {
+    let activeCount = 0;
+    let inactiveCount = 0;
+    for (const emp of employees) {
+      if (emp.status === 'ACTIVE') activeCount += 1;
+      else inactiveCount += 1;
+    }
+    return {
+      total: employees.length,
+      activeCount,
+      inactiveCount,
+    };
+  }, [employees]);
+
   const filtered = employees.filter((e) => {
     const matchesBranch = branchFilter === 'ALL' || e.branchId === branchFilter;
     const matchesDept =
@@ -433,9 +496,17 @@ export function EmployeeMaster({
       (e.designation || '').toLowerCase().includes(q) ||
       (e.phone || '').toLowerCase().includes(q) ||
       (e.panNumber || '').toLowerCase().includes(q) ||
+      (e.aadhaarMasked || '').toLowerCase().includes(q) ||
       (e.uanNumber || '').toLowerCase().includes(q) ||
+      (e.bankName || '').toLowerCase().includes(q) ||
       Boolean(matchesCustomFields);
-    return matchesBranch && matchesDept && matchesStatus && matchesAuth && matchesQuery;
+    return (
+      matchesBranch &&
+      matchesDept &&
+      matchesStatus &&
+      matchesAuth &&
+      matchesQuery
+    );
   });
 
   const openCreate = () => {
@@ -452,9 +523,10 @@ export function EmployeeMaster({
     setPhotoError(null);
     setDesignation('');
     setGender('');
-    setCategory('');
     setDateOfBirth('');
     setDateOfJoining('');
+    setDateOfExit('');
+    setAadhaarMasked('');
     setPanNumber('');
     setUanNumber('');
     setPfNumber('');
@@ -462,6 +534,7 @@ export function EmployeeMaster({
     setBankName('');
     setBankAccountMasked('');
     setBankIfsc('');
+    setMonthlyGrossSalaryRupees('');
     setPhone('');
     setAddress('');
     setEmergencyContact('');
@@ -488,9 +561,10 @@ export function EmployeeMaster({
     setPhotoError(null);
     setDesignation(emp.designation);
     setGender(emp.gender || '');
-    setCategory(emp.category || '');
     setDateOfBirth(emp.dateOfBirth || '');
     setDateOfJoining(emp.dateOfJoining || '');
+    setDateOfExit(emp.dateOfExit || '');
+    setAadhaarMasked(emp.aadhaarMasked || '');
     setPanNumber(emp.panNumber || '');
     setUanNumber(emp.uanNumber || '');
     setPfNumber(emp.pfNumber || '');
@@ -498,6 +572,7 @@ export function EmployeeMaster({
     setBankName(emp.bankName || '');
     setBankAccountMasked(emp.bankAccountMasked || '');
     setBankIfsc(emp.bankIfsc || '');
+    setMonthlyGrossSalaryRupees(formatSalaryRupeesPlain(emp.monthlyGrossSalaryPaise));
     setPhone(emp.phone || '');
     setAddress(emp.address || '');
     setEmergencyContact(emp.emergencyContact || '');
@@ -900,6 +975,118 @@ export function EmployeeMaster({
     }
   };
 
+  const openSetEmployeePasswordModal = (emp: Employee) => {
+    setPwdTargetEmp(emp);
+    setPwdNewValue('');
+    setShowPwdNewValue(true);
+    setPwdMustChange(false);
+    setPwdModalErr(null);
+  };
+
+  const handleSaveEmployeePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pwdTargetEmp) return;
+    const cleanPwd = pwdNewValue.trim();
+    if (cleanPwd.length < 8) {
+      setPwdModalErr('Password must be at least 8 characters long.');
+      return;
+    }
+    setSavingEmpPwd(true);
+    setPwdModalErr(null);
+    setFeedback(null);
+    try {
+      const { employee: updatedEmp } = await ownerSetEmployeePassword({
+        employee: pwdTargetEmp,
+        newPassword: cleanPwd,
+        mustChangePassword: pwdMustChange,
+      });
+      setUpdatedEmpCreds({
+        employeeId: updatedEmp.employeeId,
+        fullName: updatedEmp.fullName,
+        loginId: updatedEmp.loginId,
+        password: cleanPwd,
+        phone: updatedEmp.phone,
+        mustChangePassword: pwdMustChange,
+      });
+      setCopiedEmpCreds(false);
+      setPwdTargetEmp(null);
+      setPwdNewValue('');
+      setFeedback({
+        type: 'ok',
+        text: `Main Owner set a new portal password for ${updatedEmp.fullName} (${updatedEmp.loginId}). Previous password is revoked immediately.`,
+      });
+      await onRefresh();
+    } catch (err) {
+      setPwdModalErr(
+        err instanceof Error ? err.message : `Unable to set password for ${pwdTargetEmp.loginId}.`,
+      );
+    } finally {
+      setSavingEmpPwd(false);
+    }
+  };
+
+  const buildEmployeeCredsMessage = (creds: {
+    fullName: string;
+    loginId: string;
+    password: string;
+    mustChangePassword: boolean;
+  }) => {
+    const portalUrl = getShareableStaffAppUrl();
+    return [
+      'House of Muktai — Employee Portal Login',
+      `Name: ${creds.fullName}`,
+      `Login ID: ${creds.loginId}`,
+      `Password: ${creds.password}`,
+      ...(portalUrl ? [`Portal Link: ${portalUrl}`] : []),
+      creds.mustChangePassword
+        ? 'Note: Please change your password after signing in.'
+        : 'Note: Keep your password private. You can change it anytime from your Employee Portal.',
+    ].join('\n');
+  };
+
+  const handleCopyEmployeeCreds = async (creds: {
+    fullName: string;
+    loginId: string;
+    password: string;
+    mustChangePassword: boolean;
+  }) => {
+    const text = buildEmployeeCredsMessage(creds);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedEmpCreds(true);
+      window.setTimeout(() => setCopiedEmpCreds(false), 2500);
+    } catch {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        setCopiedEmpCreds(true);
+        window.setTimeout(() => setCopiedEmpCreds(false), 2500);
+      } catch {
+        setCopiedEmpCreds(false);
+      }
+    }
+  };
+
+  const buildWhatsAppCredsUrl = (creds: {
+    fullName: string;
+    loginId: string;
+    password: string;
+    phone?: string;
+    mustChangePassword: boolean;
+  }): string | null => {
+    const digits = String(creds.phone || '').replace(/\D/g, '');
+    if (digits.length < 10) return null;
+    const normalized = digits.length === 10 ? `91${digits}` : digits;
+    const msg = buildEmployeeCredsMessage(creds);
+    return `https://wa.me/${normalized}?text=${encodeURIComponent(msg)}`;
+  };
+
   const handleBackfillAuthSync = async () => {
     setSyncingBackfill(true);
     setFeedback(null);
@@ -971,6 +1158,9 @@ export function EmployeeMaster({
     setSaving(true);
     setFeedback(null);
     try {
+      const parsedSalaryPaise = monthlyGrossSalaryRupees.trim()
+        ? parseMonthlySalaryToPaise(monthlyGrossSalaryRupees)
+        : 0;
       const result = await saveEmployee({
         employeeId,
         saleId,
@@ -983,9 +1173,10 @@ export function EmployeeMaster({
         photoDataUrl,
         designation,
         gender,
-        category,
         dateOfBirth,
         dateOfJoining,
+        dateOfExit,
+        aadhaarMasked,
         panNumber,
         uanNumber,
         pfNumber,
@@ -993,6 +1184,7 @@ export function EmployeeMaster({
         bankName,
         bankAccountMasked,
         bankIfsc,
+        monthlyGrossSalaryPaise: parsedSalaryPaise,
         phone,
         address,
         emergencyContact,
@@ -1052,19 +1244,79 @@ export function EmployeeMaster({
     }
   };
 
+  const handleExportMasterExcel = async (scope: 'filtered' | 'all') => {
+    const targetList = scope === 'filtered' ? filtered : employees;
+    if (targetList.length === 0) return;
+    setExportMenuOpen(false);
+    setExportingExcel(true);
+    try {
+      const scopeLabel =
+        scope === 'all'
+          ? 'All_Branches'
+          : branchFilter === 'ALL'
+            ? 'Filtered'
+            : branches.find((b) => b.branchId === branchFilter)?.branchCode || 'Branch';
+      await downloadEmployeeMasterExcelFile({
+        employees: targetList,
+        branches,
+        extraCustomColumns: allCustomColumnNames,
+        scopeLabel,
+      });
+      setFeedback({
+        type: 'ok',
+        text: `Exported ${targetList.length} employee master record(s) with Branch HR Summary to Excel (.xlsx).`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Unable to generate Employee Master Excel export.',
+      });
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
+  const handleExportMasterCsv = (scope: 'filtered' | 'all') => {
+    const targetList = scope === 'filtered' ? filtered : employees;
+    if (targetList.length === 0) return;
+    setExportMenuOpen(false);
+    const scopeLabel =
+      scope === 'all'
+        ? 'All_Branches'
+        : branchFilter === 'ALL'
+          ? 'Filtered'
+          : branches.find((b) => b.branchId === branchFilter)?.branchCode || 'Branch';
+    downloadEmployeeMasterCsvFile(targetList, allCustomColumnNames, scopeLabel);
+    setFeedback({
+      type: 'ok',
+      text: `Exported ${targetList.length} employee master record(s) to CSV (.csv).`,
+    });
+  };
+
   return (
-    <div className="space-y-5">
-      {/* Unified Employee Controls & Action Button Tray */}
+    <div className="space-y-4">
+      {/* Compact Employee Master Controls & Action Bar */}
       <div className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-3">
         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-xs text-slate-600 min-w-0">
-            <ShieldCheck className="w-4 h-4 text-[#0F1F3D] shrink-0" />
-            <span className="truncate">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600 min-w-0 tabular-nums">
+            <span className="font-semibold text-[#0F1F3D]">
+              Total: {masterStats.total}
+            </span>
+            <span className="text-slate-300">·</span>
+            <span className="text-emerald-700 font-medium">
+              {masterStats.activeCount} Active
+            </span>
+            <span className="text-slate-300">·</span>
+            <span className="text-slate-500">
+              {masterStats.inactiveCount} Inactive
+            </span>
+            <span className="text-slate-300 hidden sm:inline">·</span>
+            <span className="hidden sm:inline-flex items-center gap-1.5 text-slate-500">
+              <ShieldCheck className="w-3.5 h-3.5 text-[#0F1F3D]" />
               Default Password:{' '}
               <code className="px-1.5 py-0.5 rounded bg-[#0F1F3D]/[0.07] text-[#0F1F3D] font-mono font-semibold">
                 {DEFAULT_EMPLOYEE_PASSWORD}
               </code>
-              <span className="hidden sm:inline text-slate-500"> · Mandatory change on first login</span>
             </span>
           </div>
 
@@ -1074,7 +1326,7 @@ export function EmployeeMaster({
                 type="button"
                 disabled={bulkProvisioning}
                 onClick={handleBulkProvisionLogins}
-                className="h-9 px-3 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50 cursor-pointer transition-colors"
+                className="h-9 px-3 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50 cursor-pointer transition-colors"
                 title="Create Firebase Auth logins for all pending employees"
               >
                 <KeyRound className="w-3.5 h-3.5 text-amber-700" />
@@ -1086,141 +1338,191 @@ export function EmployeeMaster({
               </button>
             )}
 
-            <div className="inline-flex flex-wrap items-center gap-1 p-1 rounded-xl bg-slate-100/90 border border-slate-200/80">
-              {/* Grouped Bulk Uploads Dropdown */}
-              <div className="relative" ref={bulkMenuRef}>
-                <button
-                  type="button"
-                  onClick={() => setBulkMenuOpen((prev) => !prev)}
-                  aria-expanded={bulkMenuOpen}
-                  className={`h-8 px-2.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
-                    showBulkMaster || showBulkDept || showBulkDob || bulkMenuOpen
-                      ? 'border-[#0F1F3D] bg-[#0F1F3D] text-white'
-                      : 'border-[#B8923A]/50 bg-[#FDF8EC] hover:bg-[#B8923A]/20 text-[#0F1F3D]'
-                  }`}
-                >
-                  <Upload
-                    className={`w-3.5 h-3.5 ${
-                      showBulkMaster || showBulkDept || showBulkDob || bulkMenuOpen
-                        ? 'text-[#DFC27D]'
-                        : 'text-[#B8923A]'
-                    }`}
-                  />
-                  <span>Bulk Upload</span>
-                  <ChevronDown className="w-3.5 h-3.5 opacity-80" />
-                </button>
-                {bulkMenuOpen && (
-                  <div className="absolute right-0 sm:left-0 mt-1.5 w-52 rounded-xl bg-white border border-slate-200 shadow-lg py-1 z-30">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowBulkMaster((prev) => !prev);
-                        setShowBulkDept(false);
-                        setShowBulkDob(false);
-                        setBulkMenuOpen(false);
-                      }}
-                      className={`w-full px-3 py-2 text-left text-xs font-medium flex items-center gap-2 cursor-pointer transition-colors ${
-                        showBulkMaster
-                          ? 'bg-[#FDF8EC] text-[#0F1F3D] font-semibold'
-                          : 'text-slate-700 hover:bg-slate-50'
-                      }`}
-                    >
-                      <Upload className="w-3.5 h-3.5 text-[#B8923A]" />
-                      <span>Bulk Master Upload</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowBulkDept((prev) => !prev);
-                        setShowBulkMaster(false);
-                        setShowBulkDob(false);
-                        setBulkDeptParse(null);
-                        setBulkDeptFileName('');
-                        setBulkMenuOpen(false);
-                      }}
-                      className={`w-full px-3 py-2 text-left text-xs font-medium flex items-center gap-2 cursor-pointer transition-colors ${
-                        showBulkDept
-                          ? 'bg-[#FDF8EC] text-[#0F1F3D] font-semibold'
-                          : 'text-slate-700 hover:bg-slate-50'
-                      }`}
-                    >
-                      <FileSpreadsheet className="w-3.5 h-3.5 text-[#B8923A]" />
-                      <span>Bulk Department Upload</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowBulkDob((prev) => !prev);
-                        setShowBulkMaster(false);
-                        setShowBulkDept(false);
-                        setBulkDobParse(null);
-                        setBulkDobFileName('');
-                        setBulkMenuOpen(false);
-                      }}
-                      className={`w-full px-3 py-2 text-left text-xs font-medium flex items-center gap-2 cursor-pointer transition-colors ${
-                        showBulkDob
-                          ? 'bg-[#FDF8EC] text-[#0F1F3D] font-semibold'
-                          : 'text-slate-700 hover:bg-slate-50'
-                      }`}
-                    >
-                      <Cake className="w-3.5 h-3.5 text-[#B8923A]" />
-                      <span>Bulk Birthdays (DOB)</span>
-                    </button>
-                  </div>
-                )}
-              </div>
+            {/* Direct Prominent Import Master Button */}
+            <button
+              type="button"
+              onClick={() => {
+                setShowBulkMaster((prev) => !prev);
+                setShowBulkDept(false);
+                setShowBulkDob(false);
+              }}
+              className={`h-9 px-3 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                showBulkMaster
+                  ? 'border-[#0F1F3D] bg-[#0F1F3D] text-white'
+                  : 'border-[#B8923A]/60 bg-[#FDF8EC] hover:bg-[#B8923A]/20 text-[#0F1F3D]'
+              }`}
+            >
+              <Upload
+                className={`w-3.5 h-3.5 ${showBulkMaster ? 'text-[#DFC27D]' : 'text-[#B8923A]'}`}
+              />
+              <span>Import Excel / CSV</span>
+            </button>
 
+            {/* Direct Prominent Export Master Dropdown */}
+            <div className="relative" ref={exportMenuRef}>
               <button
                 type="button"
-                onClick={() => setShowColumnManager((prev) => !prev)}
-                className={`h-8 px-2.5 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
-                  showColumnManager
+                disabled={employees.length === 0 || exportingExcel}
+                onClick={() => setExportMenuOpen((prev) => !prev)}
+                aria-expanded={exportMenuOpen}
+                className="h-9 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-[#0F1F3D] text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 text-[#0F1F3D]" />
+                <span>{exportingExcel ? 'Exporting...' : 'Export Master'}</span>
+                <ChevronDown className="w-3.5 h-3.5 opacity-70" />
+              </button>
+              {exportMenuOpen && (
+                <div className="absolute right-0 mt-1.5 w-64 rounded-xl bg-white border border-slate-200 shadow-lg py-1.5 z-30">
+                  <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                    Excel Workbook (.xlsx · 2 Sheets)
+                  </div>
+                  <button
+                    type="button"
+                    disabled={filtered.length === 0}
+                    onClick={() => void handleExportMasterExcel('filtered')}
+                    className="w-full px-3 py-2 text-left text-xs font-medium text-slate-800 hover:bg-slate-50 flex items-center gap-2 cursor-pointer disabled:opacity-40"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                    <span>Export Filtered Excel ({filtered.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleExportMasterExcel('all')}
+                    className="w-full px-3 py-2 text-left text-xs font-medium text-slate-800 hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-[#0F1F3D] shrink-0" />
+                    <span>Export Full Master Excel ({employees.length})</span>
+                  </button>
+                  <div className="my-1 border-t border-slate-100" />
+                  <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                    CSV &amp; Credentials
+                  </div>
+                  <button
+                    type="button"
+                    disabled={filtered.length === 0}
+                    onClick={() => handleExportMasterCsv('filtered')}
+                    className="w-full px-3 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 cursor-pointer disabled:opacity-40"
+                  >
+                    <Download className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    <span>Export Filtered CSV ({filtered.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleExportMasterCsv('all')}
+                    className="w-full px-3 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    <span>Export Full Master CSV ({employees.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={filtered.length === 0}
+                    onClick={() => {
+                      setExportMenuOpen(false);
+                      const branchLabel =
+                        branchFilter === 'ALL'
+                          ? `All Branches (${branches.length})`
+                          : branches.find((b) => b.branchId === branchFilter)?.branchName ||
+                            branchFilter;
+                      void downloadCredentialSheetPdf({
+                        employees: filtered,
+                        branchFilterLabel: branchLabel,
+                        portalUrl: getShareableStaffAppUrl(),
+                      });
+                    }}
+                    className="w-full px-3 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 cursor-pointer disabled:opacity-40"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-[#B8923A] shrink-0" />
+                    <span>Staff Login Credentials PDF ({filtered.length})</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Secondary Utilities Dropdown (Dept / DOB / Columns / Auth) */}
+            <div className="relative" ref={bulkMenuRef}>
+              <button
+                type="button"
+                onClick={() => setBulkMenuOpen((prev) => !prev)}
+                aria-expanded={bulkMenuOpen}
+                className={`h-9 px-3 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                  showBulkDept || showBulkDob || bulkMenuOpen
                     ? 'border-[#0F1F3D] bg-[#0F1F3D] text-white'
-                    : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-800'
+                    : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
                 }`}
               >
-                <Columns
-                  className={`w-3.5 h-3.5 ${showColumnManager ? 'text-[#DFC27D]' : 'text-[#0F1F3D]'}`}
-                />
-                Columns ({visibleExtraColumns.length})
+                <span>Bulk Tools</span>
+                <ChevronDown className="w-3.5 h-3.5 opacity-70" />
               </button>
-
-              <button
-                type="button"
-                disabled={filtered.length === 0}
-                onClick={() => {
-                  const branchLabel =
-                    branchFilter === 'ALL'
-                      ? `All Branches (${branches.length})`
-                      : branches.find((b) => b.branchId === branchFilter)?.branchName || branchFilter;
-                  void downloadCredentialSheetPdf({
-                    employees: filtered,
-                    branchFilterLabel: branchLabel,
-                    portalUrl: getShareableStaffAppUrl(),
-                  });
-                }}
-                className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50 transition-colors"
-              >
-                <FileText className="w-3.5 h-3.5 text-[#0F1F3D]" />
-                Credentials PDF
-              </button>
-
-              <button
-                type="button"
-                disabled={syncingBackfill}
-                onClick={handleBackfillAuthSync}
-                className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50 cursor-pointer transition-colors"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${syncingBackfill ? 'animate-spin' : ''}`} />
-                {syncingBackfill ? 'Syncing...' : 'Sync Auth'}
-              </button>
+              {bulkMenuOpen && (
+                <div className="absolute right-0 mt-1.5 w-56 rounded-xl bg-white border border-slate-200 shadow-lg py-1.5 z-30">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowBulkDept((prev) => !prev);
+                      setShowBulkMaster(false);
+                      setShowBulkDob(false);
+                      setBulkDeptParse(null);
+                      setBulkDeptFileName('');
+                      setBulkMenuOpen(false);
+                    }}
+                    className="w-full px-3 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-[#B8923A]" />
+                    <span>Bulk Department Upload</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowBulkDob((prev) => !prev);
+                      setShowBulkMaster(false);
+                      setShowBulkDept(false);
+                      setBulkDobParse(null);
+                      setBulkDobFileName('');
+                      setBulkMenuOpen(false);
+                    }}
+                    className="w-full px-3 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 cursor-pointer"
+                  >
+                    <Cake className="w-3.5 h-3.5 text-[#B8923A]" />
+                    <span>Bulk Birthdays (DOB)</span>
+                  </button>
+                  <div className="my-1 border-t border-slate-100" />
+                  <button
+                    type="button"
+                    disabled={syncingBackfill}
+                    onClick={() => {
+                      setBulkMenuOpen(false);
+                      void handleBackfillAuthSync();
+                    }}
+                    className="w-full px-3 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 text-slate-500 ${syncingBackfill ? 'animate-spin' : ''}`} />
+                    <span>{syncingBackfill ? 'Syncing Auth...' : 'Sync Auth & Backfill'}</span>
+                  </button>
+                </div>
+              )}
             </div>
+
+            <button
+              type="button"
+              onClick={() => setShowColumnManager((prev) => !prev)}
+              className={`h-9 px-3 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                showColumnManager
+                  ? 'border-[#0F1F3D] bg-[#0F1F3D] text-white'
+                  : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-800'
+              }`}
+            >
+              <Columns
+                className={`w-3.5 h-3.5 ${showColumnManager ? 'text-[#DFC27D]' : 'text-[#0F1F3D]'}`}
+              />
+              Columns ({visibleExtraColumns.length})
+            </button>
 
             <button
               type="button"
               onClick={openCreate}
               disabled={branches.length === 0}
-              className="h-9 px-3.5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50 transition-colors shadow-2xs"
+              className="h-9 px-3.5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 transition-colors shadow-2xs"
             >
               <Plus className="w-3.5 h-3.5 text-[#DFC27D]" />
               Add Employee
@@ -1228,12 +1530,12 @@ export function EmployeeMaster({
           </div>
         </div>
 
-        <div className="pt-3 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
-          <div className="relative">
+        <div className="pt-3 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2.5">
+          <div className="relative lg:col-span-2">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search ID, Sale ID, name, phone, custom column..."
+              placeholder="Search ID, Sale ID, name, mobile, PAN, Aadhaar, bank..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full h-9 pl-9 pr-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
@@ -1243,7 +1545,7 @@ export function EmployeeMaster({
             value={branchFilter}
             onChange={(e) => setBranchFilter(e.target.value)}
             aria-label="Filter by branch"
-            className="h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm text-slate-700"
+            className="h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs text-slate-700"
           >
             <option value="ALL">All Branches ({branches.length})</option>
             {branches.map((b) => (
@@ -1260,10 +1562,10 @@ export function EmployeeMaster({
               )
             }
             aria-label="Filter by department"
-            className="h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm text-slate-700"
+            className="h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs text-slate-700"
           >
             <option value="ALL">All Departments</option>
-            <option value="NON_SALES">Other / Non-Sales ({nonSalesDeptCount})</option>
+            <option value="NON_SALES">Non-Sales ({nonSalesDeptCount})</option>
             <option value="UNASSIGNED">Unassigned ({unassignedDeptCount})</option>
             {OFFICIAL_DEPARTMENTS.map((dept) => (
               <option key={dept.id} value={dept.id}>
@@ -1275,21 +1577,21 @@ export function EmployeeMaster({
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value as 'ALL' | 'ACTIVE' | 'INACTIVE')}
             aria-label="Filter by status"
-            className="h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm text-slate-700"
+            className="h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs text-slate-700"
           >
             <option value="ALL">All Statuses</option>
-            <option value="ACTIVE">Active Only</option>
-            <option value="INACTIVE">Inactive Only</option>
+            <option value="ACTIVE">Active ({masterStats.activeCount})</option>
+            <option value="INACTIVE">Inactive ({masterStats.inactiveCount})</option>
           </select>
           <select
             value={authFilter}
             onChange={(e) => setAuthFilter(e.target.value as 'ALL' | 'PENDING' | 'ACTIVE')}
-            aria-label="Filter by login provisioning"
-            className="h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm text-slate-700"
+            aria-label="Filter by login status"
+            className="h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs text-slate-700"
           >
             <option value="ALL">All Logins ({employees.length})</option>
-            <option value="PENDING">Pending ({pendingProvisionCount})</option>
-            <option value="ACTIVE">Active ({activeLoginCount})</option>
+            <option value="ACTIVE">Login Active ({activeLoginCount})</option>
+            <option value="PENDING">Pending Login ({pendingProvisionCount})</option>
           </select>
         </div>
       </div>
@@ -1421,11 +1723,11 @@ export function EmployeeMaster({
               </div>
             )}
 
-            {/* Built-in Extra HR / Statutory / Bank Table Columns */}
+            {/* Essential Optional Table Columns */}
             <div className="space-y-2 pt-2 border-t border-slate-100">
               <div className="flex items-center justify-between gap-2">
                 <p className="text-xs font-semibold text-[#0F1F3D]">
-                  3 · Built-In HR, Statutory &amp; Bank Columns — Tick to Show in Employee Master Table
+                  Optional Columns ({BUILTIN_EXTRA_TABLE_COLUMNS.length}) — Tick to Show in Table
                 </p>
                 <div className="flex items-center gap-2">
                   <button
@@ -1436,11 +1738,7 @@ export function EmployeeMaster({
                         ...allCustomColumnNames.map((c) => `custom:${c}`),
                       ];
                       setVisibleExtraColumns(allIds);
-                      try {
-                        localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(allIds));
-                      } catch {
-                        // Ignore
-                      }
+                      persistColumnConfigToCloud(latestCustomColsRef.current, allIds);
                     }}
                     className="text-[11px] font-semibold text-[#0F1F3D] hover:underline cursor-pointer"
                   >
@@ -1451,11 +1749,7 @@ export function EmployeeMaster({
                     type="button"
                     onClick={() => {
                       setVisibleExtraColumns([]);
-                      try {
-                        localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify([]));
-                      } catch {
-                        // Ignore
-                      }
+                      persistColumnConfigToCloud(latestCustomColsRef.current, []);
                     }}
                     className="text-[11px] font-medium text-slate-500 hover:underline cursor-pointer"
                   >
@@ -1865,6 +2159,85 @@ export function EmployeeMaster({
         </div>
       )}
 
+      {/* Main Owner ONLY: Transient Employee Password Ready Handoff Card */}
+      {isMainOwner && updatedEmpCreds && (() => {
+        const waUrl = buildWhatsAppCredsUrl(updatedEmpCreds);
+        return (
+          <div className="p-4 sm:p-5 rounded-xl bg-[#FFFDF7] border-2 border-[#B8923A] shadow-xs space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div className="flex items-center gap-2 text-[#0F1F3D]">
+                <KeyRound className="w-4 h-4 text-[#B8923A] shrink-0" />
+                <h3 className="text-sm font-bold">
+                  Employee Password Ready — Share Privately With Staff
+                </h3>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleCopyEmployeeCreds(updatedEmpCreds)}
+                  className="h-8 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  {copiedEmpCreds ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-300" />
+                      Copied!
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5 text-[#DFC27D]" />
+                      Copy Login Details
+                    </>
+                  )}
+                </button>
+                {waUrl && (
+                  <a
+                    href={waUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="h-8 px-3 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    Share on WhatsApp
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setUpdatedEmpCreds(null)}
+                  className="h-8 px-2.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-600 text-xs font-medium cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <div className="p-3 rounded-lg bg-white border border-slate-200">
+                <p className="text-[11px] text-slate-500">Employee</p>
+                <p className="font-semibold text-[#0F1F3D] mt-0.5">
+                  {updatedEmpCreds.fullName}{' '}
+                  <span className="font-mono text-slate-500">({updatedEmpCreds.employeeId})</span>
+                </p>
+              </div>
+              <div className="p-3 rounded-lg bg-white border border-slate-200">
+                <p className="text-[11px] text-slate-500">Login ID (Unchanged)</p>
+                <p className="font-mono font-bold text-[#0F1F3D] mt-0.5">
+                  {updatedEmpCreds.loginId}
+                </p>
+              </div>
+              <div className="p-3 rounded-lg bg-white border border-slate-200">
+                <p className="text-[11px] text-slate-500">New Password</p>
+                <p className="font-mono font-bold text-[#9A7625] mt-0.5">
+                  {updatedEmpCreds.password}
+                </p>
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-600">
+              This password is shown only once and is never stored in plain text. Previous password
+              is revoked immediately.
+            </p>
+          </div>
+        );
+      })()}
+
       {failedProvisionItems.length > 0 && (
         <div className="bg-white border border-amber-300 rounded-xl overflow-hidden">
           <div className="px-4 py-3 bg-amber-50 border-b border-amber-200 flex items-center justify-between gap-3">
@@ -1989,330 +2362,424 @@ export function EmployeeMaster({
       {showForm && (
         <form
           onSubmit={handleSubmit}
-          className="bg-white border border-slate-200 rounded-xl p-6 space-y-5"
+          className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs"
         >
-          <div className="flex items-center justify-between">
-            <h3 className="text-base font-semibold text-slate-900">
-              {editing ? `Edit Employee · ${editing.employeeId}` : 'Create Employee Account'}
-            </h3>
+          {/* Form Header */}
+          <div className="px-5 py-3.5 bg-[#0F1F3D] text-white flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm sm:text-base font-semibold">
+                {editing ? `Edit Employee · ${editing.employeeId}` : 'Add New Employee'}
+              </h3>
+              <p className="text-[11px] text-slate-300 mt-0.5">
+                Essential Job, Contact, Bank &amp; KYC details on one compact screen
+              </p>
+            </div>
             <button
               type="button"
               onClick={() => setShowForm(false)}
-              className="text-xs font-medium text-slate-500 hover:text-slate-900 cursor-pointer"
+              className="text-xs font-medium text-slate-300 hover:text-white cursor-pointer inline-flex items-center gap-1"
             >
-              Cancel
+              <X className="w-4 h-4" />
+              Close
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Employee ID <span className="text-slate-400 font-normal">(Official Master EMP ID)</span>
-              </label>
-              <input
-                type="text"
-                required
-                disabled={Boolean(editing)}
-                value={employeeId}
-                onChange={(e) => setEmployeeId(e.target.value.toUpperCase())}
-                placeholder="e.g. EMP001"
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm font-mono disabled:bg-slate-50"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Sale ID <span className="text-slate-400 font-normal">(POS Code · Sales Staff Only)</span>
-              </label>
-              <input
-                type="text"
-                value={saleId}
-                onChange={(e) => setSaleId(e.target.value.toUpperCase())}
-                placeholder="Blank for Non-Sales staff"
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm font-mono"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Assigned Login ID
-              </label>
-              <input
-                type="text"
-                required
-                value={loginId}
-                onChange={(e) => setLoginId(e.target.value.toUpperCase())}
-                placeholder="HOM459"
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm font-mono"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Full Name</label>
-              <input
-                type="text"
-                required
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                placeholder="Employee full name"
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Branch</label>
-              <select
-                required
-                value={branchId}
-                onChange={(e) => setBranchId(e.target.value)}
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
-              >
-                {branches.map((b) => (
-                  <option key={b.branchId} value={b.branchId}>
-                    {b.branchCode} — {b.branchName}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Department{' '}
-                <span className="text-slate-400 font-normal">(Sales or Non-Sales)</span>
-              </label>
-              <select
-                value={
-                  departmentId
-                    ? `SALES:${departmentId}`
-                    : customDepartmentName
-                      ? `NONSALES:${customDepartmentName}`
-                      : ''
-                }
-                onChange={(e) => {
-                  const val = e.target.value;
-                  if (val.startsWith('SALES:')) {
-                    setDepartmentId(val.slice(6) as DepartmentId);
-                    setCustomDepartmentName('');
-                  } else if (val.startsWith('NONSALES:')) {
-                    setDepartmentId('');
-                    setCustomDepartmentName(val.slice(9));
-                  } else {
-                    setDepartmentId('');
-                    setCustomDepartmentName('');
-                  }
-                }}
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
-              >
-                <option value="">— Unassigned —</option>
-                <optgroup label="5 Sales Counter Departments (Leaderboard Eligible)">
-                  {OFFICIAL_DEPARTMENTS.map((dept) => (
-                    <option key={dept.id} value={`SALES:${dept.id}`}>
-                      {dept.name}
-                    </option>
-                  ))}
-                </optgroup>
-                <optgroup label="Head Office & Support / Non-Sales Departments">
-                  {COMMON_NON_SALES_DEPARTMENTS.map((name) => (
-                    <option key={name} value={`NONSALES:${name}`}>
-                      {name}
-                    </option>
-                  ))}
-                  {customDepartmentName &&
-                    !COMMON_NON_SALES_DEPARTMENTS.includes(customDepartmentName) && (
-                      <option value={`NONSALES:${customDepartmentName}`}>
-                        {customDepartmentName}
-                      </option>
-                    )}
-                </optgroup>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Designation</label>
-              <input
-                type="text"
-                required
-                value={designation}
-                onChange={(e) => setDesignation(e.target.value)}
-                placeholder="e.g. Sales Executive, Accountant, Cashier, HR, Store Manager"
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Gender</label>
-              <select
-                value={gender}
-                onChange={(e) => setGender(e.target.value)}
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
-              >
-                <option value="">— Select Gender —</option>
-                <option value="Female">Female</option>
-                <option value="Male">Male</option>
-                <option value="Other">Other</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Category</label>
-              <input
-                type="text"
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                placeholder="e.g. Sales, Non-Sales, Staff, Manager"
-                maxLength={40}
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Phone</label>
-              <input
-                type="text"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                placeholder="+91 98XXXXXXXX"
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Initial Login Password{' '}
-                {editing?.credentialsProvisioned
-                  ? '(Already Provisioned)'
-                  : `(Default: ${DEFAULT_EMPLOYEE_PASSWORD})`}
-              </label>
-              <input
-                type="text"
-                disabled={Boolean(editing?.credentialsProvisioned)}
-                value={initialPassword}
-                onChange={(e) => setInitialPassword(e.target.value)}
-                placeholder={
-                  editing?.credentialsProvisioned
-                    ? 'Credentials active'
-                    : DEFAULT_EMPLOYEE_PASSWORD
-                }
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm font-mono disabled:bg-slate-50"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Linked Google Email (Optional)
-              </label>
-              <input
-                type="email"
-                value={linkedGoogleEmail}
-                onChange={(e) => setLinkedGoogleEmail(e.target.value)}
-                placeholder="employee@gmail.com"
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Role</label>
-                <div className="w-full h-10 px-2.5 rounded-lg border border-slate-200 bg-slate-50 text-sm text-slate-700 flex items-center">
-                  Employee (Staff Portal)
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Status (Super Admin)
-                </label>
-                <select
-                  value={status}
-                  onChange={(e) => setStatus(e.target.value as 'ACTIVE' | 'INACTIVE')}
-                  className="w-full h-10 px-2.5 rounded-lg border border-slate-300 bg-white text-sm"
-                >
-                  <option value="ACTIVE">Active</option>
-                  <option value="INACTIVE">Inactive</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Employee Photo Uploader (Auto-cropped square thumbnail for Top-3 Leaderboard) */}
-            <div className="md:col-span-2 lg:col-span-3 pt-1">
-              <label className="block text-xs font-medium text-slate-700 mb-1.5">
-                Employee Photo (Shown on Department Top-3 Leaderboard · Auto-cropped 160×160)
-              </label>
-              <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-slate-50 border border-slate-200">
-                <div className="w-12 h-12 rounded-full bg-[#0F1F3D] text-[#DFC27D] font-bold text-sm flex items-center justify-center overflow-hidden border-2 border-[#B8923A]/50 shrink-0">
-                  {photoDataUrl ? (
-                    <img
-                      src={photoDataUrl}
-                      alt={fullName || 'Employee preview'}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <span>{(fullName || 'EM').slice(0, 2).toUpperCase()}</span>
-                  )}
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <label className="h-9 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1.5 cursor-pointer">
-                    <Camera className="w-3.5 h-3.5 text-[#B8923A]" />
-                    <span>{photoDataUrl ? 'Change Photo' : 'Upload Photo'}</span>
-                    <input
-                      type="file"
-                      accept="image/jpeg,image/png,image/webp"
-                      onChange={handlePhotoFileChange}
-                      className="hidden"
-                    />
-                  </label>
-                  {photoDataUrl && (
-                    <button
-                      type="button"
-                      onClick={() => setPhotoDataUrl('')}
-                      className="h-9 px-3 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-xs font-medium text-red-700 inline-flex items-center gap-1 cursor-pointer"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      Remove
-                    </button>
-                  )}
-                  <span className="text-[11px] text-slate-500">
-                    JPG / PNG / WebP · Compressed automatically for fast mobile load
-                  </span>
-                </div>
-                {photoError && (
-                  <p className="w-full text-xs text-red-700 font-medium">{photoError}</p>
-                )}
-              </div>
-            </div>
-
-            {/* HR, Statutory & Bank Details (Optional — Printed on Official Salary Slips & Auto-Synced) */}
-            <div className="md:col-span-2 lg:col-span-3 pt-2 border-t border-slate-100">
-              <p className="text-xs font-semibold text-[#0F1F3D] mb-2.5">
-                HR, Statutory &amp; Bank Details{' '}
-                <span className="font-normal text-slate-500">
-                  (Optional · Printed on Salary Slips · Bank Account auto-masked as XXXX1234)
-                </span>
-              </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="p-5 sm:p-6 space-y-6">
+            {/* Section 1: Core Job, Contact & Login */}
+            <section className="space-y-3.5">
+              <h4 className="text-xs font-semibold text-[#0F1F3D] pb-1.5 border-b border-slate-100">
+                1. Core Details &amp; Portal Login
+              </h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3.5">
                 <div>
-                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Date of Birth (Birthday Card)
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Employee ID <span className="text-rose-600">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    disabled={Boolean(editing)}
+                    value={employeeId}
+                    onChange={(e) => setEmployeeId(e.target.value.toUpperCase())}
+                    placeholder="e.g. EMP001"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono disabled:bg-slate-50"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Sale ID <span className="text-slate-400 font-normal">(POS Code)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={saleId}
+                    onChange={(e) => setSaleId(e.target.value.toUpperCase())}
+                    placeholder="Sales staff only"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Login ID <span className="text-rose-600">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={loginId}
+                    onChange={(e) => setLoginId(e.target.value.toUpperCase())}
+                    placeholder="HOM001"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Full Name <span className="text-rose-600">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    placeholder="Employee full name"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Branch <span className="text-rose-600">*</span>
+                  </label>
+                  <select
+                    required
+                    value={branchId}
+                    onChange={(e) => setBranchId(e.target.value)}
+                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm"
+                  >
+                    {branches.map((b) => (
+                      <option key={b.branchId} value={b.branchId}>
+                        {b.branchCode} — {b.branchName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Department
+                  </label>
+                  <select
+                    value={
+                      departmentId
+                        ? `SALES:${departmentId}`
+                        : customDepartmentName
+                          ? `NONSALES:${customDepartmentName}`
+                          : ''
+                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val.startsWith('SALES:')) {
+                        setDepartmentId(val.slice(6) as DepartmentId);
+                        setCustomDepartmentName('');
+                      } else if (val.startsWith('NONSALES:')) {
+                        setDepartmentId('');
+                        setCustomDepartmentName(val.slice(9));
+                      } else {
+                        setDepartmentId('');
+                        setCustomDepartmentName('');
+                      }
+                    }}
+                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm"
+                  >
+                    <option value="">— Unassigned —</option>
+                    <optgroup label="5 Sales Counter Departments">
+                      {OFFICIAL_DEPARTMENTS.map((dept) => (
+                        <option key={dept.id} value={`SALES:${dept.id}`}>
+                          {dept.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="Non-Sales Departments">
+                      {COMMON_NON_SALES_DEPARTMENTS.map((name) => (
+                        <option key={name} value={`NONSALES:${name}`}>
+                          {name}
+                        </option>
+                      ))}
+                      {customDepartmentName &&
+                        !COMMON_NON_SALES_DEPARTMENTS.includes(customDepartmentName) && (
+                          <option value={`NONSALES:${customDepartmentName}`}>
+                            {customDepartmentName}
+                          </option>
+                        )}
+                    </optgroup>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Designation <span className="text-rose-600">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={designation}
+                    onChange={(e) => setDesignation(e.target.value)}
+                    placeholder="e.g. Sales Executive, Cashier"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Status
+                  </label>
+                  <select
+                    value={status}
+                    onChange={(e) => setStatus(e.target.value as 'ACTIVE' | 'INACTIVE')}
+                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm"
+                  >
+                    <option value="ACTIVE">Active</option>
+                    <option value="INACTIVE">Inactive</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Mobile Number
+                  </label>
+                  <input
+                    type="text"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="98XXXXXXXX"
+                    maxLength={24}
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Gender
+                  </label>
+                  <select
+                    value={gender}
+                    onChange={(e) => setGender(e.target.value)}
+                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm"
+                  >
+                    <option value="">— Select —</option>
+                    <option value="Female">Female</option>
+                    <option value="Male">Male</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Date of Birth
                   </label>
                   <input
                     type="date"
                     value={dateOfBirth}
                     onChange={(e) => setDateOfBirth(e.target.value)}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
+                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm"
                   />
                 </div>
+
                 <div>
-                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
                     Date of Joining
                   </label>
                   <input
                     type="date"
                     value={dateOfJoining}
                     onChange={(e) => setDateOfJoining(e.target.value)}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
+                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm"
                   />
                 </div>
+
                 <div>
-                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Date of Exit <span className="text-slate-400 font-normal">(If left)</span>
+                  </label>
+                  <input
+                    type="date"
+                    value={dateOfExit}
+                    onChange={(e) => setDateOfExit(e.target.value)}
+                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-xs font-medium text-slate-700">
+                      Initial Password{' '}
+                      <span className="text-slate-400 font-normal">
+                        {editing?.credentialsProvisioned ? '(Active)' : `(${DEFAULT_EMPLOYEE_PASSWORD})`}
+                      </span>
+                    </label>
+                    {isMainOwner && editing && (
+                      <button
+                        type="button"
+                        onClick={() => openSetEmployeePasswordModal(editing)}
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#9A7625] hover:underline cursor-pointer"
+                      >
+                        <KeyRound className="w-3 h-3" />
+                        Set / Reset Password
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    disabled={Boolean(editing?.credentialsProvisioned)}
+                    value={initialPassword}
+                    onChange={(e) => setInitialPassword(e.target.value)}
+                    placeholder={
+                      editing?.credentialsProvisioned
+                        ? 'Credentials active'
+                        : DEFAULT_EMPLOYEE_PASSWORD
+                    }
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono disabled:bg-slate-50"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Google Email <span className="text-slate-400 font-normal">(Optional)</span>
+                  </label>
+                  <input
+                    type="email"
+                    value={linkedGoogleEmail}
+                    onChange={(e) => setLinkedGoogleEmail(e.target.value)}
+                    placeholder="staff@gmail.com"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm"
+                  />
+                </div>
+
+                <div className="md:col-span-2 flex items-end">
+                  <div className="w-full flex flex-wrap items-center gap-3 px-3 py-2 rounded-lg bg-slate-50 border border-slate-200">
+                    <div className="w-9 h-9 rounded-full bg-[#0F1F3D] text-[#DFC27D] font-bold text-xs flex items-center justify-center overflow-hidden border border-[#B8923A]/50 shrink-0">
+                      {photoDataUrl ? (
+                        <img
+                          src={photoDataUrl}
+                          alt={fullName || 'Preview'}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <span>{(fullName || 'EM').slice(0, 2).toUpperCase()}</span>
+                      )}
+                    </div>
+                    <label className="h-8 px-2.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-medium text-[#0F1F3D] inline-flex items-center gap-1.5 cursor-pointer">
+                      <Camera className="w-3.5 h-3.5 text-[#B8923A]" />
+                      <span>{photoDataUrl ? 'Change Photo' : 'Upload Photo'}</span>
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={handlePhotoFileChange}
+                        className="hidden"
+                      />
+                    </label>
+                    {photoDataUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setPhotoDataUrl('')}
+                        className="h-8 px-2.5 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-xs font-medium text-red-700 cursor-pointer"
+                      >
+                        Remove
+                      </button>
+                    )}
+                    {photoError && <p className="w-full text-xs text-red-700">{photoError}</p>}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            {/* Section 2: Bank & Salary */}
+            <section className="space-y-3.5">
+              <h4 className="text-xs font-semibold text-[#0F1F3D] pb-1.5 border-b border-slate-100">
+                2. Bank &amp; Monthly Salary (Optional)
+              </h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Monthly Gross Salary (₹)
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={monthlyGrossSalaryRupees}
+                    onChange={(e) => setMonthlyGrossSalaryRupees(e.target.value)}
+                    placeholder="e.g. 18500"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono tabular-nums"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Bank Name
+                  </label>
+                  <input
+                    type="text"
+                    value={bankName}
+                    onChange={(e) => setBankName(e.target.value)}
+                    placeholder="e.g. State Bank of India"
+                    maxLength={80}
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Bank Account Number <span className="text-slate-400 font-normal">(Auto-masked)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={bankAccountMasked}
+                    onChange={(e) => setBankAccountMasked(e.target.value)}
+                    placeholder="XXXX1234"
+                    maxLength={32}
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Bank IFSC Code
+                  </label>
+                  <input
+                    type="text"
+                    value={bankIfsc}
+                    onChange={(e) => setBankIfsc(e.target.value.toUpperCase())}
+                    placeholder="e.g. SBIN0001234"
+                    maxLength={20}
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono uppercase"
+                  />
+                </div>
+              </div>
+            </section>
+
+            {/* Section 3: KYC, Statutory & Contact */}
+            <section className="space-y-3.5">
+              <h4 className="text-xs font-semibold text-[#0F1F3D] pb-1.5 border-b border-slate-100">
+                3. KYC, Statutory &amp; Address (Optional)
+              </h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Aadhaar Number <span className="text-slate-400 font-normal">(Auto-masked)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={aadhaarMasked}
+                    onChange={(e) => setAadhaarMasked(e.target.value)}
+                    placeholder="XXXX-XXXX-1234"
+                    maxLength={24}
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
                     PAN Number
                   </label>
                   <input
@@ -2321,159 +2788,92 @@ export function EmployeeMaster({
                     onChange={(e) => setPanNumber(e.target.value.toUpperCase())}
                     placeholder="ABCDE1234F"
                     maxLength={20}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-mono uppercase"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono uppercase"
                   />
                 </div>
+
                 <div>
-                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
                     UAN Number
                   </label>
                   <input
                     type="text"
                     value={uanNumber}
                     onChange={(e) => setUanNumber(e.target.value)}
-                    placeholder="100123456789"
-                    maxLength={24}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-mono"
+                    placeholder="12-digit UAN"
+                    maxLength={32}
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono"
                   />
                 </div>
+
                 <div>
-                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Provident Fund Number
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    PF Number
                   </label>
                   <input
                     type="text"
                     value={pfNumber}
                     onChange={(e) => setPfNumber(e.target.value)}
-                    placeholder="MH/PUN/12345"
-                    maxLength={32}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-mono"
+                    placeholder="PF Account No."
+                    maxLength={40}
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono"
                   />
                 </div>
+
                 <div>
-                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
                     ESIC Number
                   </label>
                   <input
                     type="text"
                     value={esicNumber}
                     onChange={(e) => setEsicNumber(e.target.value)}
-                    placeholder="31-00-123456"
-                    maxLength={32}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-mono"
+                    placeholder="ESIC IP No."
+                    maxLength={40}
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono"
                   />
                 </div>
+
                 <div>
-                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Bank Name
-                  </label>
-                  <input
-                    type="text"
-                    value={bankName}
-                    onChange={(e) => setBankName(e.target.value)}
-                    placeholder="State Bank of India"
-                    maxLength={80}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Bank Account Number (Auto-Masked)
-                  </label>
-                  <input
-                    type="text"
-                    value={bankAccountMasked}
-                    onChange={(e) => setBankAccountMasked(e.target.value)}
-                    placeholder="XXXX1234"
-                    maxLength={32}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Bank IFSC Code
-                  </label>
-                  <input
-                    type="text"
-                    value={bankIfsc}
-                    onChange={(e) => setBankIfsc(e.target.value.toUpperCase())}
-                    placeholder="SBIN0001234"
-                    maxLength={20}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-mono uppercase"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
                     Emergency Contact
                   </label>
                   <input
                     type="text"
                     value={emergencyContact}
                     onChange={(e) => setEmergencyContact(e.target.value)}
-                    placeholder="Name / Phone"
-                    maxLength={120}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
+                    placeholder="Emergency mobile number"
+                    maxLength={40}
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono"
                   />
                 </div>
-                <div className="sm:col-span-2">
-                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+
+                <div className="md:col-span-2">
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
                     Residential Address
                   </label>
                   <input
                     type="text"
                     value={address}
                     onChange={(e) => setAddress(e.target.value)}
-                    placeholder="House / Street / City / Pin"
+                    placeholder="City / Village / Street address"
                     maxLength={240}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm"
                   />
                 </div>
               </div>
-            </div>
+            </section>
 
-            {/* Dynamic Custom Columns Section */}
-            <div className="md:col-span-2 lg:col-span-3 pt-3 border-t border-slate-100 space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div>
-                  <p className="text-xs font-semibold text-[#0F1F3D]">
-                    Extra / Custom Employee Master Columns ({allCustomColumnNames.length})
-                  </p>
-                  <p className="text-[11px] text-slate-500">
-                    Add any extra column (e.g., Aadhaar Card Number, Blood Group, Base Salary, Weekly Off Day) right here.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={inlineFormColumnInput}
-                    onChange={(e) => setInlineFormColumnInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        handleAddCustomColumn(inlineFormColumnInput);
-                      }
-                    }}
-                    placeholder="New column name (e.g. Aadhaar Card Number)..."
-                    maxLength={60}
-                    className="h-8 px-2.5 rounded-lg border border-slate-300 bg-white text-xs w-52"
-                  />
-                  <button
-                    type="button"
-                    disabled={!inlineFormColumnInput.trim()}
-                    onClick={() => handleAddCustomColumn(inlineFormColumnInput)}
-                    className="h-8 px-3 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                  >
-                    <Plus className="w-3.5 h-3.5 text-[#DFC27D]" />
-                    Add Column
-                  </button>
-                </div>
-              </div>
-
-              {allCustomColumnNames.length > 0 ? (
+            {/* Optional Custom Columns (Only if Admin Added Any) */}
+            {allCustomColumnNames.length > 0 && (
+              <section className="space-y-2.5 pt-2 border-t border-slate-100">
+                <h4 className="text-xs font-semibold text-[#0F1F3D]">
+                  Custom Columns ({allCustomColumnNames.length})
+                </h4>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   {allCustomColumnNames.map((colName) => (
                     <div key={colName}>
-                      <label className="block text-[11px] font-medium text-[#0F1F3D] mb-1">
+                      <label className="block text-[11px] font-medium text-slate-700 mb-1">
                         {colName}
                       </label>
                       <input
@@ -2493,59 +2893,50 @@ export function EmployeeMaster({
                     </div>
                   ))}
                 </div>
-              ) : (
-                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600 flex flex-wrap items-center gap-2">
-                  <span>No custom columns added yet. Quick add:</span>
-                  {QUICK_CUSTOM_COLUMN_SUGGESTIONS.map((sug) => (
-                    <button
-                      key={sug}
-                      type="button"
-                      onClick={() => handleAddCustomColumn(sug)}
-                      className="px-2 py-0.5 rounded border border-slate-300 bg-white hover:border-[#0F1F3D] text-[11px] font-medium text-[#0F1F3D] cursor-pointer"
-                    >
-                      + {sug}
-                    </button>
-                  ))}
-                </div>
-              )}
+              </section>
+            )}
+
+            {/* Access Toggles & Save Footer */}
+            <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+                <label className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={mustChangePassword}
+                    onChange={(e) => setMustChangePassword(e.target.checked)}
+                    className="rounded border-slate-300 text-[#0F1F3D] focus:ring-[#0F1F3D]"
+                  />
+                  Require password change on first login
+                </label>
+
+                <label className="inline-flex items-center gap-2 text-xs text-[#0F1F3D] font-medium cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={isBranchManager}
+                    onChange={(e) => setIsBranchManager(e.target.checked)}
+                    className="rounded border-slate-300 text-[#B8923A] focus:ring-[#B8923A]"
+                  />
+                  Branch Manager (Read-Only Own Branch)
+                </label>
+              </div>
+
+              <div className="flex items-center gap-2 self-end sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setShowForm(false)}
+                  className="h-9 px-4 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="h-9 px-5 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold disabled:opacity-60 cursor-pointer shrink-0"
+                >
+                  {saving ? 'Saving...' : editing ? 'Save Changes' : 'Create Employee'}
+                </button>
+              </div>
             </div>
-          </div>
-
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2 border-t border-slate-100">
-            <div className="flex flex-col gap-2">
-              <label className="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={mustChangePassword}
-                  onChange={(e) => setMustChangePassword(e.target.checked)}
-                  className="rounded border-slate-300 text-[#0F1F3D] focus:ring-[#0F1F3D]"
-                />
-                Require password change on first employee sign-in
-              </label>
-
-              <label className="inline-flex items-center gap-2 text-sm text-[#0F1F3D] font-medium cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={isBranchManager}
-                  onChange={(e) => setIsBranchManager(e.target.checked)}
-                  className="rounded border-slate-300 text-[#B8923A] focus:ring-[#B8923A]"
-                />
-                <span>
-                  Branch Manager (Read-Only Floor Access)
-                  <span className="block text-[11px] font-normal text-slate-500">
-                    Can view only own branch team sales &amp; targets (zero peer salary access, zero edit rights).
-                  </span>
-                </span>
-              </label>
-            </div>
-
-            <button
-              type="submit"
-              disabled={saving}
-              className="h-10 px-5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium disabled:opacity-60 cursor-pointer shrink-0"
-            >
-              {saving ? 'Saving...' : editing ? 'Save Changes' : 'Create Employee'}
-            </button>
           </div>
         </form>
       )}
@@ -2563,14 +2954,12 @@ export function EmployeeMaster({
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                  <th className="py-3 px-4 whitespace-nowrap">Employee ID</th>
-                  <th className="py-3 px-4 whitespace-nowrap">Login ID</th>
-                  <th className="py-3 px-4 whitespace-nowrap">Employee Name</th>
-                  <th className="py-3 px-4 whitespace-nowrap">Branch</th>
-                  <th className="py-3 px-4 whitespace-nowrap">Department</th>
+                  <th className="py-2.5 px-4 whitespace-nowrap">Employee</th>
+                  <th className="py-2.5 px-4 whitespace-nowrap">Branch &amp; Dept</th>
+                  <th className="py-2.5 px-4 whitespace-nowrap">Mobile</th>
                   {BUILTIN_EXTRA_TABLE_COLUMNS.filter((c) => visibleExtraColumns.includes(c.id)).map(
                     (col) => (
-                      <th key={col.id} className="py-3 px-4 whitespace-nowrap text-[#0F1F3D]">
+                      <th key={col.id} className="py-2.5 px-4 whitespace-nowrap text-[#0F1F3D]">
                         {col.label}
                       </th>
                     ),
@@ -2580,29 +2969,20 @@ export function EmployeeMaster({
                     .map((cName) => (
                       <th
                         key={`custom:${cName}`}
-                        className="py-3 px-4 whitespace-nowrap text-[#8A671F] bg-[#FDF8EC]/40"
+                        className="py-2.5 px-4 whitespace-nowrap text-[#8A671F] bg-[#FDF8EC]/40"
                       >
                         {cName}
                       </th>
                     ))}
-                  <th className="py-3 px-4 whitespace-nowrap">Login Account Status</th>
-                  <th className="py-3 px-4 whitespace-nowrap">Status</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Actions</th>
+                  <th className="py-2.5 px-4 whitespace-nowrap">Login</th>
+                  <th className="py-2.5 px-4 whitespace-nowrap">Status</th>
+                  <th className="py-2.5 px-4 text-right whitespace-nowrap">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-sm">
                 {filtered.map((emp) => (
                   <tr key={emp.employeeId} className="hover:bg-slate-50/60 transition-colors">
-                    <td className="py-3 px-4 font-mono font-medium text-slate-900 whitespace-nowrap">
-                      <div>{emp.employeeId}</div>
-                      {emp.saleId && (
-                        <div className="text-[11px] font-semibold text-[#8A671F] mt-0.5">
-                          Sales ID: {emp.saleId}
-                        </div>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 font-mono text-slate-700 whitespace-nowrap">{emp.loginId}</td>
-                    <td className="py-3 px-4">
+                    <td className="py-2.5 px-4">
                       <div className="flex items-center gap-2.5">
                         <div className="w-8 h-8 rounded-full bg-[#0F1F3D] text-[#DFC27D] text-[11px] font-bold flex items-center justify-center overflow-hidden border border-[#B8923A]/40 shrink-0">
                           {emp.photoDataUrl ? (
@@ -2624,41 +3004,62 @@ export function EmployeeMaster({
                         </div>
                         <div className="min-w-0">
                           <div className="font-medium text-slate-900 truncate flex items-center gap-1.5">
-                            <span>{emp.fullName}</span>
+                            <button
+                              type="button"
+                              onClick={() => setProfileDrawerEmp(emp)}
+                              className="hover:text-[#0F1F3D] hover:underline text-left truncate cursor-pointer"
+                              title="Click to view employee profile"
+                            >
+                              {emp.fullName}
+                            </button>
                             {emp.isBranchManager && (
-                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#FDF8EC] border border-[#B8923A]/40 text-[#9A7625] shrink-0">
-                                Branch Manager
+                              <span className="text-[10px] font-semibold text-[#9A7625] shrink-0">
+                                · Branch Mgr
                               </span>
                             )}
                           </div>
-                          <div className="text-xs text-slate-500 truncate">
-                            {emp.designation}
-                            {emp.dateOfBirth && extractMonthDayFromDob(emp.dateOfBirth) && (
-                              <span className="text-[#9A7625] font-medium">
-                                {' '}
-                                · 🎂 {formatBirthMonthDayLabel(emp.dateOfBirth, 'en')}
-                              </span>
-                            )}
+                          <div className="text-[11px] font-mono text-slate-500 truncate tabular-nums">
+                            {emp.employeeId}
+                            {emp.saleId ? ` · Sale: ${emp.saleId}` : ''} · {emp.loginId}
                           </div>
                         </div>
                       </div>
                     </td>
-                    <td className="py-3 px-4 text-slate-700 whitespace-nowrap">{emp.branchName}</td>
-                    <td className="py-3 px-4 text-xs whitespace-nowrap">
-                      {emp.departmentName ? (
-                        <span className="font-semibold text-[#0F1F3D]">{emp.departmentName}</span>
-                      ) : (
-                        <span className="text-amber-700 font-medium">Unassigned</span>
+                    <td className="py-2.5 px-4 whitespace-nowrap">
+                      <div className="text-xs font-medium text-slate-800">{emp.branchName}</div>
+                      <div className="text-[11px] text-slate-500">
+                        <span className={emp.departmentName ? 'text-[#0F1F3D] font-medium' : 'text-amber-700'}>
+                          {emp.departmentName || 'Unassigned'}
+                        </span>
+                        {emp.designation ? ` · ${emp.designation}` : ''}
+                      </div>
+                    </td>
+                    <td className="py-2.5 px-4 whitespace-nowrap">
+                      <div className="text-xs font-mono text-slate-700 tabular-nums">
+                        {emp.phone || '—'}
+                      </div>
+                      {emp.dateOfBirth && extractMonthDayFromDob(emp.dateOfBirth) && (
+                        <div className="text-[11px] text-[#9A7625]">
+                          DOB: {formatBirthMonthDayLabel(emp.dateOfBirth, 'en')}
+                        </div>
                       )}
                     </td>
                     {BUILTIN_EXTRA_TABLE_COLUMNS.filter((c) => visibleExtraColumns.includes(c.id)).map(
                       (col) => {
                         const rawVal = (emp as unknown as Record<string, unknown>)[col.id];
-                        const displayVal = rawVal ? String(rawVal) : '—';
+                        let displayVal = '—';
+                        if (col.id === 'monthlyGrossSalaryPaise') {
+                          displayVal =
+                            typeof rawVal === 'number' && rawVal > 0
+                              ? formatINRFromPaise(rawVal)
+                              : '—';
+                        } else if (rawVal !== undefined && rawVal !== null && String(rawVal).trim()) {
+                          displayVal = String(rawVal);
+                        }
                         return (
                           <td
                             key={col.id}
-                            className="py-3 px-4 text-xs text-slate-700 whitespace-nowrap font-mono"
+                            className="py-2.5 px-4 text-xs text-slate-700 whitespace-nowrap font-mono tabular-nums"
                           >
                             {displayVal}
                           </td>
@@ -2678,28 +3079,28 @@ export function EmployeeMaster({
                         return (
                           <td
                             key={`custom:${cName}`}
-                            className="py-3 px-4 text-xs text-slate-800 whitespace-nowrap bg-[#FDF8EC]/20"
+                            className="py-2.5 px-4 text-xs text-slate-800 whitespace-nowrap bg-[#FDF8EC]/20"
                           >
                             {val || '—'}
                           </td>
                         );
                       })}
-                    <td className="py-3 px-4 text-xs whitespace-nowrap">
+                    <td className="py-2.5 px-4 text-xs whitespace-nowrap">
                       {emp.credentialsProvisioned ? (
                         <span className="inline-flex items-center gap-1 text-emerald-700 font-medium">
                           <UserCheck className="w-3.5 h-3.5" />
-                          Login ID Active
+                          Active
                         </span>
                       ) : emp.linkedGoogleEmail ? (
                         <span className="text-slate-600">Google Linked</span>
                       ) : (
                         <span className="inline-flex items-center gap-1 text-amber-700 font-medium">
                           <KeyRound className="w-3.5 h-3.5" />
-                          Pending Password
+                          Pending
                         </span>
                       )}
                     </td>
-                    <td className="py-3 px-4 whitespace-nowrap">
+                    <td className="py-2.5 px-4 whitespace-nowrap">
                       <span
                         className={`text-xs font-semibold ${
                           emp.status === 'ACTIVE' ? 'text-emerald-700' : 'text-red-700'
@@ -2710,6 +3111,15 @@ export function EmployeeMaster({
                     </td>
                     <td className="py-3 px-4 text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setProfileDrawerEmp(emp)}
+                          title="View Complete 360° Employee Details"
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-[#0F1F3D] hover:underline cursor-pointer"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          View
+                        </button>
                         {emp.dateOfBirth && extractMonthDayFromDob(emp.dateOfBirth) && (
                           <button
                             type="button"
@@ -2758,6 +3168,17 @@ export function EmployeeMaster({
                         {isMainOwner && (
                           <button
                             type="button"
+                            onClick={() => openSetEmployeePasswordModal(emp)}
+                            title="Main Owner only: set or reset employee portal password"
+                            className="inline-flex items-center gap-1 text-xs font-semibold text-[#9A7625] hover:text-[#0F1F3D] hover:underline cursor-pointer"
+                          >
+                            <KeyRound className="w-3.5 h-3.5" />
+                            Set Password
+                          </button>
+                        )}
+                        {isMainOwner && (
+                          <button
+                            type="button"
                             onClick={() => {
                               setConfirmDeleteEmp(emp);
                               setDeleteEmpReason('');
@@ -2778,6 +3199,134 @@ export function EmployeeMaster({
           </div>
         )}
       </div>
+
+      {/* Main Owner ONLY: Set / Reset Employee Password Modal */}
+      {isMainOwner && pwdTargetEmp && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border-2 border-[#B8923A]/50 rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
+            <div className="px-5 py-4 bg-[#0F1F3D] text-white flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-[#DFC27D] shrink-0" />
+                  Main Owner · Set Employee Password
+                </h3>
+                <p className="text-xs text-slate-300 mt-0.5 truncate">
+                  {pwdTargetEmp.fullName} ({pwdTargetEmp.employeeId} ·{' '}
+                  <span className="font-mono text-[#DFC27D]">{pwdTargetEmp.loginId}</span>)
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={savingEmpPwd}
+                onClick={() => setPwdTargetEmp(null)}
+                className="p-1 text-slate-300 hover:text-white cursor-pointer"
+                aria-label="Close set employee password modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEmployeePassword} className="p-5 space-y-4">
+              {pwdModalErr && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800">
+                  {pwdModalErr}
+                </div>
+              )}
+
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Set a new portal password for this employee while keeping their exact Login ID{' '}
+                <strong className="font-mono text-[#0F1F3D]">{pwdTargetEmp.loginId}</strong>. Any
+                previous password is revoked immediately, and all historical salary slips &amp;
+                incentives stay linked automatically.
+              </p>
+
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="block text-xs font-medium text-slate-700">
+                    New Password (min 8 chars)
+                  </label>
+                  <div className="flex items-center gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPwdNewValue(DEFAULT_EMPLOYEE_PASSWORD);
+                        setShowPwdNewValue(true);
+                        setPwdMustChange(true);
+                      }}
+                      className="text-[11px] font-semibold text-slate-600 hover:text-[#0F1F3D] hover:underline cursor-pointer"
+                    >
+                      Default ({DEFAULT_EMPLOYEE_PASSWORD})
+                    </button>
+                    <span className="text-slate-300">|</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPwdNewValue(generateStrongTemporaryPassword('Muktai@'));
+                        setShowPwdNewValue(true);
+                        setPwdMustChange(false);
+                      }}
+                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#9A7625] hover:underline cursor-pointer"
+                    >
+                      <Sparkles className="w-3 h-3" />
+                      Generate Strong
+                    </button>
+                  </div>
+                </div>
+                <div className="relative">
+                  <input
+                    type={showPwdNewValue ? 'text' : 'password'}
+                    required
+                    minLength={8}
+                    maxLength={128}
+                    autoFocus
+                    placeholder="Enter new password (min 8 chars)"
+                    value={pwdNewValue}
+                    onChange={(e) => setPwdNewValue(e.target.value)}
+                    className="w-full h-10 pl-3 pr-9 rounded-xl border border-slate-300 text-sm font-mono text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#B8923A]/30 focus:border-[#0F1F3D]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPwdNewValue((s) => !s)}
+                    aria-label={showPwdNewValue ? 'Hide password' : 'Show password'}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                  >
+                    {showPwdNewValue ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={pwdMustChange}
+                  onChange={(e) => setPwdMustChange(e.target.checked)}
+                  className="rounded border-slate-300 text-[#0F1F3D] focus:ring-[#0F1F3D]"
+                />
+                Require employee to change password on next login
+              </label>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={savingEmpPwd}
+                  onClick={() => setPwdTargetEmp(null)}
+                  className="h-9 px-3.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingEmpPwd || pwdNewValue.trim().length < 8}
+                  className="h-9 px-4 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                >
+                  <KeyRound className="w-3.5 h-3.5 text-[#DFC27D]" />
+                  {savingEmpPwd ? 'Saving Password...' : 'Save New Password'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Main Owner ONLY: Permanent Employee Delete Confirmation Modal */}
       {isMainOwner && confirmDeleteEmp && (
@@ -2864,6 +3413,12 @@ export function EmployeeMaster({
           </div>
         </div>
       )}
+
+      <EmployeeProfileDrawer
+        employee={profileDrawerEmp}
+        onClose={() => setProfileDrawerEmp(null)}
+        onEdit={(emp) => openEdit(emp)}
+      />
 
       <BirthdayWishingCardModal
         open={Boolean(previewCardEmp)}

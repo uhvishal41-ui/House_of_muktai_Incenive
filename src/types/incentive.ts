@@ -68,18 +68,41 @@ export interface Employee {
   designation: string;
   gender?: string;
   category?: string;
+  fatherOrSpouseName?: string;
+  maritalStatus?: string;
+  bloodGroup?: string;
+  qualification?: string;
   dateOfBirth?: string; // YYYY-MM-DD (private in employees; only MM-DD synced to birthday_profiles)
   dateOfJoining?: string;
+  dateOfExit?: string;
+  exitReason?: string;
+  employmentType?: string; // Full-Time / Part-Time / Probation / Contract / Trainee
+  reportingManager?: string;
+  shiftTiming?: string;
+  weeklyOffDay?: string;
+  uniformSize?: string;
+  aadhaarMasked?: string; // Masked XXXX-XXXX-1234 (never raw 12-digit PII)
   panNumber?: string;
   uanNumber?: string;
   pfNumber?: string;
   esicNumber?: string;
   bankName?: string;
+  bankBranchName?: string;
   bankAccountMasked?: string;
   bankIfsc?: string;
+  upiId?: string;
+  paymentMode?: string; // Bank Transfer / Cash / Cheque / UPI
+  monthlyGrossSalaryPaise?: number; // Integer paise (avoids float drift)
   phone?: string;
+  alternatePhone?: string;
+  personalEmail?: string;
   address?: string;
+  permanentAddress?: string;
+  emergencyContactName?: string;
   emergencyContact?: string;
+  nomineeName?: string;
+  nomineeRelation?: string;
+  hrRemarks?: string;
   customFields?: Record<string, string>; // Dynamic user-added extra columns in Employee Master & Bulk Excel Upload
   role: 'EMPLOYEE';
   isBranchManager?: boolean; // Optional read-only floor manager view strictly for own branch (zero peer salary access)

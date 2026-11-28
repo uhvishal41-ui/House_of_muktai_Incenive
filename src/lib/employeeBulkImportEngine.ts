@@ -7,6 +7,11 @@ import {
 import { sanitizeId } from './format';
 import { resolveCanonicalBranchName } from './incentiveEngine';
 import {
+  formatSalaryRupeesPlain,
+  maskAadhaarNumber,
+  parseMonthlySalaryToPaise,
+} from './employeeMasterExport';
+import {
   cleanExcelTextCell,
   maskBankAccountNumber,
   normalizeDateCellToIso,
@@ -36,20 +41,43 @@ export interface EmployeeFieldDiff {
     | 'designation'
     | 'gender'
     | 'category'
+    | 'fatherOrSpouseName'
+    | 'maritalStatus'
+    | 'bloodGroup'
+    | 'qualification'
     | 'status'
     | 'dateOfBirth'
     | 'dateOfJoining'
+    | 'dateOfExit'
+    | 'exitReason'
+    | 'employmentType'
+    | 'reportingManager'
+    | 'shiftTiming'
+    | 'weeklyOffDay'
+    | 'uniformSize'
     | 'phone'
+    | 'alternatePhone'
+    | 'personalEmail'
+    | 'aadhaarMasked'
     | 'panNumber'
     | 'uanNumber'
     | 'pfNumber'
     | 'esicNumber'
+    | 'monthlyGrossSalaryPaise'
+    | 'paymentMode'
     | 'bankName'
+    | 'bankBranchName'
     | 'bankAccountMasked'
     | 'bankIfsc'
+    | 'upiId'
     | 'linkedGoogleEmail'
     | 'address'
+    | 'permanentAddress'
+    | 'emergencyContactName'
     | 'emergencyContact'
+    | 'nomineeName'
+    | 'nomineeRelation'
+    | 'hrRemarks'
     | `custom:${string}`;
   label: string;
   masterValue: string;
@@ -84,20 +112,43 @@ export interface ParsedEmployeeMasterRow {
   designation: string;
   gender: string;
   category: string;
+  fatherOrSpouseName: string;
+  maritalStatus: string;
+  bloodGroup: string;
+  qualification: string;
   employeeStatus: 'ACTIVE' | 'INACTIVE';
   dateOfBirth: string;
   dateOfJoining: string;
+  dateOfExit: string;
+  exitReason: string;
+  employmentType: string;
+  reportingManager: string;
+  shiftTiming: string;
+  weeklyOffDay: string;
+  uniformSize: string;
   phone: string;
+  alternatePhone: string;
+  personalEmail: string;
+  aadhaarMasked: string;
   panNumber: string;
   uanNumber: string;
   pfNumber: string;
   esicNumber: string;
+  monthlyGrossSalaryPaise?: number;
+  paymentMode: string;
   bankName: string;
+  bankBranchName: string;
   bankAccountMasked: string;
   bankIfsc: string;
+  upiId: string;
   linkedGoogleEmail: string;
   address: string;
+  permanentAddress: string;
+  emergencyContactName: string;
   emergencyContact: string;
+  nomineeName: string;
+  nomineeRelation: string;
+  hrRemarks: string;
   customFields: Record<string, string>;
   // Existing record context (for OVERLAP_CONFLICT / UNCHANGED)
   existingEmployee?: Employee;
@@ -128,22 +179,24 @@ export const EMPLOYEE_MASTER_TEMPLATE_HEADERS = [
   'Branch',
   'Department',
   'Designation',
-  'Gender',
-  'Category',
   'Status',
+  'Mobile Number',
+  'Gender',
   'Date of Birth',
   'Date of Joining',
-  'Mobile Number',
+  'Date of Exit',
+  'Residential Address',
+  'Emergency Contact',
+  'Aadhaar Number',
   'PAN Number',
   'UAN Number',
   'PF Account Number',
   'ESIC Number',
+  'Monthly Gross Salary (INR)',
   'Bank Name',
   'Bank Account Number',
   'Bank IFSC Code',
   'Google Email',
-  'Residential Address',
-  'Emergency Contact',
 ] as const;
 
 const OFFICIAL_DEPT_NAMES_LABEL = OFFICIAL_DEPARTMENTS.map((d) => d.name).join(', ');
@@ -398,22 +451,24 @@ export function buildEmployeeMasterCsvTemplate(
           emp.branchName,
           emp.departmentName || '',
           emp.designation,
-          emp.gender || '',
-          emp.category || '',
           emp.status,
+          emp.phone || '',
+          emp.gender || '',
           emp.dateOfBirth || '',
           emp.dateOfJoining || '',
-          emp.phone || '',
+          emp.dateOfExit || '',
+          emp.address || '',
+          emp.emergencyContact || '',
+          emp.aadhaarMasked || '',
           emp.panNumber || '',
           emp.uanNumber || '',
           emp.pfNumber || '',
           emp.esicNumber || '',
+          formatSalaryRupeesPlain(emp.monthlyGrossSalaryPaise),
           emp.bankName || '',
           emp.bankAccountMasked || '',
           emp.bankIfsc || '',
           emp.linkedGoogleEmail || '',
-          emp.address || '',
-          emp.emergencyContact || '',
           ...customFieldValues,
         ]
           .map(escapeCsvCell)
@@ -435,22 +490,24 @@ export function buildEmployeeMasterCsvTemplate(
       branch1,
       'Saree Dept.',
       'Sales Executive',
-      'Female',
-      'Sales',
       'ACTIVE',
+      '9876543210',
+      'Female',
       '1996-05-14',
       '2024-04-01',
-      '9876543210',
+      '',
+      'Baramati, Dist. Pune',
+      '9876500001',
+      'XXXX-XXXX-4321',
       'ABCDE1234F',
       '101234567890',
       'MH/PUN/00123/001',
       '3112345678',
+      '18500',
       'State Bank of India',
       'XXXX5678',
       'SBIN0001234',
       '',
-      'Baramati, Dist. Pune',
-      '9876500001',
       ...blankCustomCells,
     ],
     [
@@ -461,22 +518,24 @@ export function buildEmployeeMasterCsvTemplate(
       branch2,
       'Accounts',
       'Accountant',
-      'Female',
-      'Non-Sales',
       'ACTIVE',
+      '9823012345',
+      'Female',
       '1994-11-22',
       '2023-08-15',
-      '9823012345',
+      '',
+      'Beed City',
+      '9823000002',
+      'XXXX-XXXX-8765',
       '',
       '',
       '',
       '',
+      '24000',
       'HDFC Bank',
       'XXXX9012',
       'HDFC0000456',
       '',
-      'Beed City',
-      '9823000002',
       ...blankCustomCells,
     ],
   ];
@@ -696,7 +755,8 @@ export function parseEmployeeMasterRows(
       [],
       claimedOrigKeys,
     );
-    const rawBankNameVal = pickCell(data, normalizedMap, ['bankname', 'bank'], ['account', 'acc', 'ifsc'], claimedOrigKeys);
+    const rawBankNameVal = pickCell(data, normalizedMap, ['bankname', 'bank'], ['account', 'acc', 'ifsc', 'branch'], claimedOrigKeys);
+    const rawBankBranchVal = pickCell(data, normalizedMap, ['bankbranchname', 'bankbranch'], [], claimedOrigKeys);
     const rawAccountVal = pickCell(
       data,
       normalizedMap,
@@ -711,24 +771,162 @@ export function parseEmployeeMasterRows(
       [],
       claimedOrigKeys,
     );
+    const rawUpiVal = pickCell(data, normalizedMap, ['upiid', 'upi'], [], claimedOrigKeys);
+    const rawPaymentModeVal = pickCell(
+      data,
+      normalizedMap,
+      ['paymentmode', 'salarymode', 'paymode'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawSalaryVal = pickCell(
+      data,
+      normalizedMap,
+      ['monthlygrosssalaryinr', 'monthlygrosssalary', 'grosssalary', 'monthlysalary', 'basesalary', 'basicsalary', 'ctc', 'salary'],
+      ['mode', 'slip'],
+      claimedOrigKeys,
+    );
+    const rawPersonalEmailVal = pickCell(
+      data,
+      normalizedMap,
+      ['personalemail', 'emailid', 'emailaddress'],
+      ['google', 'gmail', 'auth'],
+      claimedOrigKeys,
+    );
     const rawGoogleEmailVal = pickCell(
       data,
       normalizedMap,
-      ['linkedgoogleemail', 'googleemail', 'gmail', 'email'],
+      ['linkedgoogleemail', 'googleemail', 'gmail'],
       [],
+      claimedOrigKeys,
+    );
+    const rawPermanentAddressVal = pickCell(
+      data,
+      normalizedMap,
+      ['permanentaddress', 'nativeaddress', 'homeaddress'],
+      ['email', 'ip'],
       claimedOrigKeys,
     );
     const rawAddressVal = pickCell(
       data,
       normalizedMap,
-      ['address', 'residentialaddress', 'currentaddress', 'permanentaddress'],
-      ['email', 'ip'],
+      ['residentialaddress', 'currentaddress', 'address'],
+      ['email', 'ip', 'permanent', 'native'],
+      claimedOrigKeys,
+    );
+    const rawEmergencyContactNameVal = pickCell(
+      data,
+      normalizedMap,
+      ['emergencycontactname', 'emergencyname', 'emergencyperson'],
+      [],
       claimedOrigKeys,
     );
     const rawEmergencyContactVal = pickCell(
       data,
       normalizedMap,
       ['emergencycontact', 'emergencyphone', 'emergencymobile', 'emergencyno'],
+      ['name'],
+      claimedOrigKeys,
+    );
+    const rawFatherSpouseVal = pickCell(
+      data,
+      normalizedMap,
+      ['fatherspousename', 'fatherorspousename', 'fathername', 'husbandname', 'spousename'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawMaritalStatusVal = pickCell(data, normalizedMap, ['maritalstatus', 'marital'], [], claimedOrigKeys);
+    const rawBloodGroupVal = pickCell(data, normalizedMap, ['bloodgroup', 'blood'], [], claimedOrigKeys);
+    const rawQualificationVal = pickCell(
+      data,
+      normalizedMap,
+      ['qualification', 'education', 'degree'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawAltPhoneVal = pickCell(
+      data,
+      normalizedMap,
+      ['alternatemobile', 'alternatephone', 'altphone', 'altmobile', 'whatsappno', 'whatsapp'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawAadhaarVal = pickCell(
+      data,
+      normalizedMap,
+      ['aadhaarnumbermasked', 'aadhaarnumber', 'aadhaarmasked', 'aadhaarno', 'aadharno', 'aadhaar', 'aadhar'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawNomineeNameVal = pickCell(data, normalizedMap, ['nomineename', 'nominee'], ['relation'], claimedOrigKeys);
+    const rawNomineeRelationVal = pickCell(
+      data,
+      normalizedMap,
+      ['nomineerelation', 'nomineerelationship'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawEmploymentTypeVal = pickCell(
+      data,
+      normalizedMap,
+      ['employmenttype', 'emptype', 'jobtype', 'worktype'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawReportingManagerVal = pickCell(
+      data,
+      normalizedMap,
+      ['reportingmanager', 'managername', 'manager', 'supervisor'],
+      ['branchmanageraccess'],
+      claimedOrigKeys,
+    );
+    const rawShiftTimingVal = pickCell(
+      data,
+      normalizedMap,
+      ['shifttiming', 'shift', 'dutyhours', 'workshift'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawWeeklyOffVal = pickCell(
+      data,
+      normalizedMap,
+      ['weeklyoffday', 'weeklyoff', 'weekoff', 'offday'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawUniformSizeVal = pickCell(
+      data,
+      normalizedMap,
+      ['uniformsize', 'tshirtsize', 'shirtsize', 'uniform'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawDateOfExitVal = pickCell(
+      data,
+      normalizedMap,
+      ['dateofexit', 'exitdate', 'leavingdate', 'dateofleaving', 'dol', 'resignationdate'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawExitReasonVal = pickCell(
+      data,
+      normalizedMap,
+      ['exitreason', 'leavingreason', 'resignationreason'],
+      [],
+      claimedOrigKeys,
+    );
+    const rawHrRemarksVal = pickCell(
+      data,
+      normalizedMap,
+      ['hrremarks', 'hrnotes', 'remarks', 'notes'],
+      [],
+      claimedOrigKeys,
+    );
+    // Claim informational-only export columns so re-importing an exported sheet doesn't create redundant custom columns
+    pickCell(
+      data,
+      normalizedMap,
+      ['branchmanageraccess', 'loginaccountstatus', 'profilecompleteness'],
       [],
       claimedOrigKeys,
     );
@@ -747,18 +945,50 @@ export function parseEmployeeMasterRows(
     const rawStatus = cleanExcelTextCell(stringifyCell(rawStatusVal));
     const rawDob = cleanExcelTextCell(stringifyCell(rawDobVal));
     const rawDoj = cleanExcelTextCell(stringifyCell(rawDojVal));
+    const rawDateOfExit = cleanExcelTextCell(stringifyCell(rawDateOfExitVal));
+    const fatherOrSpouseName = cleanExcelTextCell(stringifyCell(rawFatherSpouseVal)).slice(0, 120);
+    const maritalStatus = cleanExcelTextCell(stringifyCell(rawMaritalStatusVal)).slice(0, 24);
+    const CLEAR_TOKEN_RE = /^(\[CLEAR\]|CLEAR)$/i;
+    const rawBloodGroupClean = cleanExcelTextCell(stringifyCell(rawBloodGroupVal));
+    const bloodGroup = CLEAR_TOKEN_RE.test(rawBloodGroupClean)
+      ? ''
+      : rawBloodGroupClean.toUpperCase().slice(0, 12);
+    const qualification = cleanExcelTextCell(stringifyCell(rawQualificationVal)).slice(0, 80);
+    const employmentType = cleanExcelTextCell(stringifyCell(rawEmploymentTypeVal)).slice(0, 32);
+    const reportingManager = cleanExcelTextCell(stringifyCell(rawReportingManagerVal)).slice(0, 120);
+    const shiftTiming = cleanExcelTextCell(stringifyCell(rawShiftTimingVal)).slice(0, 60);
+    const rawWeeklyOffClean = cleanExcelTextCell(stringifyCell(rawWeeklyOffVal));
+    const weeklyOffDay = CLEAR_TOKEN_RE.test(rawWeeklyOffClean)
+      ? ''
+      : rawWeeklyOffClean.slice(0, 24);
+    const uniformSize = cleanExcelTextCell(stringifyCell(rawUniformSizeVal)).toUpperCase().slice(0, 16);
+    const exitReason = cleanExcelTextCell(stringifyCell(rawExitReasonVal)).slice(0, 200);
     const phone = cleanExcelTextCell(stringifyCell(rawPhoneVal)).slice(0, 24);
+    const alternatePhone = cleanExcelTextCell(stringifyCell(rawAltPhoneVal)).slice(0, 24);
+    const personalEmail = cleanExcelTextCell(stringifyCell(rawPersonalEmailVal)).toLowerCase().slice(0, 180);
+    const rawAadhaar = cleanExcelTextCell(stringifyCell(rawAadhaarVal));
+    const aadhaarMasked =
+      rawAadhaar && !CLEAR_TOKEN_RE.test(rawAadhaar) ? maskAadhaarNumber(rawAadhaar) : '';
     const panNumber = cleanExcelTextCell(stringifyCell(rawPanVal)).toUpperCase().slice(0, 20);
     const uanNumber = cleanExcelTextCell(stringifyCell(rawUanVal)).slice(0, 24);
     const pfNumber = cleanExcelTextCell(stringifyCell(rawPfVal)).slice(0, 32);
     const esicNumber = cleanExcelTextCell(stringifyCell(rawEsicVal)).slice(0, 32);
+    const parsedSalaryPaise = parseMonthlySalaryToPaise(rawSalaryVal);
+    const paymentMode = cleanExcelTextCell(stringifyCell(rawPaymentModeVal)).slice(0, 24);
     const bankName = cleanExcelTextCell(stringifyCell(rawBankNameVal)).slice(0, 80);
+    const bankBranchName = cleanExcelTextCell(stringifyCell(rawBankBranchVal)).slice(0, 100);
     const rawAccount = cleanExcelTextCell(stringifyCell(rawAccountVal));
     const bankAccountMasked = rawAccount ? maskBankAccountNumber(rawAccount).slice(0, 32) : '';
     const bankIfsc = cleanExcelTextCell(stringifyCell(rawIfscVal)).toUpperCase().slice(0, 20);
+    const upiId = cleanExcelTextCell(stringifyCell(rawUpiVal)).slice(0, 80);
     const linkedGoogleEmail = cleanExcelTextCell(stringifyCell(rawGoogleEmailVal)).toLowerCase().slice(0, 180);
     const address = cleanExcelTextCell(stringifyCell(rawAddressVal)).slice(0, 240);
+    const permanentAddress = cleanExcelTextCell(stringifyCell(rawPermanentAddressVal)).slice(0, 240);
+    const emergencyContactName = cleanExcelTextCell(stringifyCell(rawEmergencyContactNameVal)).slice(0, 120);
     const emergencyContact = cleanExcelTextCell(stringifyCell(rawEmergencyContactVal)).slice(0, 120);
+    const nomineeName = cleanExcelTextCell(stringifyCell(rawNomineeNameVal)).slice(0, 120);
+    const nomineeRelation = cleanExcelTextCell(stringifyCell(rawNomineeRelationVal)).slice(0, 60);
+    const hrRemarks = cleanExcelTextCell(stringifyCell(rawHrRemarksVal)).slice(0, 300);
 
     // Collect any extra/custom columns not claimed by standard headers (excluding Sr No / S.No)
     const IGNORED_EXTRA_NORMS = new Set(['srno', 'sno', 'serialno', 'serialnumber', 'sr', 'slno', '__rowNum__']);
@@ -809,6 +1039,30 @@ export function parseEmployeeMasterRows(
     }
 
     const existing = cleanEmpId ? existingById.get(cleanEmpId.toUpperCase()) : undefined;
+
+    // Also capture updates or CLEAR sentinels for any legacy keys already present in existing.customFields
+    // (even if a column like "Blood Group" or "Aadhar No" was later promoted to a built-in optional field)
+    if (existing?.customFields) {
+      const existingCustomNormMap = new Map<string, string>();
+      for (const k of Object.keys(existing.customFields)) {
+        existingCustomNormMap.set(normalizeHeaderKey(k), k);
+      }
+      for (const [origKey, val] of Object.entries(data)) {
+        if (!claimedOrigKeys.has(origKey)) continue;
+        const normKey = normalizeHeaderKey(origKey);
+        const legacyKey = existingCustomNormMap.get(normKey);
+        if (!legacyKey) continue;
+        const strVal = stringifyCell(val).slice(0, 200);
+        if (!strVal) continue;
+        if (CLEAR_CUSTOM_TOKEN_RE.test(strVal)) {
+          if (!clearedCustomFieldKeys.includes(legacyKey)) {
+            clearedCustomFieldKeys.push(legacyKey);
+          }
+        } else if (fileCustomFields[legacyKey] === undefined) {
+          fileCustomFields[legacyKey] = strVal;
+        }
+      }
+    }
 
     // Merge existing customFields with fileCustomFields (and apply explicit CLEAR / [CLEAR] tokens)
     const mergedCustomFields: Record<string, string> = {
@@ -1052,13 +1306,59 @@ export function parseEmployeeMasterRows(
       }
     }
 
-    // 11. Google Email basic validation
+    // 10b. Date of Exit validation
+    let resolvedDateOfExit = existing?.dateOfExit || '';
+    if (rawDateOfExit) {
+      const parsedExit = normalizeDateCellToIso(rawDateOfExitVal);
+      if (!parsedExit) {
+        errorDetails.push({
+          field: 'Date of Exit',
+          reason: `Invalid Date of Exit "${rawDateOfExit}". Use YYYY-MM-DD or DD-MM-YYYY format.`,
+        });
+      } else {
+        resolvedDateOfExit = parsedExit;
+      }
+    }
+
+    // 11. Email basic validation
     if (linkedGoogleEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(linkedGoogleEmail)) {
       errorDetails.push({
         field: 'Google Email',
         reason: `Invalid Google Email "${linkedGoogleEmail}". Enter a valid email address or leave blank.`,
       });
     }
+    if (personalEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(personalEmail)) {
+      errorDetails.push({
+        field: 'Personal Email',
+        reason: `Invalid Personal Email "${personalEmail}". Enter a valid email address or leave blank.`,
+      });
+    }
+
+    const extraResolvedNewFields = {
+      fatherOrSpouseName,
+      maritalStatus,
+      bloodGroup,
+      qualification,
+      dateOfExit: resolvedDateOfExit,
+      exitReason,
+      employmentType,
+      reportingManager,
+      shiftTiming,
+      weeklyOffDay,
+      uniformSize,
+      alternatePhone,
+      personalEmail,
+      aadhaarMasked,
+      monthlyGrossSalaryPaise: parsedSalaryPaise,
+      paymentMode,
+      bankBranchName,
+      upiId,
+      permanentAddress,
+      emergencyContactName,
+      nomineeName,
+      nomineeRelation,
+      hrRemarks,
+    };
 
     // Determine final classification
     if (duplicateFirstRowNumber !== undefined) {
@@ -1102,6 +1402,7 @@ export function parseEmployeeMasterRows(
         linkedGoogleEmail,
         address,
         emergencyContact,
+        ...extraResolvedNewFields,
         customFields: mergedCustomFields,
         existingEmployee: existing,
         diffs: [],
@@ -1158,6 +1459,7 @@ export function parseEmployeeMasterRows(
         linkedGoogleEmail,
         address,
         emergencyContact,
+        ...extraResolvedNewFields,
         customFields: mergedCustomFields,
         existingEmployee: existing,
         diffs: [],
@@ -1211,6 +1513,7 @@ export function parseEmployeeMasterRows(
         linkedGoogleEmail,
         address,
         emergencyContact,
+        ...extraResolvedNewFields,
         customFields: fileCustomFields,
         diffs: [],
         hasOrgOverlap: false,
@@ -1335,6 +1638,84 @@ export function parseEmployeeMasterRows(
         false,
       );
     }
+    if (fatherOrSpouseName && fatherOrSpouseName !== (existing.fatherOrSpouseName || '')) {
+      pushDiff('fatherOrSpouseName', 'Father / Spouse Name', existing.fatherOrSpouseName || '', fatherOrSpouseName, false);
+    }
+    if (maritalStatus && maritalStatus !== (existing.maritalStatus || '')) {
+      pushDiff('maritalStatus', 'Marital Status', existing.maritalStatus || '', maritalStatus, false);
+    }
+    if (bloodGroup && bloodGroup !== (existing.bloodGroup || '')) {
+      pushDiff('bloodGroup', 'Blood Group', existing.bloodGroup || '', bloodGroup, false);
+    }
+    if (qualification && qualification !== (existing.qualification || '')) {
+      pushDiff('qualification', 'Qualification', existing.qualification || '', qualification, false);
+    }
+    if (rawDateOfExit && resolvedDateOfExit !== (existing.dateOfExit || '')) {
+      pushDiff('dateOfExit', 'Date of Exit', existing.dateOfExit || '', resolvedDateOfExit, false);
+    }
+    if (exitReason && exitReason !== (existing.exitReason || '')) {
+      pushDiff('exitReason', 'Exit Reason', existing.exitReason || '', exitReason, false);
+    }
+    if (employmentType && employmentType !== (existing.employmentType || '')) {
+      pushDiff('employmentType', 'Employment Type', existing.employmentType || '', employmentType, false);
+    }
+    if (reportingManager && reportingManager !== (existing.reportingManager || '')) {
+      pushDiff('reportingManager', 'Reporting Manager', existing.reportingManager || '', reportingManager, false);
+    }
+    if (shiftTiming && shiftTiming !== (existing.shiftTiming || '')) {
+      pushDiff('shiftTiming', 'Shift Timing', existing.shiftTiming || '', shiftTiming, false);
+    }
+    if (weeklyOffDay && weeklyOffDay !== (existing.weeklyOffDay || '')) {
+      pushDiff('weeklyOffDay', 'Weekly Off Day', existing.weeklyOffDay || '', weeklyOffDay, false);
+    }
+    if (uniformSize && uniformSize !== (existing.uniformSize || '')) {
+      pushDiff('uniformSize', 'Uniform Size', existing.uniformSize || '', uniformSize, false);
+    }
+    if (alternatePhone && alternatePhone !== (existing.alternatePhone || '')) {
+      pushDiff('alternatePhone', 'Alternate Mobile', existing.alternatePhone || '', alternatePhone, false);
+    }
+    if (personalEmail && personalEmail !== (existing.personalEmail || '')) {
+      pushDiff('personalEmail', 'Personal Email', existing.personalEmail || '', personalEmail, false);
+    }
+    if (aadhaarMasked && aadhaarMasked !== (existing.aadhaarMasked || '')) {
+      pushDiff('aadhaarMasked', 'Aadhaar (Masked)', existing.aadhaarMasked || '', aadhaarMasked, false);
+    }
+    if (
+      parsedSalaryPaise !== undefined &&
+      parsedSalaryPaise !== (existing.monthlyGrossSalaryPaise ?? undefined)
+    ) {
+      pushDiff(
+        'monthlyGrossSalaryPaise',
+        'Monthly Gross Salary',
+        formatSalaryRupeesPlain(existing.monthlyGrossSalaryPaise) || '(Blank)',
+        formatSalaryRupeesPlain(parsedSalaryPaise),
+        false,
+      );
+    }
+    if (paymentMode && paymentMode !== (existing.paymentMode || '')) {
+      pushDiff('paymentMode', 'Payment Mode', existing.paymentMode || '', paymentMode, false);
+    }
+    if (bankBranchName && bankBranchName !== (existing.bankBranchName || '')) {
+      pushDiff('bankBranchName', 'Bank Branch', existing.bankBranchName || '', bankBranchName, false);
+    }
+    if (upiId && upiId !== (existing.upiId || '')) {
+      pushDiff('upiId', 'UPI ID', existing.upiId || '', upiId, false);
+    }
+    if (permanentAddress && permanentAddress !== (existing.permanentAddress || '')) {
+      pushDiff('permanentAddress', 'Permanent Address', existing.permanentAddress || '', permanentAddress, false);
+    }
+    if (emergencyContactName && emergencyContactName !== (existing.emergencyContactName || '')) {
+      pushDiff('emergencyContactName', 'Emergency Contact Name', existing.emergencyContactName || '', emergencyContactName, false);
+    }
+    if (nomineeName && nomineeName !== (existing.nomineeName || '')) {
+      pushDiff('nomineeName', 'Nominee Name', existing.nomineeName || '', nomineeName, false);
+    }
+    if (nomineeRelation && nomineeRelation !== (existing.nomineeRelation || '')) {
+      pushDiff('nomineeRelation', 'Nominee Relation', existing.nomineeRelation || '', nomineeRelation, false);
+    }
+    if (hrRemarks && hrRemarks !== (existing.hrRemarks || '')) {
+      pushDiff('hrRemarks', 'HR Remarks', existing.hrRemarks || '', hrRemarks, false);
+    }
     for (const [cKey, cVal] of Object.entries(fileCustomFields)) {
       const existingCustomMap = existing.customFields || {};
       const cNorm = normalizeHeaderKey(cKey);
@@ -1395,6 +1776,29 @@ export function parseEmployeeMasterRows(
         linkedGoogleEmail: existing.linkedGoogleEmail || '',
         address: existing.address || '',
         emergencyContact: existing.emergencyContact || '',
+        fatherOrSpouseName: existing.fatherOrSpouseName || '',
+        maritalStatus: existing.maritalStatus || '',
+        bloodGroup: existing.bloodGroup || '',
+        qualification: existing.qualification || '',
+        dateOfExit: existing.dateOfExit || '',
+        exitReason: existing.exitReason || '',
+        employmentType: existing.employmentType || '',
+        reportingManager: existing.reportingManager || '',
+        shiftTiming: existing.shiftTiming || '',
+        weeklyOffDay: existing.weeklyOffDay || '',
+        uniformSize: existing.uniformSize || '',
+        alternatePhone: existing.alternatePhone || '',
+        personalEmail: existing.personalEmail || '',
+        aadhaarMasked: existing.aadhaarMasked || '',
+        monthlyGrossSalaryPaise: existing.monthlyGrossSalaryPaise,
+        paymentMode: existing.paymentMode || '',
+        bankBranchName: existing.bankBranchName || '',
+        upiId: existing.upiId || '',
+        permanentAddress: existing.permanentAddress || '',
+        emergencyContactName: existing.emergencyContactName || '',
+        nomineeName: existing.nomineeName || '',
+        nomineeRelation: existing.nomineeRelation || '',
+        hrRemarks: existing.hrRemarks || '',
         customFields: existing.customFields || {},
         existingEmployee: existing,
         diffs: [],
@@ -1451,6 +1855,30 @@ export function parseEmployeeMasterRows(
       linkedGoogleEmail: linkedGoogleEmail || existing.linkedGoogleEmail || '',
       address: address || existing.address || '',
       emergencyContact: emergencyContact || existing.emergencyContact || '',
+      fatherOrSpouseName: fatherOrSpouseName || existing.fatherOrSpouseName || '',
+      maritalStatus: maritalStatus || existing.maritalStatus || '',
+      bloodGroup: bloodGroup || existing.bloodGroup || '',
+      qualification: qualification || existing.qualification || '',
+      dateOfExit: resolvedDateOfExit || existing.dateOfExit || '',
+      exitReason: exitReason || existing.exitReason || '',
+      employmentType: employmentType || existing.employmentType || '',
+      reportingManager: reportingManager || existing.reportingManager || '',
+      shiftTiming: shiftTiming || existing.shiftTiming || '',
+      weeklyOffDay: weeklyOffDay || existing.weeklyOffDay || '',
+      uniformSize: uniformSize || existing.uniformSize || '',
+      alternatePhone: alternatePhone || existing.alternatePhone || '',
+      personalEmail: personalEmail || existing.personalEmail || '',
+      aadhaarMasked: aadhaarMasked || existing.aadhaarMasked || '',
+      monthlyGrossSalaryPaise:
+        parsedSalaryPaise !== undefined ? parsedSalaryPaise : existing.monthlyGrossSalaryPaise,
+      paymentMode: paymentMode || existing.paymentMode || '',
+      bankBranchName: bankBranchName || existing.bankBranchName || '',
+      upiId: upiId || existing.upiId || '',
+      permanentAddress: permanentAddress || existing.permanentAddress || '',
+      emergencyContactName: emergencyContactName || existing.emergencyContactName || '',
+      nomineeName: nomineeName || existing.nomineeName || '',
+      nomineeRelation: nomineeRelation || existing.nomineeRelation || '',
+      hrRemarks: hrRemarks || existing.hrRemarks || '',
       customFields: mergedCustomFields,
       existingEmployee: existing,
       diffs,

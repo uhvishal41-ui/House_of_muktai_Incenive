@@ -305,9 +305,12 @@ export function LoginView() {
                       id="adminUsername"
                       type="text"
                       autoComplete="username"
-                      placeholder="e.g. HOMADMIN"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      placeholder="e.g. muktai_admin or HOMADMIN"
                       value={adminUsername}
-                      onChange={(e) => setAdminUsername(e.target.value.toUpperCase())}
+                      onChange={(e) => setAdminUsername(e.target.value)}
                       className="w-full h-11 px-3.5 rounded-xl border border-slate-300 bg-white text-sm text-slate-900 font-mono placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0F1F3D]/20 focus:border-[#0F1F3D]"
                     />
                   </div>

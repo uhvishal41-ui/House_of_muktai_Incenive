@@ -8,9 +8,9 @@ import {
 const GEMINI_CONVERSE_MODEL = 'gemini-4-hydrogen';
 const GEMINI_CONVERSE_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
 const GEMINI_TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
-const DEFAULT_ELEVENLABS_MODEL_ID: ElevenLabsModelId = 'eleven_v3';
+const DEFAULT_ELEVENLABS_MODEL_ID: ElevenLabsModelId = 'eleven_flash_v2_5';
 
-export type ElevenLabsModelId = 'eleven_v3' | 'eleven_flash_v2_5' | 'eleven_multilingual_v2';
+export type ElevenLabsModelId = 'eleven_flash_v2_5' | 'eleven_v3' | 'eleven_multilingual_v2';
 export type ElevenLabsHealthStatus =
   | 'ready'
   | 'missing_key'
@@ -37,10 +37,20 @@ export type ElevenLabsHttpErrorKind =
   | 'voice_error';
 
 const ALLOWED_ELEVENLABS_MODELS: readonly ElevenLabsModelId[] = [
-  'eleven_v3',
   'eleven_flash_v2_5',
+  'eleven_v3',
   'eleven_multilingual_v2',
 ];
+export const ELEVENLABS_STREAM_OUTPUT_FORMAT = 'mp3_22050_32';
+export const ELEVENLABS_OPTIMIZE_STREAMING_LATENCY = 3;
+
+interface CachedSpeechBufferEntry {
+  provider: 'elevenlabs';
+  mimeType: string;
+  buffer: Buffer;
+  modelUsed: ElevenLabsModelId;
+  voiceId: string;
+}
 
 let cachedClient: GoogleGenAI | null = null;
 let cachedKey = '';
@@ -49,8 +59,8 @@ let elevenLabsCooldownUntil = 0;
 let freeTierIpBlockedCooldownUntil = 0;
 let invalidElevenLabsKeyCached = '';
 let paidOnlyVoiceIdCached = '';
-const ttsAudioCache = new Map<string, SynthesizedSpeechResult>();
-const MAX_TTS_CACHE_ITEMS = 40;
+const ttsAudioCache = new Map<string, CachedSpeechBufferEntry>();
+const MAX_TTS_CACHE_ITEMS = 80;
 
 export function isPlausibleElevenLabsApiKey(key: string): boolean {
   if (!key) return false;
@@ -191,6 +201,17 @@ export function resolveElevenLabsConfig(env: NodeJS.ProcessEnv = process.env): {
   };
 }
 
+export function buildElevenLabsStreamUrl(
+  voiceId: string,
+  modelId: ElevenLabsModelId,
+): string {
+  const query =
+    modelId === 'eleven_v3'
+      ? `?output_format=${ELEVENLABS_STREAM_OUTPUT_FORMAT}`
+      : `?output_format=${ELEVENLABS_STREAM_OUTPUT_FORMAT}&optimize_streaming_latency=${ELEVENLABS_OPTIMIZE_STREAMING_LATENCY}`;
+  return `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream${query}`;
+}
+
 export function buildElevenLabsRequestPayload(params: {
   text: string;
   modelId: ElevenLabsModelId;
@@ -210,13 +231,14 @@ export function buildElevenLabsRequestPayload(params: {
     };
   }
   // Do NOT pass language_code to eleven_flash_v2_5 or eleven_multilingual_v2 (Marathi is not in their enum).
+  // Keep style at 0.0 for lowest ElevenLabs inference latency.
   return {
     text: params.text,
     model_id: params.modelId,
     voice_settings: {
       stability: 0.48,
       similarity_boost: 0.8,
-      style: 0.2,
+      style: 0.0,
       use_speaker_boost: true,
     },
   };
@@ -495,7 +517,7 @@ export async function runMarathiVoiceTurn(params: {
       usedModel = secondModel;
     } catch (secondErr) {
       if (!isRetryableOrQuotaError(secondErr)) throw secondErr;
-      await sleep(1600);
+      await sleep(450);
       response = await invokeModel(secondModel, crossModelContents);
       usedModel = secondModel;
     }
@@ -557,25 +579,64 @@ export function getElevenLabsErrorMessageMr(reason: ElevenLabsFallbackReason): s
   }
 }
 
-async function callElevenLabsModel(params: {
+export interface OpenedMarathiSpeechStream {
+  provider: 'elevenlabs';
+  mimeType: string;
+  modelUsed: ElevenLabsModelId;
+  voiceId: string;
+  cacheHit: boolean;
+  buffer?: Buffer;
+  stream?: ReadableStream<Uint8Array>;
+  onCompleteBuffer?: (fullBuffer: Buffer) => void;
+}
+
+function normalizeTtsCacheText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, 900);
+}
+
+function buildTtsCacheKey(
+  elConfig: ReturnType<typeof resolveElevenLabsConfig>,
+  cleanText: string,
+): string {
+  return `${elConfig.voiceId}::${elConfig.primaryModelId}::${ELEVENLABS_STREAM_OUTPUT_FORMAT}::${cleanText}`;
+}
+
+function readTtsCache(key: string): CachedSpeechBufferEntry | null {
+  const hit = ttsAudioCache.get(key);
+  if (!hit) return null;
+  // Refresh LRU recency so hot phrases stay permanently cached in RAM
+  ttsAudioCache.delete(key);
+  ttsAudioCache.set(key, hit);
+  return hit;
+}
+
+function storeTtsCache(key: string, value: CachedSpeechBufferEntry): void {
+  if (!value.buffer || value.buffer.byteLength === 0) return;
+  // Guard Render 512MB RAM against unusually huge clips (>350KB)
+  if (value.buffer.byteLength > 350 * 1024) return;
+  if (ttsAudioCache.has(key)) {
+    ttsAudioCache.delete(key);
+  } else if (ttsAudioCache.size >= MAX_TTS_CACHE_ITEMS) {
+    const oldestKey = ttsAudioCache.keys().next().value;
+    if (oldestKey) ttsAudioCache.delete(oldestKey);
+  }
+  ttsAudioCache.set(key, value);
+}
+
+async function openElevenLabsModelStream(params: {
   apiKey: string;
   voiceId: string;
   text: string;
   modelId: ElevenLabsModelId;
   timeoutMs: number;
 }): Promise<{
-  result: SynthesizedSpeechResult | null;
+  response: Response | null;
   errorKind?: ElevenLabsHttpErrorKind;
 }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), params.timeoutMs);
   try {
-    const query =
-      params.modelId === 'eleven_v3'
-        ? '?output_format=mp3_44100_128'
-        : '?output_format=mp3_44100_128&optimize_streaming_latency=3';
-    const url =
-      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(params.voiceId)}${query}`;
+    const url = buildElevenLabsStreamUrl(params.voiceId, params.modelId);
     const bodyPayload = buildElevenLabsRequestPayload({
       text: params.text,
       modelId: params.modelId,
@@ -595,46 +656,36 @@ async function callElevenLabsModel(params: {
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => '');
       return {
-        result: null,
+        response: null,
         errorKind: classifyElevenLabsHttpError(resp.status, errBody),
       };
     }
 
-    const arrayBuf = await resp.arrayBuffer();
-    if (arrayBuf.byteLength === 0) {
-      return { result: null, errorKind: 'voice_error' };
-    }
-
-    return {
-      result: {
-        provider: 'elevenlabs',
-        mimeType: 'audio/mpeg',
-        audioBase64: Buffer.from(arrayBuf).toString('base64'),
-        modelUsed: params.modelId,
-        voiceId: params.voiceId,
-      },
-    };
+    return { response: resp };
   } catch {
-    return { result: null, errorKind: 'voice_error' };
+    return { response: null, errorKind: 'voice_error' };
   } finally {
     clearTimeout(timer);
   }
 }
 
 /**
- * STRICT SINGLE SELECTED VOICE ONLY:
- * Calls ElevenLabs ONLY with the owner's configured Render ELEVENLABS_VOICE_ID.
+ * STRICT SINGLE SELECTED VOICE STREAMING ENGINE:
+ * Connects directly to ElevenLabs `/v1/text-to-speech/{voice_id}/stream` with
+ * `eleven_flash_v2_5` primary, `optimize_streaming_latency=3`, and `mp3_22050_32`.
  * Never switches to Sarah, Rachel, Alice, Laura, or any other voice.
  */
-async function synthesizeViaElevenLabs(
+export async function openMarathiSpeechStream(
   text: string,
   options?: { forceRefresh?: boolean },
-): Promise<{
-  result: SynthesizedSpeechResult | null;
-  fallbackReason?: ElevenLabsFallbackReason;
-}> {
+): Promise<OpenedMarathiSpeechStream> {
+  const cleanText = normalizeTtsCacheText(text);
+  if (!cleanText) {
+    throw new ElevenLabsSpeechError('voice_error', 'बोलण्यासाठी मजकूर उपलब्ध नाही.');
+  }
+
   if (options?.forceRefresh) {
-    // Allow explicit "आवाज तपासा" checks to re-verify ElevenLabs cleanly
+    // Allow explicit "आवाज तपासा" recovery checks to re-verify ElevenLabs cleanly
     elevenLabsCooldownUntil = 0;
     freeTierIpBlockedCooldownUntil = 0;
     paidOnlyVoiceIdCached = '';
@@ -643,86 +694,164 @@ async function synthesizeViaElevenLabs(
 
   const config = resolveElevenLabsConfig(process.env);
   if (config.status !== 'ready') {
-    return { result: null, fallbackReason: config.status };
+    throw new ElevenLabsSpeechError(config.status, getElevenLabsErrorMessageMr(config.status));
+  }
+
+  const cacheKey = buildTtsCacheKey(config, cleanText);
+  if (!options?.forceRefresh) {
+    const cached = readTtsCache(cacheKey);
+    if (cached) {
+      return {
+        provider: 'elevenlabs',
+        mimeType: cached.mimeType,
+        modelUsed: cached.modelUsed,
+        voiceId: cached.voiceId,
+        cacheHit: true,
+        buffer: cached.buffer,
+      };
+    }
   }
 
   for (const modelId of config.modelChain) {
-    const attempt = await callElevenLabsModel({
+    const attempt = await openElevenLabsModelStream({
       apiKey: config.apiKey,
       voiceId: config.voiceId,
-      text,
+      text: cleanText,
       modelId,
-      timeoutMs: modelId === 'eleven_v3' ? 11000 : modelId === 'eleven_flash_v2_5' ? 8000 : 10000,
+      timeoutMs: modelId === 'eleven_flash_v2_5' ? 6500 : modelId === 'eleven_v3' ? 9000 : 8000,
     });
 
-    if (attempt.result) {
-      return { result: attempt.result };
+    if (attempt.response) {
+      if (attempt.response.body) {
+        return {
+          provider: 'elevenlabs',
+          mimeType: 'audio/mpeg',
+          modelUsed: modelId,
+          voiceId: config.voiceId,
+          cacheHit: false,
+          stream: attempt.response.body,
+          onCompleteBuffer: (fullBuffer: Buffer) => {
+            storeTtsCache(cacheKey, {
+              provider: 'elevenlabs',
+              mimeType: 'audio/mpeg',
+              buffer: fullBuffer,
+              modelUsed: modelId,
+              voiceId: config.voiceId,
+            });
+          },
+        };
+      }
+
+      const arrayBuf = await attempt.response.arrayBuffer();
+      if (arrayBuf.byteLength > 0) {
+        const buffer = Buffer.from(arrayBuf);
+        storeTtsCache(cacheKey, {
+          provider: 'elevenlabs',
+          mimeType: 'audio/mpeg',
+          buffer,
+          modelUsed: modelId,
+          voiceId: config.voiceId,
+        });
+        return {
+          provider: 'elevenlabs',
+          mimeType: 'audio/mpeg',
+          modelUsed: modelId,
+          voiceId: config.voiceId,
+          cacheHit: false,
+          buffer,
+        };
+      }
+      continue;
     }
 
     if (attempt.errorKind === 'library_voice_paid_only') {
       paidOnlyVoiceIdCached = config.voiceId;
-      return { result: null, fallbackReason: 'voice_paid_plan_required' };
+      throw new ElevenLabsSpeechError(
+        'voice_paid_plan_required',
+        getElevenLabsErrorMessageMr('voice_paid_plan_required'),
+      );
     }
 
     if (attempt.errorKind === 'free_tier_ip_blocked') {
       freeTierIpBlockedCooldownUntil = Date.now() + 5 * 60_000;
-      return { result: null, fallbackReason: 'free_tier_ip_blocked' };
+      throw new ElevenLabsSpeechError(
+        'free_tier_ip_blocked',
+        getElevenLabsErrorMessageMr('free_tier_ip_blocked'),
+      );
     }
 
     if (attempt.errorKind === 'auth_rejected') {
       invalidElevenLabsKeyCached = config.apiKey;
-      return { result: null, fallbackReason: 'auth_rejected' };
+      throw new ElevenLabsSpeechError('auth_rejected', getElevenLabsErrorMessageMr('auth_rejected'));
     }
 
     if (attempt.errorKind === 'quota_exceeded') {
       elevenLabsCooldownUntil = Date.now() + 5 * 60_000;
-      return { result: null, fallbackReason: 'quota_cooldown' };
+      throw new ElevenLabsSpeechError(
+        'quota_cooldown',
+        getElevenLabsErrorMessageMr('quota_cooldown'),
+      );
     }
     // Otherwise 'voice_error': try next model in modelChain on the EXACT SAME selected voiceId
   }
 
-  return { result: null, fallbackReason: 'voice_error' };
-}
-
-function storeTtsCache(key: string, value: SynthesizedSpeechResult): void {
-  if (ttsAudioCache.size >= MAX_TTS_CACHE_ITEMS) {
-    const oldestKey = ttsAudioCache.keys().next().value;
-    if (oldestKey) ttsAudioCache.delete(oldestKey);
-  }
-  ttsAudioCache.set(key, value);
+  throw new ElevenLabsSpeechError('voice_error', getElevenLabsErrorMessageMr('voice_error'));
 }
 
 /**
- * STRICT ELEVENLABS-ONLY Marathi female voice synthesis.
+ * STRICT ELEVENLABS-ONLY Marathi female voice synthesis (buffered JSON compatibility wrapper).
+ * Shares the exact same streaming endpoint, single-voice lock, and LRU in-memory buffer cache.
  * Never falls back to Gemini TTS, Google Translate TTS, or robotic browser speech.
  */
 export async function synthesizeMarathiSpeech(
   text: string,
   options?: { forceRefresh?: boolean },
 ): Promise<SynthesizedSpeechResult> {
-  const cleanText = text.trim().slice(0, 900);
-  if (!cleanText) {
-    throw new ElevenLabsSpeechError('voice_error', 'बोलण्यासाठी मजकूर उपलब्ध नाही.');
+  const opened = await openMarathiSpeechStream(text, options);
+
+  if (opened.buffer) {
+    return {
+      provider: 'elevenlabs',
+      mimeType: opened.mimeType,
+      audioBase64: opened.buffer.toString('base64'),
+      modelUsed: opened.modelUsed,
+      voiceId: opened.voiceId,
+    };
   }
 
-  const elConfig = resolveElevenLabsConfig(process.env);
-  const cacheKey = `${elConfig.voiceId}::${elConfig.primaryModelId}::${elConfig.status}::${cleanText}`;
-
-  if (!options?.forceRefresh) {
-    const cached = ttsAudioCache.get(cacheKey);
-    if (cached) {
-      return cached;
+  if (opened.stream) {
+    const reader = opened.stream.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          chunks.push(value);
+          totalBytes += value.byteLength;
+        }
+      }
+    } finally {
+      reader.releaseLock();
     }
+
+    if (totalBytes === 0) {
+      throw new ElevenLabsSpeechError('voice_error', getElevenLabsErrorMessageMr('voice_error'));
+    }
+
+    const fullBuffer = Buffer.concat(chunks, totalBytes);
+    opened.onCompleteBuffer?.(fullBuffer);
+    return {
+      provider: 'elevenlabs',
+      mimeType: opened.mimeType,
+      audioBase64: fullBuffer.toString('base64'),
+      modelUsed: opened.modelUsed,
+      voiceId: opened.voiceId,
+    };
   }
 
-  const eleven = await synthesizeViaElevenLabs(cleanText, options);
-  if (eleven.result) {
-    storeTtsCache(cacheKey, eleven.result);
-    return eleven.result;
-  }
-
-  const reason: ElevenLabsFallbackReason = eleven.fallbackReason || 'voice_error';
-  throw new ElevenLabsSpeechError(reason, getElevenLabsErrorMessageMr(reason));
+  throw new ElevenLabsSpeechError('voice_error', getElevenLabsErrorMessageMr('voice_error'));
 }
 
 

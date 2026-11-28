@@ -7,6 +7,7 @@ import {
   FileSpreadsheet,
   FileText,
   History,
+  Lock,
   Pencil,
   Printer,
   RotateCcw,
@@ -66,6 +67,7 @@ import type {
   IncentiveVersion,
   MonthlySummary,
   PayoutRecord,
+  PayrollLockSettings,
   PortalVisibilitySettings,
   PublishedIncentive,
   SalarySlip,
@@ -83,6 +85,7 @@ interface Props {
   adjustments?: IncentiveAdjustment[];
   salarySlips?: SalarySlip[];
   visibilitySettings?: PortalVisibilitySettings;
+  payrollLockSettings?: PayrollLockSettings;
   onRefresh: () => Promise<void>;
 }
 
@@ -100,6 +103,7 @@ export function HistoryAndReports({
   adjustments = [],
   salarySlips = [],
   visibilitySettings = DEFAULT_PORTAL_VISIBILITY,
+  payrollLockSettings,
   onRefresh,
 }: Props) {
   const [subTab, setSubTab] = useState<SubTab>('batches');
@@ -202,8 +206,25 @@ export function HistoryAndReports({
     return Array.from(set).sort((a, b) => b.localeCompare(a));
   }, [availableMonths, batches, monthlySummaries]);
 
+  const lockedMonthSet = useMemo(
+    () => new Set(payrollLockSettings?.lockedMonths || []),
+    [payrollLockSettings?.lockedMonths],
+  );
+
+  const isBatchMonthLocked = (batch: ImportBatch): boolean => {
+    const startMk = (batch.periodStart || batch.businessDate || '').slice(0, 7);
+    const endMk = (batch.periodEnd || batch.businessDate || '').slice(0, 7);
+    return lockedMonthSet.has(startMk) || lockedMonthSet.has(endMk);
+  };
+
   const handleConfirmPurgeMonth = async () => {
     if (!purgingMonth) return;
+    if (lockedMonthSet.has(purgingMonth)) {
+      setMessage(
+        `${formatMonthLabel(purgingMonth)} is Payroll Locked by Main Owner. Unlock this month in Pro Executive Suite before purging records.`,
+      );
+      return;
+    }
     setPurgingInFlight(true);
     setMessage(null);
     try {
@@ -512,6 +533,12 @@ export function HistoryAndReports({
   const handleSaveBatchUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingBatch) return;
+    if (editingBatch.status === 'PUBLISHED' && isBatchMonthLocked(editingBatch)) {
+      setMessage(
+        `Batch ${editingBatch.batchId} belongs to a Payroll Locked month. Unlock the month in Pro Executive Suite before editing published statements.`,
+      );
+      return;
+    }
     setSavingBatchEdit(true);
     setMessage(null);
     try {
@@ -546,6 +573,12 @@ export function HistoryAndReports({
 
   const handleConfirmDeleteBatch = async () => {
     if (!deletingBatch) return;
+    if (deletingBatch.status === 'PUBLISHED' && isBatchMonthLocked(deletingBatch)) {
+      setMessage(
+        `Batch ${deletingBatch.batchId} belongs to a Payroll Locked month. Unlock the month in Pro Executive Suite before rolling back published records.`,
+      );
+      return;
+    }
     setDeletingInFlight(true);
     setMessage(null);
     try {
@@ -1114,6 +1147,17 @@ export function HistoryAndReports({
                 : 'Auto-Backup JSON & Execute Clean Reset'}
             </button>
           </div>
+        </div>
+      )}
+
+      {selectedMonth && lockedMonthSet.has(selectedMonth) && (
+        <div className="no-print p-3.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-950 text-xs flex items-center gap-2.5">
+          <Lock className="w-4 h-4 text-amber-700 shrink-0" />
+          <span>
+            <strong>{formatMonthLabel(selectedMonth)} is Payroll Locked</strong> by Main Owner.
+            Published batch rollbacks, edits, and month purges are protected until unlocked in{' '}
+            <strong>Pro Executive Suite</strong>.
+          </span>
         </div>
       )}
 

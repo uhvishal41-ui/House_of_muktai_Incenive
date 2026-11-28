@@ -3,6 +3,7 @@ import {
   Ban,
   CheckCircle2,
   FileDown,
+  Lock,
   MessageSquare,
   PlusCircle,
   RefreshCw,
@@ -39,6 +40,7 @@ import type {
   PaymentMode,
   PayoutRecord,
   PayoutStatus,
+  PayrollLockSettings,
   PublishedIncentive,
   QueryStatus,
 } from '../../types/incentive';
@@ -53,6 +55,7 @@ interface Props {
   payoutRecords: PayoutRecord[];
   adjustments: IncentiveAdjustment[];
   employeeQueries: EmployeeQuery[];
+  payrollLockSettings?: PayrollLockSettings;
   voiceFilter?: VoiceFilterCommand | null;
   onRefresh: () => Promise<void>;
 }
@@ -67,6 +70,7 @@ export function AdminPayoutsAndQueries({
   payoutRecords,
   adjustments,
   employeeQueries,
+  payrollLockSettings,
   voiceFilter,
   onRefresh,
 }: Props) {
@@ -176,6 +180,10 @@ export function AdminPayoutsAndQueries({
       setSelectedMonth(availableMonths[0]);
     }
   }, [availableMonths, selectedMonth]);
+
+  const isSelectedMonthLocked = Boolean(
+    selectedMonth && payrollLockSettings?.lockedMonths?.includes(selectedMonth),
+  );
 
   const employeesById = useMemo(() => {
     const map = new Map<string, Employee>();
@@ -305,6 +313,13 @@ export function AdminPayoutsAndQueries({
   const handleSavePayout = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingPayoutRow) return;
+    if (isSelectedMonthLocked) {
+      setFeedback({
+        type: 'err',
+        text: `${formatMonthLabel(selectedMonth)} is Payroll Locked by Main Owner. Unlock this month in Pro Executive Suite first.`,
+      });
+      return;
+    }
     setSavingPayout(true);
     setFeedback(null);
     try {
@@ -340,6 +355,13 @@ export function AdminPayoutsAndQueries({
 
   const handleBulkMarkPaid = async () => {
     if (selectedIds.length === 0) return;
+    if (isSelectedMonthLocked) {
+      setFeedback({
+        type: 'err',
+        text: `${formatMonthLabel(selectedMonth)} is Payroll Locked by Main Owner. Unlock this month in Pro Executive Suite first.`,
+      });
+      return;
+    }
     setBulkBusy(true);
     setFeedback(null);
     try {
@@ -417,6 +439,13 @@ export function AdminPayoutsAndQueries({
   const handleCreateAdjustment = async (e: React.FormEvent) => {
     e.preventDefault();
     setFeedback(null);
+    if (isSelectedMonthLocked) {
+      setFeedback({
+        type: 'err',
+        text: `${formatMonthLabel(selectedMonth)} is Payroll Locked by Main Owner. Unlock this month in Pro Executive Suite before adding adjustments.`,
+      });
+      return;
+    }
     const emp = employees.find((x) => x.employeeId === adjEmployeeId);
     if (!emp) {
       setFeedback({ type: 'err', text: 'Please select an employee.' });
@@ -459,6 +488,13 @@ export function AdminPayoutsAndQueries({
   };
 
   const handleVoidAdjustment = async (adjustmentId: string) => {
+    if (isSelectedMonthLocked) {
+      setFeedback({
+        type: 'err',
+        text: `${formatMonthLabel(selectedMonth)} is Payroll Locked by Main Owner. Unlock this month before voiding adjustments.`,
+      });
+      return;
+    }
     setVoidingId(adjustmentId);
     setFeedback(null);
     try {
@@ -602,6 +638,17 @@ export function AdminPayoutsAndQueries({
         </div>
       </div>
 
+      {isSelectedMonthLocked && subTab !== 'queries' && (
+        <div className="p-3.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-950 text-xs flex items-center gap-2.5">
+          <Lock className="w-4 h-4 text-amber-700 shrink-0" />
+          <span>
+            <strong>{formatMonthLabel(selectedMonth)} is Payroll Locked</strong> by Main Owner.
+            Payout settlements and bonus/deduction adjustments are read-only until unlocked in{' '}
+            <strong>Pro Executive Suite</strong>.
+          </span>
+        </div>
+      )}
+
       {feedback && (
         <div
           className={`p-3.5 rounded-lg border text-sm ${
@@ -689,7 +736,7 @@ export function AdminPayoutsAndQueries({
                 />
                 <button
                   type="button"
-                  disabled={bulkBusy}
+                  disabled={bulkBusy || isSelectedMonthLocked}
                   onClick={handleBulkMarkPaid}
                   className="h-7 px-3 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium cursor-pointer disabled:opacity-60"
                 >
@@ -904,8 +951,14 @@ export function AdminPayoutsAndQueries({
                             <div className="inline-flex items-center gap-3">
                               <button
                                 type="button"
+                                disabled={isSelectedMonthLocked}
                                 onClick={() => openPayoutDrawer(row)}
-                                className="inline-flex items-center gap-1 text-xs font-medium text-[#0F1F3D] hover:underline cursor-pointer"
+                                title={
+                                  isSelectedMonthLocked
+                                    ? 'Month is Payroll Locked by Main Owner'
+                                    : 'Update payout status'
+                                }
+                                className="inline-flex items-center gap-1 text-xs font-medium text-[#0F1F3D] hover:underline cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline"
                               >
                                 <Wallet className="w-3.5 h-3.5" />
                                 Update
@@ -1078,10 +1131,10 @@ export function AdminPayoutsAndQueries({
               <div className="flex items-end">
                 <button
                   type="submit"
-                  disabled={savingAdj}
-                  className="w-full h-9 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium disabled:opacity-60 cursor-pointer"
+                  disabled={savingAdj || isSelectedMonthLocked}
+                  className="w-full h-9 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                 >
-                  {savingAdj ? 'Saving...' : 'Add Entry'}
+                  {isSelectedMonthLocked ? 'Month Locked' : savingAdj ? 'Saving...' : 'Add Entry'}
                 </button>
               </div>
             </div>

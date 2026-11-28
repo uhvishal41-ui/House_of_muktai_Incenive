@@ -40,8 +40,8 @@ export function buildMarathiAssistantSystemInstruction(ctx: VoiceWorkspaceContex
     `  * CORRECT (ALWAYS USE): "मी तुमची काय मदत करू शकते?", "मी आताच तपासते", "मी माहिती शोधते", "मी लगेच दाखवते", "मी बदल करते", "मी सेव्ह करते", "मी पाठवते", "मी रिपोर्ट तयार करते", "मी फाईल अपलोड करते", "मी तयार आहे", "मी तुम्हाला सांगते".`,
     `  * FORBIDDEN (NEVER USE MASCULINE VERBS): NEVER say "करू शकतो", "करतो", "तपासतो", "दाखवतो", "सांगतो", "शोधतो", "बघतो", "पाठवतो", "घेतो", "देतो", "सेव्ह करतो", "अपलोड करतो", "बदलतो", "आलो", "गेलो".`,
     `- ALWAYS reply in clean, natural, warm, conversational Devanagari Marathi (polite feminine tone, NEVER robotic or literal textbook translation, NEVER raw technical errors or JSON/stack traces).`,
-    `- Keep every spoken reply crisp and reassuring: ideally 1 to 2 short sentences.`,
-    `- When an action succeeds, confirm the key detail clearly in a warm feminine tone, e.g.: "कर्मचारी क्रमांक ११३६ यांचे डिपार्टमेंट साडी डिपार्टमेंट आणि शाखा धाराशिव करून मी सेव्ह केले आहे. आणखी काही मदत हवी असेल तर सांगा, मी तयार आहे."`,
+    `- ULTRA-FAST CONCISE SPEECH (MANDATORY): Keep EVERY spoken reply strictly to 1 or 2 short, crisp, natural Marathi sentences (ideally under 25 words) so voice synthesis and playback finish quickly. Skip filler sign-offs like "आणखी काही मदत हवी असेल तर सांगा, मी तयार आहे" after normal tasks, and summarize lists/reports to only the top 2-3 key figures aloud.`,
+    `- When an action succeeds, confirm the key detail directly in 1 short feminine sentence, e.g.: "कर्मचारी ११३६ चे डिपार्टमेंट साडी आणि शाखा धाराशिव करून मी सेव्ह केले आहे."`,
     `- When using numbers in Marathi speech, natural numerals or Devanagari numerals both work; prefer clean readable Marathi phrasing (e.g., ₹१२,५०० किंवा रुपये 12,500).`,
     ``,
     `EXECUTION & SAFETY RULES:`,
@@ -73,7 +73,7 @@ export const VOICE_FUNCTION_DECLARATIONS: FunctionDeclaration[] = [
   {
     name: 'navigate_to_section',
     description:
-      'Switch the active Admin Panel page/tab or open global modals (Search, Training PPT). Use whenever user asks to open a page or view a section.',
+      'Switch the active Admin Panel page/tab or open global modals (Search, Change Password). Use whenever user asks to open a page or view a section.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -84,7 +84,7 @@ export const VOICE_FUNCTION_DECLARATIONS: FunctionDeclaration[] = [
         },
         modal: {
           type: Type.STRING,
-          description: 'Optional modal to open: search, training_ppt, change_password, none',
+          description: 'Optional modal to open: search, change_password, none',
         },
       },
       required: ['tab'],
@@ -194,7 +194,7 @@ export const VOICE_FUNCTION_DECLARATIONS: FunctionDeclaration[] = [
   {
     name: 'update_employee',
     description:
-      'Edit ANY field of an existing employee (Department, Branch/Location, Designation, Full Name, Phone, Sale ID, Base Salary, Gender, Category, DOB, DOJ, PAN, UAN, PF, ESIC, Bank Name/Account/IFSC, Address, Emergency Contact, Branch Manager flag, or ACTIVE/INACTIVE Status) and save to database immediately.',
+      'Edit ANY field of an existing employee (Department, Branch/Location, Designation, Full Name, Phone, Sale ID, Monthly Gross Salary, Date of Exit, Aadhaar Number, Gender, Category, DOB, DOJ, PAN, UAN, PF, ESIC, Bank Name/Account/IFSC, Address, Emergency Contact, Branch Manager flag, or ACTIVE/INACTIVE Status) and save to database immediately.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -216,6 +216,8 @@ export const VOICE_FUNCTION_DECLARATIONS: FunctionDeclaration[] = [
         category: { type: Type.STRING, description: 'Updated staff category' },
         dateOfBirth: { type: Type.STRING, description: 'Updated DOB (YYYY-MM-DD)' },
         dateOfJoining: { type: Type.STRING, description: 'Updated DOJ (YYYY-MM-DD)' },
+        dateOfExit: { type: Type.STRING, description: 'Date of Exit / Relieving Date (YYYY-MM-DD)' },
+        aadhaarNumber: { type: Type.STRING, description: 'Updated Aadhaar number (automatically stored masked as XXXX-XXXX-1234)' },
         panNumber: { type: Type.STRING, description: 'Updated PAN number' },
         uanNumber: { type: Type.STRING, description: 'Updated UAN number' },
         pfNumber: { type: Type.STRING, description: 'Updated PF number' },
@@ -225,9 +227,13 @@ export const VOICE_FUNCTION_DECLARATIONS: FunctionDeclaration[] = [
         bankIfsc: { type: Type.STRING, description: 'Updated Bank IFSC code' },
         address: { type: Type.STRING, description: 'Updated residential address' },
         emergencyContact: { type: Type.STRING, description: 'Updated emergency contact' },
+        monthlyGrossSalaryRupees: {
+          type: Type.NUMBER,
+          description: 'Updated Monthly Gross Salary in rupees (updates Employee Master monthlyGrossSalaryPaise directly)',
+        },
         baseSalaryRupees: {
           type: Type.NUMBER,
-          description: 'Updated Base Salary in rupees (updates customFields["Base Salary"] and if updateLatestSalarySlip is true + Main Owner, also updates latest unlocked salary slip basic)',
+          description: 'Alias for Monthly Gross Salary in rupees (updates monthlyGrossSalaryPaise directly)',
         },
         isBranchManager: { type: Type.BOOLEAN, description: 'Grant or revoke Branch Manager floor view flag' },
         reason: { type: Type.STRING, description: 'Optional audit reason for transfer or status change' },

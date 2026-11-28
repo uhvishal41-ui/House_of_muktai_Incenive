@@ -1,4 +1,5 @@
 import { auth } from '../lib/firebase';
+import { maskAadhaarNumber } from '../lib/employeeMasterExport';
 import {
   formatINRFromPaise,
   formatMonthLabel,
@@ -176,7 +177,7 @@ export interface VoiceToolExecutionEnv {
   linkedFolder: LinkedLocalFolderState;
   setLinkedFolder: (next: LinkedLocalFolderState) => void;
   navigateToTab: (tab: AdminNavTab) => void;
-  openModal: (modal: 'search' | 'training_ppt' | 'change_password') => void;
+  openModal: (modal: 'search' | 'change_password') => void;
   applyVoiceFilter: (cmd: Omit<VoiceFilterCommand, 'version'>) => void;
   refreshAll: () => Promise<void>;
   refreshScope?: (scope: VoiceRefreshScope) => Promise<void>;
@@ -607,15 +608,6 @@ export async function executeVoiceToolCall(
         env.openModal('search');
         return { ok: true, modalOpened: 'search', directReplyMr: 'ग्लोबल सर्च उघडले आहे.' };
       }
-      if (modal === 'training_ppt') {
-        env.onLiveStatus('ट्रेनिंग प्रेझेंटेशन उघडत आहे...');
-        env.openModal('training_ppt');
-        return {
-          ok: true,
-          modalOpened: 'training_ppt',
-          directReplyMr: 'ट्रेनिंग प्रेझेंटेशन उघडले आहे.',
-        };
-      }
       if (modal === 'change_password') {
         env.onLiveStatus('पासवर्ड बदलण्याची विंडो उघडत आहे...');
         env.openModal('change_password');
@@ -922,7 +914,7 @@ export async function executeVoiceToolCall(
         ok: true,
         employee: summarizeEmployee(result.employee),
         provisioningNote: result.provisioningNote || '',
-        directReplyMr: `नवीन कर्मचारी क्रमांक ${result.employee.employeeId} (${result.employee.fullName}) शाखा ${result.employee.branchName} मध्ये यशस्वीरित्या जोडले आहेत. तुम्ही दिलेला टास्क पूर्ण झाला आहे.`,
+        directReplyMr: `नवीन कर्मचारी क्रमांक ${result.employee.employeeId} (${result.employee.fullName}) शाखा ${result.employee.branchName} मध्ये यशस्वीरित्या जोडले आहेत.`,
       };
     }
 
@@ -993,12 +985,26 @@ export async function executeVoiceToolCall(
         (targetStatusRaw === 'ACTIVE' || targetStatusRaw === 'INACTIVE') &&
         targetStatusRaw !== emp.status;
 
-      // Custom fields (e.g., Base Salary)
+      // Monthly Gross Salary (primary Employee Master field) + optional Date of Exit & masked Aadhaar
       const nextCustomFields: Record<string, string> = { ...(emp.customFields || {}) };
-      const baseSalaryRupees = asNum(args.baseSalaryRupees);
-      if (baseSalaryRupees !== undefined && baseSalaryRupees >= 0) {
-        nextCustomFields['Base Salary'] = String(Math.round(baseSalaryRupees));
-        changesApplied.push(`Base Salary -> ₹${Math.round(baseSalaryRupees)}`);
+      const salaryRupees = asNum(args.monthlyGrossSalaryRupees) ?? asNum(args.baseSalaryRupees);
+      let nextMonthlyGrossSalaryPaise = emp.monthlyGrossSalaryPaise;
+      if (salaryRupees !== undefined && salaryRupees >= 0) {
+        nextMonthlyGrossSalaryPaise = Math.round(salaryRupees * 100);
+        changesApplied.push(`Monthly Gross Salary -> ₹${Math.round(salaryRupees)}`);
+      }
+
+      const rawDateOfExit = args.dateOfExit !== undefined ? asStr(args.dateOfExit) : undefined;
+      const nextDateOfExit = rawDateOfExit !== undefined ? rawDateOfExit : emp.dateOfExit;
+      if (rawDateOfExit !== undefined && rawDateOfExit !== (emp.dateOfExit || '')) {
+        changesApplied.push(`Date of Exit -> ${rawDateOfExit || 'Cleared'}`);
+      }
+
+      const rawAadhaar = args.aadhaarNumber !== undefined ? asStr(args.aadhaarNumber) : undefined;
+      const nextAadhaarMasked =
+        rawAadhaar !== undefined ? (rawAadhaar ? maskAadhaarNumber(rawAadhaar) : '') : emp.aadhaarMasked;
+      if (rawAadhaar !== undefined && nextAadhaarMasked !== (emp.aadhaarMasked || '')) {
+        changesApplied.push(`Aadhaar -> ${nextAadhaarMasked || 'Cleared'}`);
       }
 
       // Perform branch transfer first if branch changed (consolidates prior branch incentives!)
@@ -1024,6 +1030,8 @@ export async function executeVoiceToolCall(
         'category',
         'dateOfBirth',
         'dateOfJoining',
+        'dateOfExit',
+        'aadhaarNumber',
         'panNumber',
         'uanNumber',
         'pfNumber',
@@ -1033,6 +1041,7 @@ export async function executeVoiceToolCall(
         'bankIfsc',
         'address',
         'emergencyContact',
+        'monthlyGrossSalaryRupees',
         'baseSalaryRupees',
         'isBranchManager',
       ].some((k) => args[k] !== undefined && args[k] !== '');
@@ -1059,6 +1068,9 @@ export async function executeVoiceToolCall(
           category: args.category !== undefined ? asStr(args.category) : emp.category,
           dateOfBirth: args.dateOfBirth !== undefined ? asStr(args.dateOfBirth) : emp.dateOfBirth,
           dateOfJoining: args.dateOfJoining !== undefined ? asStr(args.dateOfJoining) : emp.dateOfJoining,
+          dateOfExit: nextDateOfExit,
+          aadhaarMasked: nextAadhaarMasked,
+          monthlyGrossSalaryPaise: nextMonthlyGrossSalaryPaise,
           panNumber: args.panNumber !== undefined ? asStr(args.panNumber) : emp.panNumber,
           uanNumber: args.uanNumber !== undefined ? asStr(args.uanNumber) : emp.uanNumber,
           pfNumber: args.pfNumber !== undefined ? asStr(args.pfNumber) : emp.pfNumber,
@@ -1097,7 +1109,9 @@ export async function executeVoiceToolCall(
       if (deptRaw && nextDeptName) detailBits.push(`डिपार्टमेंट ${nextDeptName}`);
       if (branchChanged) detailBits.push(`शाखा ${targetBranchName}`);
       if (args.designation) detailBits.push(`पद ${asStr(args.designation)}`);
-      if (baseSalaryRupees !== undefined) detailBits.push(`मूळ पगार ₹${Math.round(baseSalaryRupees)}`);
+      if (salaryRupees !== undefined) detailBits.push(`मासिक पगार ₹${Math.round(salaryRupees)}`);
+      if (rawDateOfExit !== undefined) detailBits.push(`एक्झिट तारीख ${rawDateOfExit || 'काढली'}`);
+      if (rawAadhaar !== undefined) detailBits.push('आधार क्रमांक');
       if (statusChanged) detailBits.push(`स्टेटस ${targetStatusRaw}`);
       if (args.phone !== undefined) detailBits.push('मोबाईल नंबर');
       const updatedName = asStr(args.fullName) || emp.fullName;
@@ -1111,8 +1125,8 @@ export async function executeVoiceToolCall(
         changesApplied,
         directReplyMr:
           detailBits.length > 0
-            ? `कर्मचारी क्रमांक ${emp.employeeId} (${updatedName}) यांचे ${detailBits.join(' आणि ')} अपडेट करून सेव्ह केले आहे. तुम्ही दिलेला टास्क पूर्ण झाला आहे.`
-            : `कर्मचारी क्रमांक ${emp.employeeId} (${updatedName}) यांची माहिती अपडेट करून सेव्ह केली आहे. तुम्ही दिलेला टास्क पूर्ण झाला आहे.`,
+            ? `कर्मचारी क्रमांक ${emp.employeeId} (${updatedName}) यांचे ${detailBits.join(' आणि ')} अपडेट करून सेव्ह केले आहे.`
+            : `कर्मचारी क्रमांक ${emp.employeeId} (${updatedName}) यांची माहिती अपडेट करून सेव्ह केली आहे.`,
       };
     }
 
@@ -1163,7 +1177,7 @@ export async function executeVoiceToolCall(
       return {
         ok: true,
         deletedEmployee: summarizeEmployee(exact),
-        directReplyMr: `कर्मचारी क्रमांक ${exact.employeeId} (${exact.fullName}) कायमचे डिलीट केले आहेत. तुम्ही दिलेला टास्क पूर्ण झाला आहे.`,
+        directReplyMr: `कर्मचारी क्रमांक ${exact.employeeId} (${exact.fullName}) कायमचे डिलीट केले आहेत.`,
       };
     }
 
@@ -1218,7 +1232,7 @@ export async function executeVoiceToolCall(
           monthKey,
           type,
           amountRupees: amount,
-          directReplyMr: `${exact.fullName} यांच्यासाठी ${formatMonthLabel(monthKey)} मध्ये ₹${amount} चे ${type} अ‍ॅडजस्टमेंट सेव्ह केले आहे. तुम्ही दिलेला टास्क पूर्ण झाला आहे.`,
+          directReplyMr: `${exact.fullName} यांच्यासाठी ${formatMonthLabel(monthKey)} मध्ये ₹${amount} चे ${type} अ‍ॅडजस्टमेंट सेव्ह केले आहे.`,
         };
       }
 
@@ -1276,7 +1290,7 @@ export async function executeVoiceToolCall(
           monthKey,
           type,
           amountRupees: amount,
-          directReplyMr: `${targetEmps.length} कर्मचाऱ्यांसाठी ₹${amount} चे ${type} यशस्वीरित्या सेव्ह केले आहे. तुम्ही दिलेला टास्क पूर्ण झाला आहे.`,
+          directReplyMr: `${targetEmps.length} कर्मचाऱ्यांसाठी ₹${amount} चे ${type} यशस्वीरित्या सेव्ह केले आहे.`,
         };
       }
 
@@ -1384,7 +1398,7 @@ export async function executeVoiceToolCall(
           employeeName: exact.fullName,
           status: saved.status,
           netPayable: formatINRFromPaise(saved.netPayablePaise),
-          directReplyMr: `${exact.fullName} यांचे ${formatMonthLabel(monthKey)} चे पेआउट ${saved.status} करून सेव्ह केले आहे. तुम्ही दिलेला टास्क पूर्ण झाला आहे.`,
+          directReplyMr: `${exact.fullName} यांचे ${formatMonthLabel(monthKey)} चे पेआउट ${saved.status} करून सेव्ह केले आहे.`,
         };
       }
 
@@ -1471,7 +1485,7 @@ export async function executeVoiceToolCall(
           status,
           branch: branch?.branchName || 'All Branches',
           department: resolvedDept?.departmentName || 'All Departments',
-          directReplyMr: `${scopeLabel ? `${scopeLabel} मधील ` : 'सर्व शाखांमधील '}${items.length} कर्मचाऱ्यांचे ${formatMonthLabel(monthKey)} चे पेआउट ${status} केले आहे. तुम्ही दिलेला टास्क पूर्ण झाला आहे.`,
+          directReplyMr: `${scopeLabel ? `${scopeLabel} मधील ` : 'सर्व शाखांमधील '}${items.length} कर्मचाऱ्यांचे ${formatMonthLabel(monthKey)} चे पेआउट ${status} केले आहे.`,
         };
       }
 
@@ -1939,7 +1953,7 @@ export async function executeVoiceToolCall(
           sampleErrors: summary.errorRows
             .slice(0, 3)
             .map((r) => `Row ${r.rowNumber}: ${r.errorMessage}`),
-          directReplyMr: `${entry.name} मधील ${pubResult.slipsPublished} सॅलरी स्लिप्स ${formatMonthLabel(targetMonthKey)} मध्ये यशस्वीरित्या अपलोड झाल्या आहेत. तुम्ही दिलेला टास्क पूर्ण झाला आहे.`,
+          directReplyMr: `${entry.name} मधील ${pubResult.slipsPublished} सॅलरी स्लिप्स ${formatMonthLabel(targetMonthKey)} मध्ये यशस्वीरित्या अपलोड झाल्या आहेत.`,
         };
       }
 

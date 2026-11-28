@@ -186,7 +186,7 @@ service cloud.firestore {
           'createdByEmail', 'createdAt', 'updatedAt'
         ])
         && isValidId(data.uid)
-        && (!('username' in data) || (data.username is string && data.username.size() >= 3 && data.username.size() <= 40 && data.username.matches('^[A-Z0-9_\\-]+$')))
+        && (!('username' in data) || (data.username is string && data.username.size() >= 3 && data.username.size() <= 40 && data.username.matches('^[a-zA-Z0-9_\\-]+$')))
         && isNonEmptyString(data.email, 180)
         && isNonEmptyString(data.displayName, 120)
         && data.role == 'SUPER_ADMIN'
@@ -235,9 +235,16 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'employeeId', 'saleId', 'loginId', 'authEmail', 'linkedGoogleEmail', 'authUid', 'fullName',
           'branchId', 'branchName', 'departmentId', 'departmentName', 'photoDataUrl',
-          'designation', 'gender', 'category', 'dateOfBirth', 'dateOfJoining', 'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
-          'bankName', 'bankAccountMasked', 'bankIfsc',
-          'phone', 'address', 'emergencyContact', 'customFields',
+          'designation', 'gender', 'category',
+          'fatherOrSpouseName', 'maritalStatus', 'bloodGroup', 'qualification',
+          'dateOfBirth', 'dateOfJoining', 'dateOfExit', 'exitReason',
+          'employmentType', 'reportingManager', 'shiftTiming', 'weeklyOffDay', 'uniformSize',
+          'aadhaarMasked', 'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
+          'bankName', 'bankBranchName', 'bankAccountMasked', 'bankIfsc', 'upiId', 'paymentMode',
+          'monthlyGrossSalaryPaise',
+          'phone', 'alternatePhone', 'personalEmail', 'address', 'permanentAddress',
+          'emergencyContactName', 'emergencyContact', 'nomineeName', 'nomineeRelation', 'hrRemarks',
+          'customFields',
           'role', 'isBranchManager', 'status', 'mustChangePassword', 'credentialsProvisioned', 'createdAt', 'updatedAt'
         ])
         && isValidId(data.employeeId)
@@ -255,18 +262,41 @@ service cloud.firestore {
         && isNonEmptyString(data.designation, 80)
         && isOptionalString(data, 'gender', 20)
         && isOptionalString(data, 'category', 40)
+        && isOptionalString(data, 'fatherOrSpouseName', 120)
+        && isOptionalString(data, 'maritalStatus', 24)
+        && isOptionalString(data, 'bloodGroup', 12)
+        && isOptionalString(data, 'qualification', 80)
         && isOptionalString(data, 'dateOfBirth', 20)
         && isOptionalString(data, 'dateOfJoining', 20)
+        && isOptionalString(data, 'dateOfExit', 20)
+        && isOptionalString(data, 'exitReason', 200)
+        && isOptionalString(data, 'employmentType', 32)
+        && isOptionalString(data, 'reportingManager', 120)
+        && isOptionalString(data, 'shiftTiming', 60)
+        && isOptionalString(data, 'weeklyOffDay', 24)
+        && isOptionalString(data, 'uniformSize', 16)
+        && isOptionalString(data, 'aadhaarMasked', 20)
         && isOptionalString(data, 'panNumber', 20)
         && isOptionalString(data, 'uanNumber', 24)
         && isOptionalString(data, 'pfNumber', 32)
         && isOptionalString(data, 'esicNumber', 32)
         && isOptionalString(data, 'bankName', 80)
+        && isOptionalString(data, 'bankBranchName', 100)
         && isOptionalString(data, 'bankAccountMasked', 32)
         && isOptionalString(data, 'bankIfsc', 20)
+        && isOptionalString(data, 'upiId', 80)
+        && isOptionalString(data, 'paymentMode', 40)
+        && isOptionalNonNegInt(data, 'monthlyGrossSalaryPaise')
         && isOptionalString(data, 'phone', 24)
+        && isOptionalString(data, 'alternatePhone', 24)
+        && isOptionalString(data, 'personalEmail', 180)
         && isOptionalString(data, 'address', 240)
+        && isOptionalString(data, 'permanentAddress', 240)
+        && isOptionalString(data, 'emergencyContactName', 120)
         && isOptionalString(data, 'emergencyContact', 120)
+        && isOptionalString(data, 'nomineeName', 120)
+        && isOptionalString(data, 'nomineeRelation', 60)
+        && isOptionalString(data, 'hrRemarks', 300)
         && (!('customFields' in data) || (data.customFields is map && data.customFields.size() <= 25))
         && data.role == 'EMPLOYEE'
         && isOptionalBool(data, 'isBranchManager')
@@ -275,6 +305,47 @@ service cloud.firestore {
         && data.credentialsProvisioned is bool
         && isNonEmptyString(data.createdAt, 40)
         && isNonEmptyString(data.updatedAt, 40);
+    }
+
+    // Dedicated strict validator for Active Employee self-updates (first-login password flag + contact info)
+    // Validates every permitted mutable field while guaranteeing all Admin-managed fields remain 100% immutable.
+    function isValidEmployeeSelfUpdate(oldData, newData) {
+      return oldData.authUid == request.auth.uid
+        && oldData.status == 'ACTIVE'
+        && newData.employeeId == oldData.employeeId
+        && newData.authUid == oldData.authUid
+        && newData.loginId == oldData.loginId
+        && newData.authEmail == oldData.authEmail
+        && newData.branchId == oldData.branchId
+        && newData.branchName == oldData.branchName
+        && newData.role == oldData.role
+        && newData.status == oldData.status
+        && (!('createdAt' in oldData) || newData.createdAt == oldData.createdAt)
+        && newData.diff(oldData).affectedKeys().hasOnly([
+          'phone', 'address', 'emergencyContact', 'mustChangePassword', 'updatedAt'
+        ])
+        && (!newData.diff(oldData).affectedKeys().hasAny(['phone']) || (newData.phone is string && newData.phone.size() <= 24))
+        && (!newData.diff(oldData).affectedKeys().hasAny(['address']) || (newData.address is string && newData.address.size() <= 240))
+        && (!newData.diff(oldData).affectedKeys().hasAny(['emergencyContact']) || (newData.emergencyContact is string && newData.emergencyContact.size() <= 120))
+        && (!newData.diff(oldData).affectedKeys().hasAny(['mustChangePassword']) || newData.mustChangePassword is bool)
+        && isNonEmptyString(newData.updatedAt, 40);
+    }
+
+    // Dedicated strict validator for one-time verified Google self-claim of empty authUid for ACTIVE employee
+    function isValidEmployeeGoogleSelfClaim(oldData, newData) {
+      return request.auth.token.email_verified == true
+        && oldData.status == 'ACTIVE'
+        && 'linkedGoogleEmail' in oldData
+        && oldData.linkedGoogleEmail != ''
+        && oldData.linkedGoogleEmail == request.auth.token.email
+        && (!('authUid' in oldData) || oldData.authUid == '')
+        && newData.employeeId == oldData.employeeId
+        && newData.authUid == request.auth.uid
+        && newData.status == 'ACTIVE'
+        && (!('createdAt' in oldData) || newData.createdAt == oldData.createdAt)
+        && newData.diff(oldData).affectedKeys().hasOnly(['authUid', 'updatedAt'])
+        && isNonEmptyString(newData.updatedAt, 40)
+        && isActiveRegistrySyncedAfter(newData);
     }
 
     function isValidComponentLabels(labels) {
@@ -588,6 +659,18 @@ service cloud.firestore {
         && isOptionalString(data, 'readAt', 40);
     }
 
+    function isValidNotificationReadUpdate(oldData, newData) {
+      return isActiveEmployee()
+        && oldData.authUid == request.auth.uid
+        && newData.notificationId == oldData.notificationId
+        && newData.employeeId == oldData.employeeId
+        && newData.authUid == oldData.authUid
+        && (!('createdAt' in oldData) || newData.createdAt == oldData.createdAt)
+        && newData.diff(oldData).affectedKeys().hasOnly(['read', 'readAt'])
+        && newData.read is bool
+        && isOptionalString(newData, 'readAt', 40);
+    }
+
     function isValidPayoutRecord(data) {
       return data.keys().hasAll([
           'payoutId', 'monthKey', 'employeeId', 'authUid', 'employeeName',
@@ -756,7 +839,7 @@ service cloud.firestore {
           || (data.customColumns[0] is string && data.customColumns[0].size() >= 1 && data.customColumns[0].size() <= 60)
         )
         && data.visibleColumns is list
-        && data.visibleColumns.size() <= 45
+        && data.visibleColumns.size() <= 75
         && (
           data.visibleColumns.size() == 0
           || (data.visibleColumns[0] is string && data.visibleColumns[0].size() >= 1 && data.visibleColumns[0].size() <= 70)
@@ -1156,50 +1239,36 @@ service cloud.firestore {
       allow create: if isValidId(employeeId) && isSuperAdmin() && isValidEmployee(incoming())
         && incoming().employeeId == employeeId
         && isActiveRegistrySyncedAfter(incoming());
-      allow update: if isValidId(employeeId) && isSignedIn() && isValidEmployee(incoming())
-        && incoming().employeeId == existing().employeeId
-        && incoming().createdAt == existing().createdAt
+      allow update: if isValidId(employeeId) && isSignedIn()
         && (
           // Tier 1: Super Admin full governed update + atomic active_auth_uids sync
           (
             isSuperAdmin()
+            && isValidEmployee(incoming())
+            && incoming().employeeId == existing().employeeId
+            && incoming().createdAt == existing().createdAt
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'saleId', 'loginId', 'authEmail', 'linkedGoogleEmail', 'authUid', 'fullName',
               'branchId', 'branchName', 'departmentId', 'departmentName', 'photoDataUrl',
-              'designation', 'gender', 'category', 'dateOfBirth', 'dateOfJoining', 'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
-              'bankName', 'bankAccountMasked', 'bankIfsc',
-              'phone', 'address', 'emergencyContact', 'customFields',
+              'designation', 'gender', 'category',
+              'fatherOrSpouseName', 'maritalStatus', 'bloodGroup', 'qualification',
+              'dateOfBirth', 'dateOfJoining', 'dateOfExit', 'exitReason',
+              'employmentType', 'reportingManager', 'shiftTiming', 'weeklyOffDay', 'uniformSize',
+              'aadhaarMasked', 'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
+              'bankName', 'bankBranchName', 'bankAccountMasked', 'bankIfsc', 'upiId', 'paymentMode',
+              'monthlyGrossSalaryPaise',
+              'phone', 'alternatePhone', 'personalEmail', 'address', 'permanentAddress',
+              'emergencyContactName', 'emergencyContact', 'nomineeName', 'nomineeRelation', 'hrRemarks',
+              'customFields',
               'role', 'isBranchManager', 'status', 'mustChangePassword', 'credentialsProvisioned', 'updatedAt'
             ])
             && isActiveRegistrySyncedAfter(incoming())
             && isPriorAuthUidCleanedUp(existing(), incoming())
           )
           // Tier 2a: Active employee updating own permitted profile contact fields or clearing first-login password flag
-          || (
-            existing().authUid == request.auth.uid
-            && existing().status == 'ACTIVE'
-            && incoming().authUid == existing().authUid
-            && incoming().loginId == existing().loginId
-            && incoming().authEmail == existing().authEmail
-            && incoming().branchId == existing().branchId
-            && incoming().branchName == existing().branchName
-            && incoming().role == existing().role
-            && incoming().status == existing().status
-            && incoming().diff(existing()).affectedKeys().hasOnly(['phone', 'address', 'emergencyContact', 'mustChangePassword', 'updatedAt'])
-          )
+          || isValidEmployeeSelfUpdate(existing(), incoming())
           // Tier 2b: One-time verified Google self-claim of empty authUid for ACTIVE employee (Issue 6)
-          || (
-            request.auth.token.email_verified == true
-            && existing().status == 'ACTIVE'
-            && 'linkedGoogleEmail' in existing()
-            && existing().linkedGoogleEmail != ''
-            && existing().linkedGoogleEmail == request.auth.token.email
-            && (!('authUid' in existing()) || existing().authUid == '')
-            && incoming().authUid == request.auth.uid
-            && incoming().status == 'ACTIVE'
-            && incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'updatedAt'])
-            && isActiveRegistrySyncedAfter(incoming())
-          )
+          || isValidEmployeeGoogleSelfClaim(existing(), incoming())
         );
       allow delete: if isValidId(employeeId) && isMainOwner();
     }
@@ -1339,20 +1408,28 @@ service cloud.firestore {
       allow list: if isSuperAdmin()
         || (isActiveEmployee() && resource.data.authUid == request.auth.uid && isEmployeeVisibleDoc(resource.data))
         || (isActiveBranchManager() && resource.data.branchId == activeBranchManagerBranchId() && isEmployeeVisibleDoc(resource.data));
-      allow create: if isValidId(summaryId) && isSuperAdmin() && isValidMonthlySummary(incoming()) && incoming().summaryId == summaryId;
+      allow create: if isValidId(summaryId) && isSuperAdmin() && isValidMonthlySummary(incoming())
+        && incoming().summaryId == summaryId
+        && !isMonthPayrollLocked(incoming().monthKey);
       allow update: if isValidId(summaryId) && isSuperAdmin() && isValidMonthlySummary(incoming())
         && incoming().summaryId == existing().summaryId
         && incoming().employeeId == existing().employeeId
         && incoming().monthKey == existing().monthKey
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'authUid', 'employeeName', 'branchId', 'branchName', 'sourceType',
-          'component1TotalPaise', 'component2TotalPaise', 'component3TotalPaise',
-          'grandTotalPaise',
-          'saleAmt1TotalPaise', 'saleQty1Total', 'saleAmt2TotalPaise', 'saleQty2Total',
-          'saleAmt3TotalPaise', 'saleQty3Total', 'totalSaleAmtPaise', 'totalSaleQty',
-          'publishedDaysCount', 'employeeVisible', 'updatedAt'
-        ]);
-      allow delete: if isValidId(summaryId) && isMainOwner();
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'employeeVisible'])
+          || (
+            !isMonthPayrollLocked(existing().monthKey)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'authUid', 'employeeName', 'branchId', 'branchName', 'sourceType',
+              'component1TotalPaise', 'component2TotalPaise', 'component3TotalPaise',
+              'grandTotalPaise',
+              'saleAmt1TotalPaise', 'saleQty1Total', 'saleAmt2TotalPaise', 'saleQty2Total',
+              'saleAmt3TotalPaise', 'saleQty3Total', 'totalSaleAmtPaise', 'totalSaleQty',
+              'publishedDaysCount', 'employeeVisible', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(summaryId) && isMainOwner() && !isMonthPayrollLocked(existing().monthKey);
     }
 
     // 9. Append-Only Audit Logs (SUPER ADMIN ONLY — Never deletable)
@@ -1370,18 +1447,17 @@ service cloud.firestore {
       );
       allow list: if isSuperAdmin() || (isActiveEmployee() && resource.data.authUid == request.auth.uid);
       allow create: if isValidId(notificationId) && isSuperAdmin() && isValidNotification(incoming()) && incoming().notificationId == notificationId;
-      allow update: if isValidId(notificationId) && isSignedIn() && isValidNotification(incoming())
-        && incoming().notificationId == existing().notificationId
-        && incoming().employeeId == existing().employeeId
-        && incoming().createdAt == existing().createdAt
+      allow update: if isValidId(notificationId) && isSignedIn()
         && (
-          (isSuperAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'read', 'readAt']))
-          || (
-            isActiveEmployee()
-            && existing().authUid == request.auth.uid
-            && incoming().authUid == existing().authUid
-            && incoming().diff(existing()).affectedKeys().hasOnly(['read', 'readAt'])
+          (
+            isSuperAdmin()
+            && isValidNotification(incoming())
+            && incoming().notificationId == existing().notificationId
+            && incoming().employeeId == existing().employeeId
+            && incoming().createdAt == existing().createdAt
+            && incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'read', 'readAt'])
           )
+          || isValidNotificationReadUpdate(existing(), incoming())
         );
       allow delete: if isValidId(notificationId) && isSuperAdmin();
     }
@@ -1394,18 +1470,26 @@ service cloud.firestore {
       );
       allow list: if isSuperAdmin()
         || (isActiveEmployee() && isEmployeeVisibleDoc(resource.data) && (resource.data.authUid == request.auth.uid || resource.data.employeeId == activeEmployeeId()));
-      allow create: if isValidId(payoutId) && isSuperAdmin() && isValidPayoutRecord(incoming()) && incoming().payoutId == payoutId;
+      allow create: if isValidId(payoutId) && isSuperAdmin() && isValidPayoutRecord(incoming())
+        && incoming().payoutId == payoutId
+        && !isMonthPayrollLocked(incoming().monthKey);
       allow update: if isValidId(payoutId) && isSuperAdmin() && isValidPayoutRecord(incoming())
         && incoming().payoutId == existing().payoutId
         && incoming().employeeId == existing().employeeId
         && incoming().monthKey == existing().monthKey
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'authUid', 'employeeName', 'branchId', 'branchName',
-          'grossIncentivePaise', 'adjustmentsNetPaise', 'netPayablePaise',
-          'status', 'paymentMode', 'paymentReference', 'paidAt', 'remarks',
-          'employeeVisible', 'updatedByEmail', 'updatedAt'
-        ]);
-      allow delete: if isValidId(payoutId) && isMainOwner();
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'employeeVisible'])
+          || (
+            !isMonthPayrollLocked(existing().monthKey)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'authUid', 'employeeName', 'branchId', 'branchName',
+              'grossIncentivePaise', 'adjustmentsNetPaise', 'netPayablePaise',
+              'status', 'paymentMode', 'paymentReference', 'paidAt', 'remarks',
+              'employeeVisible', 'updatedByEmail', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(payoutId) && isMainOwner() && !isMonthPayrollLocked(existing().monthKey);
     }
 
     // 12. Audited Bonus / Deduction / Advance Adjustments (Super Admin writes; Active Employee reads own ACTIVE + visible month)
@@ -1418,14 +1502,21 @@ service cloud.firestore {
         || (isActiveEmployee() && resource.data.status == 'ACTIVE' && isEmployeeVisibleDoc(resource.data) && (resource.data.authUid == request.auth.uid || resource.data.employeeId == activeEmployeeId()));
       allow create: if isValidId(adjustmentId) && isSuperAdmin() && isValidIncentiveAdjustment(incoming())
         && incoming().adjustmentId == adjustmentId
-        && incoming().status == 'ACTIVE';
+        && incoming().status == 'ACTIVE'
+        && !isMonthPayrollLocked(incoming().monthKey);
       allow update: if isValidId(adjustmentId) && isSuperAdmin() && isValidIncentiveAdjustment(incoming())
         && incoming().adjustmentId == existing().adjustmentId
         && incoming().employeeId == existing().employeeId
         && incoming().monthKey == existing().monthKey
         && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'status', 'voidedByEmail', 'voidedAt', 'employeeVisible']);
-      allow delete: if isValidId(adjustmentId) && isMainOwner();
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'employeeVisible'])
+          || (
+            !isMonthPayrollLocked(existing().monthKey)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'status', 'voidedByEmail', 'voidedAt', 'employeeVisible'])
+          )
+        );
+      allow delete: if isValidId(adjustmentId) && isMainOwner() && !isMonthPayrollLocked(existing().monthKey);
     }
 
     // 13. Monthly Sales Targets (Super Admin writes; Active Employee reads own/branch + Branch Manager own branch + visible month)
@@ -1450,12 +1541,14 @@ service cloud.firestore {
       allow delete: if isValidId(targetId) && isMainOwner();
     }
 
-    // 14. Employee Query / Dispute Tickets (Active Employee creates & reads own; Super Admin resolves)
+    // 14. Employee Query / Dispute Tickets (Active Employee creates & reads own; Super Admin resolves or syncs authUid on password reset)
     match /employee_queries/{queryId} {
       allow get: if isValidId(queryId) && (
-        isSuperAdmin() || (isActiveEmployee() && existing().authUid == request.auth.uid)
+        isSuperAdmin()
+        || (isActiveEmployee() && (existing().authUid == request.auth.uid || existing().employeeId == activeEmployeeId()))
       );
-      allow list: if isSuperAdmin() || (isActiveEmployee() && resource.data.authUid == request.auth.uid);
+      allow list: if isSuperAdmin()
+        || (isActiveEmployee() && (resource.data.authUid == request.auth.uid || resource.data.employeeId == activeEmployeeId()));
       allow create: if isValidId(queryId) && isActiveEmployee() && isValidEmployeeQuery(incoming())
         && incoming().queryId == queryId
         && incoming().authUid == request.auth.uid
@@ -1466,9 +1559,15 @@ service cloud.firestore {
       allow update: if isValidId(queryId) && isSuperAdmin() && isValidEmployeeQuery(incoming())
         && incoming().queryId == existing().queryId
         && incoming().employeeId == existing().employeeId
-        && incoming().authUid == existing().authUid
         && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminReply', 'resolvedByEmail', 'updatedAt']);
+        && (
+          (
+            incoming().authUid == existing().authUid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminReply', 'resolvedByEmail', 'updatedAt'])
+          )
+          || incoming().diff(existing()).affectedKeys().hasOnly(['authUid'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'updatedAt'])
+        );
       allow delete: if isValidId(queryId) && isMainOwner();
     }
 

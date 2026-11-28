@@ -22,5 +22,5 @@ services:
       - key: ELEVENLABS_VOICE_ID
         sync: false
       - key: ELEVENLABS_MODEL_ID
-        value: eleven_v3
+        value: eleven_flash_v2_5
 

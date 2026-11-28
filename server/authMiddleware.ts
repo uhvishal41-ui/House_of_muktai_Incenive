@@ -31,8 +31,26 @@ export type AdminLookupFn = (params: {
 
 const BOOTSTRAPPED_ADMIN_EMAIL = 'uhvishal41@gmail.com';
 const ADMIN_AUTH_DOMAIN_SUFFIX = '@admin.homfash.internal';
-const ADMIN_CACHE_TTL_MS = 60_000;
+const ADMIN_CACHE_TTL_MS = 10_000;
+const MAX_ADMIN_CACHE_ENTRIES = 200;
 const adminLookupCache = new Map<string, { expiresAt: number; doc: AdminRegistryDoc | null }>();
+
+function setAdminCacheEntry(uid: string, doc: AdminRegistryDoc | null): void {
+  const now = Date.now();
+  if (adminLookupCache.size >= MAX_ADMIN_CACHE_ENTRIES) {
+    for (const [key, entry] of adminLookupCache.entries()) {
+      if (entry.expiresAt <= now) {
+        adminLookupCache.delete(key);
+      }
+    }
+    while (adminLookupCache.size >= MAX_ADMIN_CACHE_ENTRIES) {
+      const oldestKey = adminLookupCache.keys().next().value;
+      if (!oldestKey) break;
+      adminLookupCache.delete(oldestKey);
+    }
+  }
+  adminLookupCache.set(uid, { expiresAt: now + ADMIN_CACHE_TTL_MS, doc });
+}
 
 interface FirebaseConfigInfo {
   projectId: string;
@@ -93,7 +111,7 @@ export async function lookupAdminDocViaRest(params: {
     });
 
     if (!resp.ok) {
-      adminLookupCache.set(params.uid, { expiresAt: Date.now() + ADMIN_CACHE_TTL_MS, doc: null });
+      setAdminCacheEntry(params.uid, null);
       return null;
     }
 
@@ -109,7 +127,7 @@ export async function lookupAdminDocViaRest(params: {
     const active = json.fields?.active?.booleanValue === true;
     const authType = json.fields?.authType?.stringValue || '';
     const doc = { role, active, ...(authType ? { authType } : {}) };
-    adminLookupCache.set(params.uid, { expiresAt: Date.now() + ADMIN_CACHE_TTL_MS, doc });
+    setAdminCacheEntry(params.uid, doc);
     return doc;
   } catch {
     return null;

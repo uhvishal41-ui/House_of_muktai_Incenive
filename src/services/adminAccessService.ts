@@ -2,6 +2,7 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signOut as secondarySignOut,
+  updatePassword,
 } from 'firebase/auth';
 import {
   collection,
@@ -10,14 +11,19 @@ import {
   getDocs,
   setDoc,
   updateDoc,
+  writeBatch,
 } from 'firebase/firestore';
 import {
   adminUsernameToAuthEmail,
+  adminUsernameToRotatedAuthEmail,
   auth,
   db,
+  DEFAULT_ADMIN_INITIAL_PASSWORD,
+  extractAuthEmailRotationIndex,
   getSecondaryProvisioningAuth,
   handleFirestoreError,
   MAIN_OWNER_EMAIL,
+  MAX_AUTH_ROTATION_SLOTS,
   normalizeAdminUsername,
   OperationType,
 } from '../lib/firebase';
@@ -90,7 +96,7 @@ export async function createPasswordAdminAccount(params: {
   const cleanName = params.displayName.trim().slice(0, 120);
   const password = params.initialPassword.trim();
 
-  if (!/^[A-Z0-9_-]{3,40}$/.test(cleanUsername)) {
+  if (!/^[a-zA-Z0-9_-]{3,40}$/.test(cleanUsername)) {
     throw new Error(
       'Admin Username must be 3–40 characters using letters, numbers, hyphens (-), or underscores (_).',
     );
@@ -234,3 +240,175 @@ export async function markOwnAdminPasswordChanged(): Promise<string> {
 
   return now;
 }
+
+/**
+ * Main Owner ONLY: Sets or resets any Password Admin's login password while keeping
+ * their exact Username unchanged and revoking the old credential atomically.
+ * - Never stores plaintext passwords in Firestore or Audit Logs.
+ * - Uses isolated secondary Firebase Auth instance so Main Owner's Google session stays intact.
+ */
+export async function ownerSetAdminPassword(params: {
+  admin: AdminAccountRecord;
+  newPassword: string;
+  mustChangePassword?: boolean;
+}): Promise<AdminAccountRecord> {
+  const owner = requireMainOwnerActor();
+  const { admin } = params;
+  const cleanPassword = params.newPassword.trim();
+  const requireChange = Boolean(params.mustChangePassword);
+
+  if (cleanPassword.length < 8) {
+    throw new Error('New password must be at least 8 characters long.');
+  }
+  if (admin.authType !== 'PASSWORD' && !admin.username) {
+    throw new Error('Only Username + Password Admin accounts support password setting. Google Admin accounts are managed by Google.');
+  }
+
+  const username = normalizeAdminUsername(
+    admin.username || admin.email.split('@')[0].replace(/__r\d+$/i, ''),
+  );
+  if (!/^[a-zA-Z0-9_-]{3,40}$/.test(username)) {
+    throw new Error('Invalid Admin Username on account record.');
+  }
+
+  const secondaryAuth = getSecondaryProvisioningAuth();
+  const now = new Date().toISOString();
+
+  // Path 1: Fast in-place password update if the Admin still has the default initial password
+  try {
+    const existingCred = await signInWithEmailAndPassword(
+      secondaryAuth,
+      admin.email,
+      DEFAULT_ADMIN_INITIAL_PASSWORD,
+    );
+    if (cleanPassword !== DEFAULT_ADMIN_INITIAL_PASSWORD) {
+      await updatePassword(existingCred.user, cleanPassword);
+    }
+    await secondarySignOut(secondaryAuth).catch(() => undefined);
+
+    try {
+      await updateDoc(doc(db, 'admins', admin.uid), {
+        mustChangePassword: requireChange,
+        passwordUpdatedAt: now,
+        updatedAt: now,
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `admins/${admin.uid}`);
+    }
+
+    await writeGovernanceAudit({
+      action: 'OWNER_SET_ADMIN_PASSWORD',
+      targetId: admin.uid,
+      summary: `Main Owner set password for Admin "${username}" (${admin.displayName}).`,
+    });
+
+    return {
+      ...admin,
+      mustChangePassword: requireChange,
+      passwordUpdatedAt: now,
+      updatedAt: now,
+    };
+  } catch {
+    await secondarySignOut(secondaryAuth).catch(() => undefined);
+  }
+
+  // Path 2: Atomic credential rotation preserving exact same visible Admin Username
+  const currentSlot = extractAuthEmailRotationIndex(admin.email, '__r');
+  let newUid = '';
+  let newAuthEmail = '';
+
+  const candidateSlots: number[] = [];
+  for (let slot = currentSlot + 1; slot <= MAX_AUTH_ROTATION_SLOTS; slot += 1) {
+    candidateSlots.push(slot);
+  }
+  for (let slot = 1; slot < currentSlot; slot += 1) {
+    candidateSlots.push(slot);
+  }
+
+  for (const slot of candidateSlots) {
+    const candidateEmail = adminUsernameToRotatedAuthEmail(username, slot);
+    try {
+      const cred = await createUserWithEmailAndPassword(
+        secondaryAuth,
+        candidateEmail,
+        cleanPassword,
+      );
+      newUid = cred.user.uid;
+      newAuthEmail = candidateEmail;
+      await secondarySignOut(secondaryAuth).catch(() => undefined);
+      break;
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code || '';
+      if (code === 'auth/operation-not-allowed') {
+        throw new Error(
+          'Email/Password sign-in is disabled in Firebase Console. Enable Authentication -> Sign-in method -> Email/Password first.',
+        );
+      }
+      if (code === 'auth/email-already-in-use') {
+        // If this rotation slot already exists with the exact target password (re-using a previous password), reuse safely
+        try {
+          const recovered = await signInWithEmailAndPassword(
+            secondaryAuth,
+            candidateEmail,
+            cleanPassword,
+          );
+          if (recovered.user.uid !== admin.uid) {
+            newUid = recovered.user.uid;
+            newAuthEmail = candidateEmail;
+            await secondarySignOut(secondaryAuth).catch(() => undefined);
+            break;
+          }
+          await secondarySignOut(secondaryAuth).catch(() => undefined);
+        } catch {
+          await secondarySignOut(secondaryAuth).catch(() => undefined);
+        }
+        continue;
+      }
+      throw new Error(
+        err instanceof Error ? err.message : 'Unable to set Admin password right now.',
+      );
+    }
+  }
+
+  if (!newUid || !newAuthEmail) {
+    throw new Error(
+      `Maximum password rotation slots (${MAX_AUTH_ROTATION_SLOTS}) reached for "${username}". Delete this Admin row and create a fresh Admin Username instead.`,
+    );
+  }
+
+  const nextRecord: AdminAccountRecord = {
+    uid: newUid,
+    username,
+    email: newAuthEmail,
+    displayName: admin.displayName,
+    role: 'SUPER_ADMIN',
+    authType: 'PASSWORD',
+    ...(admin.branchId ? { branchId: admin.branchId } : {}),
+    active: admin.active,
+    mustChangePassword: requireChange,
+    passwordUpdatedAt: now,
+    createdByEmail: admin.createdByEmail || owner.email.slice(0, 180),
+    createdAt: admin.createdAt || now,
+    updatedAt: now,
+  };
+
+  try {
+    const wb = writeBatch(db);
+    wb.set(doc(db, 'admins', newUid), nextRecord);
+    if (newUid !== admin.uid) {
+      wb.delete(doc(db, 'admins', admin.uid));
+    }
+    await wb.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `admins/${newUid}`);
+  }
+
+  await writeGovernanceAudit({
+    action: 'OWNER_SET_ADMIN_PASSWORD',
+    targetId: newUid,
+    summary: `Main Owner set a new password for Admin "${username}" (${admin.displayName}) and revoked previous credential immediately.`,
+  });
+
+  return nextRecord;
+}
+

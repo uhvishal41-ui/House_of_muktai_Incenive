@@ -13,7 +13,6 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
-  Presentation,
   ReceiptIndianRupee,
   RefreshCw,
   Search,
@@ -79,7 +78,6 @@ import { AdminChangePasswordModal } from './AdminChangePasswordModal';
 import { AdminGlobalSearch, type AdminNavTab } from './AdminGlobalSearch';
 import { AdminNotificationCenter } from './AdminNotificationCenter';
 import { AdminOverview } from './AdminOverview';
-import { HindiTrainingDeckModal } from './HindiTrainingDeckModal';
 import { MarathiVoiceAssistant } from './MarathiVoiceAssistant';
 import {
   EMPTY_LINKED_FOLDER,
@@ -128,7 +126,7 @@ const NAV_ITEMS: Array<{
 }> = [
   { id: 'overview', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'import', label: 'Excel Upload', icon: FileSpreadsheet },
-  { id: 'employees', label: 'Employees', icon: Users },
+  { id: 'employees', label: 'Employee Master', icon: Users },
   { id: 'branches', label: 'Branches', icon: Building2 },
   { id: 'payouts', label: 'Payouts & Queries', icon: Wallet },
   { id: 'salary', label: 'Salary Slips', icon: ReceiptIndianRupee },
@@ -143,7 +141,6 @@ export function AdminShell() {
   const [activeTab, setActiveTab] = useState<AdminNavTab>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [trainingDeckOpen, setTrainingDeckOpen] = useState(false);
   const [changePasswordOpen, setChangePasswordOpen] = useState(false);
 
   const [branches, setBranches] = useState<Branch[]>([]);
@@ -309,7 +306,7 @@ export function AdminShell() {
     } finally {
       setLoadingData(false);
     }
-  }, []);
+  }, [isMainOwner]);
 
   /**
    * Silent, targeted single-collection refresh for the Marathi Voice Assistant.
@@ -537,15 +534,6 @@ export function AdminShell() {
         </nav>
 
         <div className="p-4 border-t border-white/10 bg-[#0B172E] space-y-2.5">
-          <button
-            type="button"
-            onClick={() => setTrainingDeckOpen(true)}
-            className="w-full h-9 px-3 rounded-lg border border-[#B8923A]/45 bg-[#1E3A5F]/65 hover:bg-[#1E3A5F] text-xs font-semibold text-[#DFC27D] inline-flex items-center justify-center gap-2 cursor-pointer transition-colors"
-          >
-            <Presentation className="w-3.5 h-3.5 shrink-0" />
-            <span className="truncate">Training PPT (हिंदी)</span>
-          </button>
-
           {isPasswordAdmin && (
             <button
               type="button"
@@ -676,17 +664,6 @@ export function AdminShell() {
                 )}
               </nav>
               <div className="p-4 border-t border-white/10 bg-[#0B172E] space-y-2.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMobileMenuOpen(false);
-                    setTrainingDeckOpen(true);
-                  }}
-                  className="w-full h-10 px-3 rounded-lg border border-[#B8923A]/45 bg-[#1E3A5F]/65 text-sm font-semibold text-[#DFC27D] inline-flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <Presentation className="w-4 h-4" />
-                  Training PPT (हिंदी)
-                </button>
                 {isPasswordAdmin && (
                   <button
                     type="button"
@@ -719,12 +696,12 @@ export function AdminShell() {
 
       {/* Main Content Viewport */}
       <div className="flex-1 lg:pl-64 flex flex-col min-w-0">
-        <header className="sticky top-0 z-10 h-16 bg-white/95 backdrop-blur-md border-b border-slate-200/90 px-4 sm:px-6 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
+        <header className="sticky top-0 z-10 h-16 bg-white/95 backdrop-blur-md border-b border-slate-200/90 px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
-              className="lg:hidden p-2 -ml-2 text-slate-600 hover:text-[#0F1F3D] cursor-pointer"
+              className="lg:hidden p-2 -ml-1.5 text-slate-600 hover:text-[#0F1F3D] cursor-pointer shrink-0"
               aria-label="Open navigation"
             >
               <Menu className="w-5 h-5" />
@@ -734,18 +711,21 @@ export function AdminShell() {
                 {isMainOwner ? 'Main Owner Panel' : 'Super Admin Panel'}
               </span>
               <span className="text-slate-300 hidden sm:inline">/</span>
-              <h1 className="font-semibold text-[#0F1F3D] truncate">{currentNavLabel}</h1>
+              <h1 className="font-semibold text-[#0F1F3D] truncate text-sm sm:text-base">
+                {currentNavLabel}
+              </h1>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {/* Password Admin Quick Change Password Button */}
             {isPasswordAdmin && (
               <button
                 type="button"
                 onClick={() => setChangePasswordOpen(true)}
-                className="h-8 px-2.5 sm:px-3 rounded-lg bg-[#FDF8EC] hover:bg-[#FAF0D7] border border-[#B8923A]/40 text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                className="h-8 px-2 sm:px-3 rounded-lg bg-[#FDF8EC] hover:bg-[#FAF0D7] border border-[#B8923A]/40 text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1.5 cursor-pointer transition-colors"
                 title="Change your Admin login password anytime"
+                aria-label="Change Admin Password"
               >
                 <KeyRound className="w-3.5 h-3.5 text-[#9A7625]" />
                 <span className="hidden md:inline">Change Password</span>
@@ -767,12 +747,13 @@ export function AdminShell() {
               type="button"
               onClick={() => void handleLinkLocalFolder()}
               disabled={linkingFolderBusy}
+              aria-label={linkedFolder.linked ? 'Change linked local folder' : 'Link local folder'}
               title={
                 linkedFolder.linked
                   ? `Folder Linked: "${linkedFolder.folderName}" (${linkedFolder.files.length} Excel/CSV files ready for Marathi Voice Upload). Click to change folder.`
                   : 'Link Desktop or local folder once per session for instant Marathi Voice Excel Uploads'
               }
-              className={`h-8 px-2.5 sm:px-3 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors disabled:opacity-60 ${
+              className={`h-8 px-2 sm:px-3 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors disabled:opacity-60 ${
                 linkedFolder.linked
                   ? 'bg-emerald-50 hover:bg-emerald-100 border-emerald-300 text-emerald-800'
                   : 'bg-[#FDF8EC] hover:bg-[#FAF0D7] border-[#B8923A]/45 text-[#0F1F3D]'
@@ -782,7 +763,6 @@ export function AdminShell() {
                 <>
                   <FolderCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
                   <span className="hidden md:inline">Folder Linked</span>
-                  <span className="md:hidden">Linked</span>
                   <span className="px-1 py-0.2 rounded bg-emerald-200/70 text-[10px] font-mono text-emerald-900">
                     {linkedFolder.files.length}
                   </span>
@@ -791,7 +771,6 @@ export function AdminShell() {
                 <>
                   <FolderOpen className="w-3.5 h-3.5 text-[#9A7625] shrink-0" />
                   <span className="hidden md:inline">Link Local Folder</span>
-                  <span className="md:hidden">Folder</span>
                 </>
               )}
             </button>
@@ -800,8 +779,9 @@ export function AdminShell() {
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              className="h-8 px-2.5 sm:px-3 rounded-lg bg-[#F5F7FA] hover:bg-slate-100 border border-slate-200/90 text-xs text-slate-600 inline-flex items-center gap-2 cursor-pointer transition-colors"
+              className="h-8 px-2 sm:px-3 rounded-lg bg-[#F5F7FA] hover:bg-slate-100 border border-slate-200/90 text-xs text-slate-600 inline-flex items-center gap-2 cursor-pointer transition-colors"
               title="Global Search (Ctrl+K)"
+              aria-label="Global Search"
             >
               <Search className="w-3.5 h-3.5 text-[#1E3A5F]" />
               <span className="hidden md:inline">Search...</span>
@@ -823,18 +803,18 @@ export function AdminShell() {
                 type="button"
                 onClick={handleCopyStaffAppLink}
                 title={`Copy Employee Mobile App link (${COMPANY_BRAND.staffDomain})`}
-                className="h-8 px-2.5 sm:px-3 rounded-lg bg-white hover:bg-slate-50 border border-slate-200/80 text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                aria-label="Copy Staff App Link"
+                className="h-8 px-2 sm:px-3 rounded-lg bg-white hover:bg-slate-50 border border-slate-200/80 text-xs font-semibold text-[#0F1F3D] inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
               >
                 {copiedStaffLink ? (
                   <>
                     <Check className="w-3.5 h-3.5 text-emerald-700" />
-                    <span className="text-emerald-800">Copied</span>
+                    <span className="hidden sm:inline text-emerald-800">Copied</span>
                   </>
                 ) : (
                   <>
                     <Smartphone className="w-3.5 h-3.5 text-[#B8923A]" />
                     <span className="hidden sm:inline">Staff App Link</span>
-                    <span className="sm:hidden">Staff</span>
                   </>
                 )}
               </button>
@@ -844,7 +824,7 @@ export function AdminShell() {
                 onClick={refreshAll}
                 disabled={loadingData}
                 aria-label="Refresh workspace data"
-                className="h-8 px-2.5 sm:px-3 rounded-lg bg-white hover:bg-slate-50 border border-slate-200/80 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 transition-colors"
+                className="h-8 px-2 sm:px-3 rounded-lg bg-white hover:bg-slate-50 border border-slate-200/80 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 transition-colors"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${loadingData ? 'animate-spin' : ''}`} />
                 <span className="hidden md:inline">Refresh</span>
@@ -918,7 +898,12 @@ export function AdminShell() {
                       adjustments={adjustments}
                       salesTargets={salesTargets}
                       visibilitySettings={visibilitySettings}
-                      onRefresh={refreshAll}
+                      onRefresh={async () => {
+                        await Promise.all([
+                          refreshVoiceScope('targets'),
+                          refreshVoiceScope('visibility'),
+                        ]);
+                      }}
                     />
                   </Suspense>
                 )}
@@ -932,8 +917,15 @@ export function AdminShell() {
                       payoutRecords={payoutRecords}
                       adjustments={adjustments}
                       employeeQueries={employeeQueries}
+                      payrollLockSettings={payrollLockSettings}
                       voiceFilter={voiceFilter}
-                      onRefresh={refreshAll}
+                      onRefresh={async () => {
+                        await Promise.all([
+                          refreshVoiceScope('payouts'),
+                          refreshVoiceScope('adjustments'),
+                          refreshVoiceScope('queries'),
+                        ]);
+                      }}
                     />
                   </Suspense>
                 )}
@@ -948,7 +940,12 @@ export function AdminShell() {
                       employeeLoans={employeeLoans}
                       payrollLockSettings={payrollLockSettings}
                       isMainOwner={isMainOwner}
-                      onRefresh={refreshAll}
+                      onRefresh={async () => {
+                        await Promise.all([
+                          refreshVoiceScope('loans'),
+                          refreshVoiceScope('locks'),
+                        ]);
+                      }}
                     />
                   </Suspense>
                 )}
@@ -964,7 +961,12 @@ export function AdminShell() {
                       visibilitySettings={visibilitySettings}
                       payrollLockSettings={payrollLockSettings}
                       voiceFilter={voiceFilter}
-                      onRefresh={refreshAll}
+                      onRefresh={async () => {
+                        await Promise.all([
+                          refreshVoiceScope('salary'),
+                          refreshVoiceScope('visibility'),
+                        ]);
+                      }}
                     />
                   </Suspense>
                 )}
@@ -987,7 +989,7 @@ export function AdminShell() {
                     <BranchMaster
                       branches={branches}
                       employees={employees}
-                      onRefresh={refreshAll}
+                      onRefresh={() => refreshVoiceScope('branches')}
                     />
                   </Suspense>
                 )}
@@ -999,7 +1001,7 @@ export function AdminShell() {
                       incentives={incentives}
                       visibilitySettings={visibilitySettings}
                       voiceFilter={voiceFilter}
-                      onRefresh={refreshAll}
+                      onRefresh={() => refreshVoiceScope('employees')}
                     />
                   </Suspense>
                 )}
@@ -1010,7 +1012,7 @@ export function AdminShell() {
                       employees={employees}
                       publishedIncentives={incentives}
                       payrollLockSettings={payrollLockSettings}
-                      onRefresh={refreshAll}
+                      onRefresh={() => refreshVoiceScope('incentives')}
                     />
                   </Suspense>
                 )}
@@ -1028,13 +1030,14 @@ export function AdminShell() {
                       adjustments={adjustments}
                       salarySlips={salarySlips}
                       visibilitySettings={visibilitySettings}
-                      onRefresh={refreshAll}
+                      payrollLockSettings={payrollLockSettings}
+                      onRefresh={() => refreshVoiceScope('all')}
                     />
                   </Suspense>
                 )}
                 {isMainOwner && safeActiveTab === 'owner-access' && (
                   <Suspense fallback={<WorkspaceSkeleton />}>
-                    <OwnerAdminAccessManager onRefreshShell={refreshAll} />
+                    <OwnerAdminAccessManager onRefreshShell={() => refreshVoiceScope('all')} />
                   </Suspense>
                 )}
               </PageTransition>
@@ -1052,10 +1055,6 @@ export function AdminShell() {
         batches={batches}
         salarySlips={salarySlips}
         onNavigate={(tab) => setActiveTab(tab)}
-      />
-      <HindiTrainingDeckModal
-        open={trainingDeckOpen}
-        onClose={() => setTrainingDeckOpen(false)}
       />
       {isPasswordAdmin && (
         <AdminChangePasswordModal
@@ -1086,7 +1085,6 @@ export function AdminShell() {
           navigateToTab: (tab) => setActiveTab(tab),
           openModal: (modal) => {
             if (modal === 'search') setSearchOpen(true);
-            else if (modal === 'training_ppt') setTrainingDeckOpen(true);
             else if (modal === 'change_password' && isPasswordAdmin) setChangePasswordOpen(true);
           },
           applyVoiceFilter,

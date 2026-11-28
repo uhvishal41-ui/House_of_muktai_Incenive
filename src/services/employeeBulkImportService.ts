@@ -103,6 +103,31 @@ export async function commitEmployeeMasterBulkImport(params: {
       ...(row.linkedGoogleEmail ? { linkedGoogleEmail: row.linkedGoogleEmail } : {}),
       ...(row.address ? { address: row.address } : {}),
       ...(row.emergencyContact ? { emergencyContact: row.emergencyContact } : {}),
+      ...(row.fatherOrSpouseName ? { fatherOrSpouseName: row.fatherOrSpouseName } : {}),
+      ...(row.maritalStatus ? { maritalStatus: row.maritalStatus } : {}),
+      ...(row.bloodGroup ? { bloodGroup: row.bloodGroup } : {}),
+      ...(row.qualification ? { qualification: row.qualification } : {}),
+      ...(row.dateOfExit ? { dateOfExit: row.dateOfExit } : {}),
+      ...(row.exitReason ? { exitReason: row.exitReason } : {}),
+      ...(row.employmentType ? { employmentType: row.employmentType } : {}),
+      ...(row.reportingManager ? { reportingManager: row.reportingManager } : {}),
+      ...(row.shiftTiming ? { shiftTiming: row.shiftTiming } : {}),
+      ...(row.weeklyOffDay ? { weeklyOffDay: row.weeklyOffDay } : {}),
+      ...(row.uniformSize ? { uniformSize: row.uniformSize } : {}),
+      ...(row.alternatePhone ? { alternatePhone: row.alternatePhone } : {}),
+      ...(row.personalEmail ? { personalEmail: row.personalEmail } : {}),
+      ...(row.aadhaarMasked ? { aadhaarMasked: row.aadhaarMasked } : {}),
+      ...(row.monthlyGrossSalaryPaise !== undefined && row.monthlyGrossSalaryPaise > 0
+        ? { monthlyGrossSalaryPaise: row.monthlyGrossSalaryPaise }
+        : {}),
+      ...(row.paymentMode ? { paymentMode: row.paymentMode } : {}),
+      ...(row.bankBranchName ? { bankBranchName: row.bankBranchName } : {}),
+      ...(row.upiId ? { upiId: row.upiId } : {}),
+      ...(row.permanentAddress ? { permanentAddress: row.permanentAddress } : {}),
+      ...(row.emergencyContactName ? { emergencyContactName: row.emergencyContactName } : {}),
+      ...(row.nomineeName ? { nomineeName: row.nomineeName } : {}),
+      ...(row.nomineeRelation ? { nomineeRelation: row.nomineeRelation } : {}),
+      ...(row.hrRemarks ? { hrRemarks: row.hrRemarks } : {}),
       ...(row.customFields && Object.keys(row.customFields).length > 0
         ? { customFields: row.customFields }
         : {}),
@@ -176,6 +201,31 @@ export async function commitEmployeeMasterBulkImport(params: {
       ...(row.linkedGoogleEmail ? { linkedGoogleEmail: row.linkedGoogleEmail } : {}),
       ...(row.address ? { address: row.address } : {}),
       ...(row.emergencyContact ? { emergencyContact: row.emergencyContact } : {}),
+      ...(row.fatherOrSpouseName ? { fatherOrSpouseName: row.fatherOrSpouseName } : {}),
+      ...(row.maritalStatus ? { maritalStatus: row.maritalStatus } : {}),
+      ...(row.bloodGroup ? { bloodGroup: row.bloodGroup } : {}),
+      ...(row.qualification ? { qualification: row.qualification } : {}),
+      ...(row.dateOfExit ? { dateOfExit: row.dateOfExit } : {}),
+      ...(row.exitReason ? { exitReason: row.exitReason } : {}),
+      ...(row.employmentType ? { employmentType: row.employmentType } : {}),
+      ...(row.reportingManager ? { reportingManager: row.reportingManager } : {}),
+      ...(row.shiftTiming ? { shiftTiming: row.shiftTiming } : {}),
+      ...(row.weeklyOffDay ? { weeklyOffDay: row.weeklyOffDay } : {}),
+      ...(row.uniformSize ? { uniformSize: row.uniformSize } : {}),
+      ...(row.alternatePhone ? { alternatePhone: row.alternatePhone } : {}),
+      ...(row.personalEmail ? { personalEmail: row.personalEmail } : {}),
+      ...(row.aadhaarMasked ? { aadhaarMasked: row.aadhaarMasked } : {}),
+      ...(row.monthlyGrossSalaryPaise !== undefined && row.monthlyGrossSalaryPaise > 0
+        ? { monthlyGrossSalaryPaise: row.monthlyGrossSalaryPaise }
+        : {}),
+      ...(row.paymentMode ? { paymentMode: row.paymentMode } : {}),
+      ...(row.bankBranchName ? { bankBranchName: row.bankBranchName } : {}),
+      ...(row.upiId ? { upiId: row.upiId } : {}),
+      ...(row.permanentAddress ? { permanentAddress: row.permanentAddress } : {}),
+      ...(row.emergencyContactName ? { emergencyContactName: row.emergencyContactName } : {}),
+      ...(row.nomineeName ? { nomineeName: row.nomineeName } : {}),
+      ...(row.nomineeRelation ? { nomineeRelation: row.nomineeRelation } : {}),
+      ...(row.hrRemarks ? { hrRemarks: row.hrRemarks } : {}),
       ...(row.customFields && Object.keys(row.customFields).length > 0
         ? { customFields: row.customFields }
         : {}),
@@ -213,6 +263,36 @@ export async function commitEmployeeMasterBulkImport(params: {
     if (mergedEmp.linkedGoogleEmail) updateFields.linkedGoogleEmail = mergedEmp.linkedGoogleEmail;
     if (mergedEmp.address) updateFields.address = mergedEmp.address;
     if (mergedEmp.emergencyContact) updateFields.emergencyContact = mergedEmp.emergencyContact;
+    if (mergedEmp.fatherOrSpouseName) updateFields.fatherOrSpouseName = mergedEmp.fatherOrSpouseName;
+    if (mergedEmp.maritalStatus) updateFields.maritalStatus = mergedEmp.maritalStatus;
+    if (mergedEmp.bloodGroup) updateFields.bloodGroup = mergedEmp.bloodGroup;
+    if (mergedEmp.qualification) updateFields.qualification = mergedEmp.qualification;
+    if (mergedEmp.dateOfExit) updateFields.dateOfExit = mergedEmp.dateOfExit;
+    if (mergedEmp.exitReason) updateFields.exitReason = mergedEmp.exitReason;
+    if (mergedEmp.employmentType) updateFields.employmentType = mergedEmp.employmentType;
+    if (mergedEmp.reportingManager) updateFields.reportingManager = mergedEmp.reportingManager;
+    if (mergedEmp.shiftTiming) updateFields.shiftTiming = mergedEmp.shiftTiming;
+    if (mergedEmp.weeklyOffDay) updateFields.weeklyOffDay = mergedEmp.weeklyOffDay;
+    if (mergedEmp.uniformSize) updateFields.uniformSize = mergedEmp.uniformSize;
+    if (mergedEmp.alternatePhone) updateFields.alternatePhone = mergedEmp.alternatePhone;
+    if (mergedEmp.personalEmail) updateFields.personalEmail = mergedEmp.personalEmail;
+    if (mergedEmp.aadhaarMasked) updateFields.aadhaarMasked = mergedEmp.aadhaarMasked;
+    if (
+      typeof mergedEmp.monthlyGrossSalaryPaise === 'number' &&
+      mergedEmp.monthlyGrossSalaryPaise > 0
+    ) {
+      updateFields.monthlyGrossSalaryPaise = mergedEmp.monthlyGrossSalaryPaise;
+    }
+    if (mergedEmp.paymentMode) updateFields.paymentMode = mergedEmp.paymentMode;
+    if (mergedEmp.bankBranchName) updateFields.bankBranchName = mergedEmp.bankBranchName;
+    if (mergedEmp.upiId) updateFields.upiId = mergedEmp.upiId;
+    if (mergedEmp.permanentAddress) updateFields.permanentAddress = mergedEmp.permanentAddress;
+    if (mergedEmp.emergencyContactName) {
+      updateFields.emergencyContactName = mergedEmp.emergencyContactName;
+    }
+    if (mergedEmp.nomineeName) updateFields.nomineeName = mergedEmp.nomineeName;
+    if (mergedEmp.nomineeRelation) updateFields.nomineeRelation = mergedEmp.nomineeRelation;
+    if (mergedEmp.hrRemarks) updateFields.hrRemarks = mergedEmp.hrRemarks;
     if (mergedEmp.customFields && Object.keys(mergedEmp.customFields).length > 0) {
       updateFields.customFields = mergedEmp.customFields;
     } else if (

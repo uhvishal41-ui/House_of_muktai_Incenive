@@ -13,14 +13,17 @@ import {
   RefreshCw,
   Shield,
   ShieldCheck,
+  Sparkles,
   Trash2,
   UserCheck,
   UserX,
+  X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import {
   DEFAULT_ADMIN_INITIAL_PASSWORD,
   DEFAULT_ADMIN_USERNAME,
+  generateStrongTemporaryPassword,
   MAIN_OWNER_EMAIL,
   normalizeAdminUsername,
 } from '../../lib/firebase';
@@ -28,6 +31,7 @@ import {
   createPasswordAdminAccount,
   deleteAdminAccountRecord,
   listAdminAccounts,
+  ownerSetAdminPassword,
   toggleAdminAccountStatus,
 } from '../../services/adminAccessService';
 import type { AdminAccountRecord } from '../../types/incentive';
@@ -69,13 +73,22 @@ export function OwnerAdminAccessManager({ onRefreshShell }: Props) {
   const [showNewPwd, setShowNewPwd] = useState(false);
   const [creatingCustom, setCreatingCustom] = useState(false);
 
-  // Newly created credentials box (for instant copy/handoff to Admin)
+  // Newly created / reset credentials box (for instant copy/handoff to Admin)
   const [newlyCreatedCreds, setNewlyCreatedCreds] = useState<{
     username: string;
     displayName: string;
     password: string;
+    isReset?: boolean;
   } | null>(null);
   const [copiedCreds, setCopiedCreds] = useState(false);
+
+  // Set Admin Password modal state (Main Owner only)
+  const [resetTargetAdmin, setResetTargetAdmin] = useState<AdminAccountRecord | null>(null);
+  const [resetAdminPassword, setResetAdminPassword] = useState('');
+  const [showResetAdminPwd, setShowResetAdminPwd] = useState(true);
+  const [resetAdminMustChange, setResetAdminMustChange] = useState(false);
+  const [savingResetAdmin, setSavingResetAdmin] = useState(false);
+  const [resetAdminErr, setResetAdminErr] = useState<string | null>(null);
 
   // Inline row action states
   const [busyUid, setBusyUid] = useState<string | null>(null);
@@ -115,12 +128,13 @@ export function OwnerAdminAccessManager({ onRefreshShell }: Props) {
     username: string;
     displayName: string;
     password: string;
+    isReset?: boolean;
   }) => {
     const text = [
       'House of Muktai — Admin Panel Login',
       `Admin Name: ${creds.displayName}`,
       `Username: ${creds.username}`,
-      `Initial Password: ${creds.password}`,
+      `${creds.isReset ? 'New Password' : 'Initial Password'}: ${creds.password}`,
       'Note: Sign in via "Admin / Owner Panel -> Admin Login" and change your password anytime from the Change Password button.',
     ].join('\n');
     try {
@@ -242,6 +256,54 @@ export function OwnerAdminAccessManager({ onRefreshShell }: Props) {
     }
   };
 
+  const openSetAdminPasswordModal = (admin: AdminAccountRecord) => {
+    setResetTargetAdmin(admin);
+    setResetAdminPassword('');
+    setShowResetAdminPwd(true);
+    setResetAdminMustChange(false);
+    setResetAdminErr(null);
+  };
+
+  const handleSaveResetAdminPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetTargetAdmin) return;
+    const cleanPwd = resetAdminPassword.trim();
+    if (cleanPwd.length < 8) {
+      setResetAdminErr('Password must be at least 8 characters long.');
+      return;
+    }
+    setSavingResetAdmin(true);
+    setResetAdminErr(null);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      const updatedAdmin = await ownerSetAdminPassword({
+        admin: resetTargetAdmin,
+        newPassword: cleanPwd,
+        mustChangePassword: resetAdminMustChange,
+      });
+      setNewlyCreatedCreds({
+        username: updatedAdmin.username || resetTargetAdmin.username || updatedAdmin.email,
+        displayName: updatedAdmin.displayName,
+        password: cleanPwd,
+        isReset: true,
+      });
+      setSuccessMsg(
+        `New password set for Admin "${updatedAdmin.username || updatedAdmin.displayName}". Previous password is revoked immediately.`,
+      );
+      setResetTargetAdmin(null);
+      setResetAdminPassword('');
+      await loadAccounts();
+      if (onRefreshShell) await onRefreshShell();
+    } catch (err) {
+      setResetAdminErr(
+        err instanceof Error ? err.message : 'Unable to set new password for Admin.',
+      );
+    } finally {
+      setSavingResetAdmin(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Main Owner Exclusive Header Banner */}
@@ -343,7 +405,9 @@ export function OwnerAdminAccessManager({ onRefreshShell }: Props) {
               </p>
             </div>
             <div className="p-3 rounded-xl bg-white border border-slate-200">
-              <p className="text-[11px] text-slate-500">Initial Password</p>
+              <p className="text-[11px] text-slate-500">
+                {newlyCreatedCreds.isReset ? 'New Password' : 'Initial Password'}
+              </p>
               <p className="font-mono font-bold text-[#9A7625] mt-0.5">
                 {newlyCreatedCreds.password}
               </p>
@@ -386,9 +450,12 @@ export function OwnerAdminAccessManager({ onRefreshShell }: Props) {
               <input
                 type="text"
                 required
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 value={quickUsername}
-                onChange={(e) => setQuickUsername(e.target.value.toUpperCase())}
-                className="w-full h-10 px-3 rounded-xl border border-slate-300 text-sm font-mono uppercase text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#B8923A]/30 focus:border-[#0F1F3D]"
+                onChange={(e) => setQuickUsername(e.target.value)}
+                className="w-full h-10 px-3 rounded-xl border border-slate-300 text-sm font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#B8923A]/30 focus:border-[#0F1F3D]"
               />
             </div>
             <div>
@@ -462,10 +529,13 @@ export function OwnerAdminAccessManager({ onRefreshShell }: Props) {
               <input
                 type="text"
                 required
-                placeholder="e.g. HOMADMIN or MUKTAI_HR"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder="e.g. muktai_admin or homadmin"
                 value={newUsername}
-                onChange={(e) => setNewUsername(e.target.value.toUpperCase())}
-                className="w-full h-10 px-3 rounded-xl border border-slate-300 text-sm font-mono uppercase text-slate-900 placeholder:normal-case placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#B8923A]/30 focus:border-[#0F1F3D]"
+                onChange={(e) => setNewUsername(e.target.value)}
+                className="w-full h-10 px-3 rounded-xl border border-slate-300 text-sm font-mono text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#B8923A]/30 focus:border-[#0F1F3D]"
               />
               <p className="text-[11px] text-slate-400 mt-1">
                 3–40 characters: letters, digits, hyphen (-), or underscore (_)
@@ -606,10 +676,10 @@ export function OwnerAdminAccessManager({ onRefreshShell }: Props) {
           </div>
 
           <p className="text-[11px] text-slate-500 mt-4 pt-3 border-t border-slate-100">
-            <strong>Forgot Password Policy:</strong> If an Admin forgets their password, suspend or
-            remove their old username in the table below and create a fresh Admin username with a
-            new initial password — active sessions on the suspended account are disconnected
-            instantly.
+            <strong>Owner Password Control:</strong> Main Owner can set or reset any Admin&apos;s
+            password anytime using the <strong>Set Password</strong> button below (keeping the exact
+            same username), and can also set or reset any Employee&apos;s password directly from{' '}
+            <strong>Employee Master</strong> — previous passwords are revoked immediately.
           </p>
         </div>
       </div>
@@ -717,6 +787,17 @@ export function OwnerAdminAccessManager({ onRefreshShell }: Props) {
                       </td>
                       <td className="py-3 px-4 text-right">
                         <div className="inline-flex items-center justify-end gap-2">
+                          {isPasswordType && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => openSetAdminPasswordModal(acc)}
+                              className="h-8 px-2.5 rounded-lg border border-[#B8923A]/50 bg-[#FDF8EC] hover:bg-[#F8ECCE] text-[#0F1F3D] text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 transition-colors"
+                            >
+                              <KeyRound className="w-3.5 h-3.5 text-[#9A7625]" />
+                              Set Password
+                            </button>
+                          )}
                           <button
                             type="button"
                             disabled={isBusy}
@@ -832,12 +913,134 @@ export function OwnerAdminAccessManager({ onRefreshShell }: Props) {
               <tr>
                 <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Master Governance</td>
                 <td className="py-2.5 px-4 text-slate-400">Restricted (View-Only / No Access)</td>
-                <td className="py-2.5 px-4 font-medium text-[#9A7625]"><strong>Admin Account Control</strong>, <strong>Month Payroll Lock/Unlock</strong>, <strong>Fresh Start Reset</strong></td>
+                <td className="py-2.5 px-4 font-medium text-[#9A7625]"><strong>Admin &amp; Employee Password Control</strong>, <strong>Month Payroll Lock/Unlock</strong>, <strong>Fresh Start Reset</strong></td>
               </tr>
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* Main Owner · Set / Reset Admin Password Modal */}
+      {resetTargetAdmin && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border-2 border-[#B8923A]/50 rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
+            <div className="px-5 py-4 bg-[#0F1F3D] text-white flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-[#DFC27D] shrink-0" />
+                  Main Owner · Set Admin Password
+                </h3>
+                <p className="text-xs text-slate-300 mt-0.5 truncate">
+                  {resetTargetAdmin.displayName} (
+                  <span className="font-mono text-[#DFC27D]">
+                    {resetTargetAdmin.username || resetTargetAdmin.email}
+                  </span>
+                  )
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={savingResetAdmin}
+                onClick={() => setResetTargetAdmin(null)}
+                className="p-1 text-slate-300 hover:text-white cursor-pointer"
+                aria-label="Close set admin password modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveResetAdminPassword} className="p-5 space-y-4">
+              {resetAdminErr && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                  <span>{resetAdminErr}</span>
+                </div>
+              )}
+
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Set a new password for this Admin while keeping the exact same username{' '}
+                <strong className="font-mono text-[#0F1F3D]">
+                  {resetTargetAdmin.username || resetTargetAdmin.email}
+                </strong>
+                . The previous password is revoked immediately.
+              </p>
+
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="block text-xs font-medium text-slate-700">
+                    New Password (min 8 chars)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResetAdminPassword(generateStrongTemporaryPassword('Admin@'));
+                      setShowResetAdminPwd(true);
+                    }}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#9A7625] hover:underline cursor-pointer"
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    Generate Strong
+                  </button>
+                </div>
+                <div className="relative">
+                  <input
+                    type={showResetAdminPwd ? 'text' : 'password'}
+                    required
+                    minLength={8}
+                    maxLength={128}
+                    autoFocus
+                    placeholder="Enter new password (min 8 chars)"
+                    value={resetAdminPassword}
+                    onChange={(e) => setResetAdminPassword(e.target.value)}
+                    className="w-full h-10 pl-3 pr-9 rounded-xl border border-slate-300 text-sm font-mono text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#B8923A]/30 focus:border-[#0F1F3D]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowResetAdminPwd((s) => !s)}
+                    aria-label={showResetAdminPwd ? 'Hide password' : 'Show password'}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                  >
+                    {showResetAdminPwd ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={resetAdminMustChange}
+                  onChange={(e) => setResetAdminMustChange(e.target.checked)}
+                  className="rounded border-slate-300 text-[#0F1F3D] focus:ring-[#0F1F3D]"
+                />
+                Require Admin to change password on next login
+              </label>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={savingResetAdmin}
+                  onClick={() => setResetTargetAdmin(null)}
+                  className="h-9 px-3.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingResetAdmin || resetAdminPassword.trim().length < 8}
+                  className="h-9 px-4 rounded-lg bg-[#0F1F3D] hover:bg-[#162B50] text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                >
+                  <KeyRound className="w-3.5 h-3.5 text-[#DFC27D]" />
+                  {savingResetAdmin ? 'Updating Password...' : 'Save New Password'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

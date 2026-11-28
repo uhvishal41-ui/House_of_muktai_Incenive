@@ -62,7 +62,7 @@ export interface VoiceCapabilitiesStatus {
   elevenLabsStatus: ElevenLabsHealthStatus;
   elevenLabsVoiceId: string;
   elevenLabsVoiceIdCustom: boolean;
-  elevenLabsModelId: 'eleven_v3' | 'eleven_flash_v2_5' | 'eleven_multilingual_v2';
+  elevenLabsModelId: 'eleven_flash_v2_5' | 'eleven_v3' | 'eleven_multilingual_v2';
   statusMessageMr?: string;
   ttsPrimaryProvider: VoiceTtsProvider;
 }
@@ -71,6 +71,8 @@ export interface SpeechPlaybackMeta {
   provider: VoiceTtsProvider;
   modelUsed?: string;
   voiceId?: string;
+  cacheHit?: boolean;
+  streamed?: boolean;
 }
 
 async function getAdminAuthToken(): Promise<string> {
@@ -149,6 +151,8 @@ let activeAudioElement: HTMLAudioElement | null = null;
 let activeAudioObjectUrl: string | null = null;
 let sharedAudioContext: AudioContext | null = null;
 let activeBufferSource: AudioBufferSourceNode | null = null;
+let activeStreamAbortController: AbortController | null = null;
+let playbackGeneration = 0;
 
 function getOrCreateAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
@@ -186,6 +190,17 @@ export function unlockVoiceAudioPlayback(): void {
 }
 
 export function stopMarathiSpeechPlayback(): void {
+  playbackGeneration += 1;
+
+  if (activeStreamAbortController) {
+    try {
+      activeStreamAbortController.abort();
+    } catch {
+      // ignore
+    }
+    activeStreamAbortController = null;
+  }
+
   if (activeBufferSource) {
     try {
       activeBufferSource.onended = null;
@@ -196,15 +211,21 @@ export function stopMarathiSpeechPlayback(): void {
     }
     activeBufferSource = null;
   }
+
   if (activeAudioElement) {
     try {
+      activeAudioElement.onended = null;
+      activeAudioElement.onerror = null;
+      activeAudioElement.onplay = null;
       activeAudioElement.pause();
-      activeAudioElement.currentTime = 0;
+      activeAudioElement.removeAttribute('src');
+      activeAudioElement.load();
     } catch {
       // ignore
     }
     activeAudioElement = null;
   }
+
   if (activeAudioObjectUrl) {
     try {
       URL.revokeObjectURL(activeAudioObjectUrl);
@@ -215,18 +236,59 @@ export function stopMarathiSpeechPlayback(): void {
   }
 }
 
-function base64ToUint8Array(base64: string): Uint8Array {
-  const binary = atob(base64);
-  const len = binary.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
+function normalizeClientCacheKey(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, 900);
+}
+
+interface CachedElevenLabsAudio {
+  provider: 'elevenlabs';
+  mimeType: string;
+  bytes: Uint8Array;
+  modelUsed?: string;
+  voiceId?: string;
+}
+
+const MAX_CLIENT_TTS_CACHE_ITEMS = 48;
+const clientTtsAudioCache = new Map<string, CachedElevenLabsAudio>();
+
+function readClientTtsCache(key: string): CachedElevenLabsAudio | null {
+  const hit = clientTtsAudioCache.get(key);
+  if (!hit) return null;
+  // Refresh LRU recency so hot phrases ("आवाज तपासा", confirmations) stay instant
+  clientTtsAudioCache.delete(key);
+  clientTtsAudioCache.set(key, hit);
+  return hit;
+}
+
+function storeClientTtsCache(key: string, entry: CachedElevenLabsAudio): void {
+  if (!entry.bytes || entry.bytes.byteLength === 0) return;
+  if (entry.bytes.byteLength > 350 * 1024) return;
+  if (clientTtsAudioCache.has(key)) {
+    clientTtsAudioCache.delete(key);
+  } else if (clientTtsAudioCache.size >= MAX_CLIENT_TTS_CACHE_ITEMS) {
+    const oldestKey = clientTtsAudioCache.keys().next().value;
+    if (oldestKey) clientTtsAudioCache.delete(oldestKey);
   }
-  return bytes;
+  clientTtsAudioCache.set(key, entry);
+}
+
+export function clearClientTtsAudioCache(): void {
+  clientTtsAudioCache.clear();
+}
+
+function concatUint8Arrays(chunks: Uint8Array[], totalBytes: number): Uint8Array {
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
 }
 
 async function playAudioBufferViaWebAudio(
   bytes: Uint8Array,
+  gen: number,
   onStart?: () => void,
 ): Promise<boolean> {
   const ctx = getOrCreateAudioContext();
@@ -235,15 +297,15 @@ async function playAudioBufferViaWebAudio(
     if (ctx.state === 'suspended') {
       await Promise.race([
         ctx.resume(),
-        new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+        new Promise<void>((resolve) => setTimeout(resolve, 600)),
       ]);
     }
-    if (ctx.state !== 'running') {
+    if (ctx.state !== 'running' || gen !== playbackGeneration) {
       return false;
     }
-    // Slice an owned ArrayBuffer copy because decodeAudioData detaches the buffer
     const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     const decoded = await ctx.decodeAudioData(arrayBuf as ArrayBuffer);
+    if (gen !== playbackGeneration) return true;
 
     await new Promise<void>((resolve) => {
       const source = ctx.createBufferSource();
@@ -266,133 +328,277 @@ async function playAudioBufferViaWebAudio(
   }
 }
 
-interface CachedElevenLabsAudio {
-  text: string;
-  provider: 'elevenlabs';
-  mimeType: string;
-  bytes: Uint8Array;
-  modelUsed?: string;
-  voiceId?: string;
+async function playAudioBytes(
+  bytes: Uint8Array,
+  mimeType: string,
+  gen: number,
+  onStart?: () => void,
+): Promise<boolean> {
+  if (gen !== playbackGeneration) return true;
+
+  // Method 1: Unlocked Web Audio API (immune to iframe/async HTMLAudio autoplay blocks)
+  const playedViaWebAudio = await playAudioBufferViaWebAudio(bytes, gen, onStart);
+  if (playedViaWebAudio) {
+    return true;
+  }
+  if (gen !== playbackGeneration) return true;
+
+  // Method 2: HTMLAudioElement with Blob URL (pure ElevenLabs MP3 audio)
+  const ownedBuffer = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+  const blob = new Blob([ownedBuffer], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  activeAudioObjectUrl = url;
+  const audio = new Audio(url);
+  activeAudioElement = audio;
+
+  await new Promise<void>((resolve, reject) => {
+    audio.onplay = () => onStart?.();
+    audio.onended = () => {
+      if (gen === playbackGeneration) stopMarathiSpeechPlayback();
+      resolve();
+    };
+    audio.onerror = () => {
+      if (gen === playbackGeneration) stopMarathiSpeechPlayback();
+      reject(new Error('Audio element playback failed.'));
+    };
+    audio.play().catch((playErr) => {
+      if (gen === playbackGeneration) stopMarathiSpeechPlayback();
+      reject(playErr);
+    });
+  });
+
+  return true;
 }
 
-type FetchElevenLabsTtsResult =
-  | {
-      ok: true;
-      audio: Omit<CachedElevenLabsAudio, 'text'>;
-    }
-  | {
-      ok: false;
-      fallbackReason?: ElevenLabsFallbackReason;
-      errorMessage?: string;
-    };
-
-let lastCachedSpeech: CachedElevenLabsAudio | null = null;
-
-async function fetchElevenLabsTtsAudio(
-  cleanText: string,
-  options?: { forceRefresh?: boolean },
-): Promise<FetchElevenLabsTtsResult> {
-  if (!options?.forceRefresh && lastCachedSpeech && lastCachedSpeech.text === cleanText) {
-    return {
-      ok: true,
-      audio: {
-        provider: 'elevenlabs',
-        mimeType: lastCachedSpeech.mimeType,
-        bytes: lastCachedSpeech.bytes,
-        modelUsed: lastCachedSpeech.modelUsed,
-        voiceId: lastCachedSpeech.voiceId,
-      },
-    };
+function supportsStreamingMpegMse(): boolean {
+  if (typeof window === 'undefined' || typeof MediaSource === 'undefined') return false;
+  try {
+    return typeof MediaSource.isTypeSupported === 'function' && MediaSource.isTypeSupported('audio/mpeg');
+  } catch {
+    return false;
   }
+}
 
-  const token = await getAdminAuthToken();
-  let lastReason: ElevenLabsFallbackReason = 'voice_error';
-  let lastErrorMessage = 'तुमचा निवडलेला ElevenLabs आवाज सध्या उपलब्ध नाही.';
+/**
+ * Progressive streaming playback using MediaSource (`audio/mpeg`):
+ * Starts playing as soon as the very first MP3 chunk arrives from ElevenLabs `/stream`,
+ * while buffering chunks in parallel so the completed clip is stored in client LRU cache.
+ * If iframe autoplay blocks `HTMLAudioElement.play()`, seamlessly drains the stream and plays
+ * through the gesture-unlocked Web Audio API context with zero silent failures.
+ */
+async function playStreamedMpegResponse(params: {
+  response: Response;
+  cacheKey: string;
+  mimeType: string;
+  meta: SpeechPlaybackMeta;
+  gen: number;
+  onStart?: () => void;
+}): Promise<boolean> {
+  const { response, cacheKey, mimeType, meta, gen, onStart } = params;
+  const body = response.body;
+  if (!body) return false;
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, 700));
+  const reader = body.getReader();
+  const collectedChunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  const mediaSource = new MediaSource();
+  const objectUrl = URL.createObjectURL(mediaSource);
+  const audio = new Audio(objectUrl);
+  activeAudioObjectUrl = objectUrl;
+  activeAudioElement = audio;
+
+  let started = false;
+  let mseAbortedForFallback = false;
+
+  const triggerStartOnce = () => {
+    if (!started && gen === playbackGeneration) {
+      started = true;
+      onStart?.();
     }
-    const resp = await fetch('/api/v1/voice/tts', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        text: cleanText.slice(0, 900),
-        ...(options?.forceRefresh ? { forceRefresh: true } : {}),
-      }),
-    });
-
-    if (resp.ok) {
-      const data = (await resp.json()) as {
-        provider?: 'elevenlabs';
-        mimeType?: string;
-        audioBase64?: string;
-        modelUsed?: string;
-        voiceId?: string;
-      };
-      if (data.audioBase64 && data.mimeType) {
-        const bytes = base64ToUint8Array(data.audioBase64);
-        lastCachedSpeech = {
-          text: cleanText,
-          provider: 'elevenlabs',
-          mimeType: data.mimeType,
-          bytes,
-          modelUsed: data.modelUsed,
-          voiceId: data.voiceId,
-        };
-        return {
-          ok: true,
-          audio: {
-            provider: 'elevenlabs',
-            mimeType: data.mimeType,
-            bytes,
-            modelUsed: data.modelUsed,
-            voiceId: data.voiceId,
-          },
-        };
-      }
-    } else {
-      const errJson = (await resp.json().catch(() => ({}))) as {
-        error?: string;
-        elevenLabsStatus?: ElevenLabsFallbackReason;
-      };
-      if (errJson.elevenLabsStatus) {
-        lastReason = errJson.elevenLabsStatus;
-      }
-      if (errJson.error) {
-        lastErrorMessage = errJson.error;
-      }
-      console.warn(
-        `[Voice TTS Client] ElevenLabs attempt ${attempt + 1} HTTP ${resp.status}:`,
-        lastErrorMessage,
-      );
-      // Do not retry non-transient configuration/quota/plan/auth rejections
-      if (
-        lastReason === 'missing_key' ||
-        lastReason === 'invalid_key_format' ||
-        lastReason === 'missing_voice_id' ||
-        lastReason === 'auth_rejected' ||
-        lastReason === 'voice_paid_plan_required' ||
-        lastReason === 'free_tier_ip_blocked' ||
-        lastReason === 'quota_cooldown'
-      ) {
-        break;
-      }
-    }
-  }
-  return {
-    ok: false,
-    fallbackReason: lastReason,
-    errorMessage: lastErrorMessage,
   };
+
+  const waitForSourceOpen = new Promise<void>((resolve, reject) => {
+    const onOpen = () => {
+      mediaSource.removeEventListener('sourceopen', onOpen);
+      resolve();
+    };
+    mediaSource.addEventListener('sourceopen', onOpen, { once: true });
+    setTimeout(() => reject(new Error('MediaSource open timeout')), 1500);
+  });
+
+  const audioEndedPromise = new Promise<void>((resolve) => {
+    audio.onended = () => resolve();
+    audio.onerror = () => resolve();
+  });
+
+  try {
+    await waitForSourceOpen;
+    if (gen !== playbackGeneration) {
+      await reader.cancel().catch(() => {});
+      return true;
+    }
+
+    const sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+
+    const appendChunk = (chunk: Uint8Array): Promise<void> =>
+      new Promise((resolve, reject) => {
+        const doAppend = () => {
+          if (gen !== playbackGeneration || mediaSource.readyState !== 'open') {
+            resolve();
+            return;
+          }
+          const onDone = () => {
+            sourceBuffer.removeEventListener('updateend', onDone);
+            sourceBuffer.removeEventListener('error', onErr);
+            resolve();
+          };
+          const onErr = () => {
+            sourceBuffer.removeEventListener('updateend', onDone);
+            sourceBuffer.removeEventListener('error', onErr);
+            reject(new Error('SourceBuffer append error'));
+          };
+          sourceBuffer.addEventListener('updateend', onDone, { once: true });
+          sourceBuffer.addEventListener('error', onErr, { once: true });
+          try {
+            const copy = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+            sourceBuffer.appendBuffer(copy as ArrayBuffer);
+          } catch (err) {
+            sourceBuffer.removeEventListener('updateend', onDone);
+            sourceBuffer.removeEventListener('error', onErr);
+            reject(err);
+          }
+        };
+
+        if (sourceBuffer.updating) {
+          sourceBuffer.addEventListener('updateend', doAppend, { once: true });
+        } else {
+          doAppend();
+        }
+      });
+
+    let playInitiated = false;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (gen !== playbackGeneration) {
+        await reader.cancel().catch(() => {});
+        return true;
+      }
+      if (!value || value.byteLength === 0) continue;
+
+      collectedChunks.push(value);
+      totalBytes += value.byteLength;
+
+      if (!mseAbortedForFallback) {
+        try {
+          await appendChunk(value);
+          if (!playInitiated) {
+            playInitiated = true;
+            try {
+              await audio.play();
+              triggerStartOnce();
+            } catch {
+              // Autoplay blocked on HTMLAudioElement in iframe -> switch seamlessly to unlocked WebAudio after stream drains
+              mseAbortedForFallback = true;
+              try {
+                audio.pause();
+              } catch {
+                // ignore
+              }
+            }
+          }
+        } catch {
+          mseAbortedForFallback = true;
+        }
+      }
+    }
+
+    if (totalBytes > 0) {
+      const fullBytes = concatUint8Arrays(collectedChunks, totalBytes);
+      storeClientTtsCache(cacheKey, {
+        provider: 'elevenlabs',
+        mimeType,
+        bytes: fullBytes,
+        modelUsed: meta.modelUsed,
+        voiceId: meta.voiceId,
+      });
+
+      if (mseAbortedForFallback) {
+        if (gen !== playbackGeneration) return true;
+        try {
+          audio.pause();
+          audio.removeAttribute('src');
+        } catch {
+          // ignore
+        }
+        return playAudioBytes(fullBytes, mimeType, gen, triggerStartOnce);
+      }
+    }
+
+    if (!mseAbortedForFallback && mediaSource.readyState === 'open') {
+      if (sourceBuffer.updating) {
+        await new Promise<void>((resolve) =>
+          sourceBuffer.addEventListener('updateend', () => resolve(), { once: true }),
+        );
+      }
+      try {
+        if (mediaSource.readyState === 'open') {
+          mediaSource.endOfStream();
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!playInitiated && totalBytes > 0 && !mseAbortedForFallback) {
+      try {
+        await audio.play();
+        triggerStartOnce();
+      } catch {
+        const fullBytes = concatUint8Arrays(collectedChunks, totalBytes);
+        return playAudioBytes(fullBytes, mimeType, gen, triggerStartOnce);
+      }
+    }
+
+    if (!mseAbortedForFallback && gen === playbackGeneration) {
+      await audioEndedPromise;
+    }
+
+    return totalBytes > 0;
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // ignore
+    }
+    if (gen === playbackGeneration) {
+      if (activeAudioElement === audio) activeAudioElement = null;
+      if (activeAudioObjectUrl === objectUrl) {
+        try {
+          URL.revokeObjectURL(objectUrl);
+        } catch {
+          // ignore
+        }
+        activeAudioObjectUrl = null;
+      }
+    }
+  }
 }
 
 /**
  * Strictly plays ONLY the owner's selected ElevenLabs voice (from Render ELEVENLABS_VOICE_ID).
  * Zero alternate voices and zero robotic OS / browser TTS fallback are ever used.
+ *
+ * Ultra-low-latency path:
+ * 1. Client in-memory LRU cache -> <10ms instant playback (0 network calls).
+ * 2. Streaming binary `/api/v1/voice/tts/stream` (ElevenLabs `/stream` + `eleven_flash_v2_5` +
+ *    `optimize_streaming_latency=3` + `mp3_22050_32`) -> plays on first audio chunk via MediaSource,
+ *    with instant WebAudio fallback for server cache HITs or iframe autoplay policies.
  */
 export async function speakNaturalMarathi(
   text: string,
@@ -403,66 +609,130 @@ export async function speakNaturalMarathi(
     onUnavailable?: (reason: ElevenLabsFallbackReason, errorMessage: string) => void;
   },
 ): Promise<VoiceTtsProvider | 'muted' | 'unavailable'> {
-  const cleanText = text.trim();
+  const cleanText = normalizeClientCacheKey(text);
   if (!cleanText || options?.muted) return 'muted';
 
   stopMarathiSpeechPlayback();
+  const gen = playbackGeneration;
 
   try {
-    const fetchResult = await fetchElevenLabsTtsAudio(cleanText, {
-      forceRefresh: options?.forceRefresh,
+    // 1. Instant client in-memory LRU cache hit (zero API delay)
+    if (!options?.forceRefresh) {
+      const cached = readClientTtsCache(cleanText);
+      if (cached) {
+        const meta: SpeechPlaybackMeta = {
+          provider: 'elevenlabs',
+          modelUsed: cached.modelUsed,
+          voiceId: cached.voiceId,
+          cacheHit: true,
+          streamed: false,
+        };
+        await playAudioBytes(cached.bytes, cached.mimeType, gen, () =>
+          options?.onStart?.('elevenlabs', meta),
+        );
+        return 'elevenlabs';
+      }
+    }
+
+    // 2. Direct binary streaming request to server proxy (ElevenLabs `/stream`)
+    const token = await getAdminAuthToken();
+    if (gen !== playbackGeneration) return 'elevenlabs';
+
+    const abortController = new AbortController();
+    activeStreamAbortController = abortController;
+
+    const resp = await fetch('/api/v1/voice/tts/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        text: cleanText,
+        ...(options?.forceRefresh ? { forceRefresh: true } : {}),
+      }),
+      signal: abortController.signal,
     });
-    if (!fetchResult.ok) {
+
+    if (gen !== playbackGeneration) return 'elevenlabs';
+
+    if (!resp.ok) {
+      const errJson = (await resp.json().catch(() => ({}))) as {
+        error?: string;
+        elevenLabsStatus?: ElevenLabsFallbackReason;
+      };
+      const reason: ElevenLabsFallbackReason = errJson.elevenLabsStatus || 'voice_error';
+      const errorMessage =
+        errJson.error || 'तुमचा निवडलेला ElevenLabs आवाज सध्या उपलब्ध नाही.';
+      options?.onUnavailable?.(reason, errorMessage);
+      return 'unavailable';
+    }
+
+    const mimeType = resp.headers.get('Content-Type') || 'audio/mpeg';
+    const modelUsed = resp.headers.get('X-Voice-Model') || undefined;
+    const voiceId = resp.headers.get('X-Voice-Id') || undefined;
+    const serverCacheHit = resp.headers.get('X-Voice-Cache') === 'HIT';
+
+    const meta: SpeechPlaybackMeta = {
+      provider: 'elevenlabs',
+      modelUsed,
+      voiceId,
+      cacheHit: serverCacheHit,
+      streamed: !serverCacheHit,
+    };
+
+    // For live upstream ElevenLabs streams, start progressive chunk-by-chunk playback immediately via MSE
+    if (!serverCacheHit && resp.body && supportsStreamingMpegMse()) {
+      const played = await playStreamedMpegResponse({
+        response: resp,
+        cacheKey: cleanText,
+        mimeType,
+        meta,
+        gen,
+        onStart: () => options?.onStart?.('elevenlabs', meta),
+      });
+      if (played) {
+        return 'elevenlabs';
+      }
+      if (gen !== playbackGeneration) return 'elevenlabs';
+    }
+
+    // For server cache HITs or browsers without audio/mpeg MSE: read raw binary MP3 directly (no base64 overhead!)
+    const arrayBuf = await resp.arrayBuffer();
+    if (gen !== playbackGeneration) return 'elevenlabs';
+    if (arrayBuf.byteLength === 0) {
       options?.onUnavailable?.(
-        fetchResult.fallbackReason || 'voice_error',
-        fetchResult.errorMessage || 'तुमचा निवडलेला ElevenLabs आवाज सध्या उपलब्ध नाही.',
+        'voice_error',
+        'तुमचा निवडलेला ElevenLabs आवाज सध्या उपलब्ध नाही.',
       );
       return 'unavailable';
     }
 
-    const { provider, mimeType, bytes, modelUsed, voiceId } = fetchResult.audio;
-    const meta: SpeechPlaybackMeta = {
-      provider,
+    const bytes = new Uint8Array(arrayBuf);
+    storeClientTtsCache(cleanText, {
+      provider: 'elevenlabs',
+      mimeType,
+      bytes,
       modelUsed,
       voiceId,
-    };
-
-    // Method 1: Unlocked Web Audio API (immune to iframe/async HTMLAudio autoplay blocks)
-    const playedViaWebAudio = await playAudioBufferViaWebAudio(bytes, () =>
-      options?.onStart?.(provider, meta),
-    );
-    if (playedViaWebAudio) {
-      return provider;
-    }
-
-    // Method 2: HTMLAudioElement fallback with Blob URL (still pure ElevenLabs MP3 audio)
-    const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mimeType });
-    const url = URL.createObjectURL(blob);
-    activeAudioObjectUrl = url;
-    const audio = new Audio(url);
-    activeAudioElement = audio;
-
-    await new Promise<void>((resolve, reject) => {
-      audio.onplay = () => options?.onStart?.(provider, meta);
-      audio.onended = () => {
-        stopMarathiSpeechPlayback();
-        resolve();
-      };
-      audio.onerror = () => {
-        stopMarathiSpeechPlayback();
-        reject(new Error('Audio element playback failed.'));
-      };
-      audio.play().catch((playErr) => {
-        stopMarathiSpeechPlayback();
-        reject(playErr);
-      });
     });
 
-    return provider;
+    await playAudioBytes(bytes, mimeType, gen, () => options?.onStart?.('elevenlabs', meta));
+    return 'elevenlabs';
   } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      return 'elevenlabs';
+    }
+    if (gen !== playbackGeneration) {
+      return 'elevenlabs';
+    }
     console.warn('[Voice TTS Client] ElevenLabs playback unavailable (robotic fallback disabled):', err);
     options?.onUnavailable?.('voice_error', 'ElevenLabs आवाज प्ले होऊ शकला नाही.');
     return 'unavailable';
+  } finally {
+    if (gen === playbackGeneration) {
+      activeStreamAbortController = null;
+    }
   }
 }
 
