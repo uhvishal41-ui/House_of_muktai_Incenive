@@ -1,14 +1,12 @@
 import React, { useState } from 'react';
-import { ArrowRight, Crown, Eye, EyeOff, KeyRound, Languages, ShieldCheck } from 'lucide-react';
+import { ArrowRight, Eye, EyeOff, KeyRound, Languages } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { useAuth } from '../context/AuthContext';
 import { COMPANY_BRAND } from '../lib/companyBrand';
+import { BOOTSTRAPPED_ADMIN_EMAIL } from '../lib/firebase';
 import { getSavedLang, saveLang, type AppLang } from '../lib/i18n';
 import { BrandLogo } from './common/BrandLogo';
-import {
-  AutoMixGoogleButton,
-  ContinuousAnimatedBrandName,
-} from './common/PlayfulAnimatedBrand';
+import { ContinuousAnimatedBrandName } from './common/PlayfulAnimatedBrand';
 
 export function LoginView() {
   const {
@@ -84,6 +82,15 @@ export function LoginView() {
 
   const handleAdminPasswordLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    const trimmedUser = adminUsername.trim().toLowerCase();
+    if (
+      trimmedUser === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase() ||
+      trimmedUser === 'uhvishal41' ||
+      trimmedUser === 'owner'
+    ) {
+      await handleMainOwnerGoogleLogin();
+      return;
+    }
     if (!adminUsername.trim() || !adminPassword) {
       setError('Enter both Admin Username and Password.');
       return;
@@ -235,7 +242,7 @@ export function LoginView() {
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  Admin / Owner Panel
+                  Admin Panel
                 </button>
                 <button
                   type="button"
@@ -257,14 +264,14 @@ export function LoginView() {
 
               <h2 className="text-lg font-semibold text-[#0F1F3D]">
                 {portalMode === 'admin'
-                  ? 'Admin & Main Owner Sign In'
+                  ? 'Admin Sign In'
                   : isMr
                     ? 'कर्मचारी लॉगिन (Employee Sign In)'
                     : 'Employee Sign In'}
               </h2>
               <p className="text-xs text-slate-500 mt-1">
                 {portalMode === 'admin'
-                  ? 'Admin signs in with Username & Password · Main Owner signs in with Registered Gmail.'
+                  ? 'Sign in with your assigned Admin Username and Password.'
                   : isMr
                     ? 'तुमचा Employee ID / Login ID आणि पासवर्ड टाकून पगार स्लिप व इन्सेंटिव्ह पहा.'
                     : 'Sign in with your Employee ID / Login ID and personal password.'}
@@ -350,37 +357,6 @@ export function LoginView() {
                     <ArrowRight className="w-4 h-4" />
                   </button>
                 </form>
-
-                {/* Divider for Main Owner Exclusive Access */}
-                <div className="relative py-1">
-                  <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-slate-200" />
-                  </div>
-                  <div className="relative flex justify-center">
-                    <span className="bg-white px-3 text-[11px] font-semibold text-[#9A7625] inline-flex items-center gap-1.5">
-                      <Crown className="w-3.5 h-3.5" />
-                      <span>Main Owner Access (Registered Gmail Only)</span>
-                    </span>
-                  </div>
-                </div>
-
-                <div className="space-y-2.5">
-                  <AutoMixGoogleButton
-                    onClick={handleMainOwnerGoogleLogin}
-                    disabled={busy}
-                    busy={busy}
-                    label="Main Owner Sign In with Google"
-                    busyLabel="Authenticating Main Owner..."
-                    variant="secondary"
-                  />
-                  <div className="flex items-center gap-2 text-[11px] text-slate-500">
-                    <ShieldCheck className="w-3.5 h-3.5 text-[#B8923A] shrink-0" />
-                    <span>
-                      Owner-only controls appear strictly when signed in with the registered Main
-                      Owner Gmail.
-                    </span>
-                  </div>
-                </div>
               </div>
             ) : (
               <form onSubmit={handleEmployeeLogin} className="space-y-3.5">
