@@ -505,110 +505,120 @@ export function AdminOverview({
       </div>
 
       {/* Compact Secondary Operational Summary Strip (5 Quick Access Cards) */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
         <button
           type="button"
           onClick={() => onNavigate('analytics')}
-          className="text-left bg-white border border-slate-200/90 rounded-xl p-4 hover:border-[#0F1F3D]/35 hover:bg-slate-50/40 transition-all cursor-pointer group"
+          className="text-left bg-white border border-slate-200/95 rounded-xl p-4 hover:border-[#B8923A] hover:shadow-xs transition-all cursor-pointer group flex flex-col justify-between"
         >
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-[11px] font-medium text-slate-500 truncate">All-Time Incentive</p>
-            <Award className="w-3.5 h-3.5 text-[#B8923A] shrink-0" />
+          <div>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-slate-600 truncate">All-Time Incentive</p>
+              <Award className="w-4 h-4 text-[#B8923A] shrink-0" />
+            </div>
+            <p className="text-lg font-bold text-[#0F1F3D] mt-2 truncate font-mono tabular-nums">
+              <AnimatedCounter value={metrics.allTimeTotalPaise} mode="paise" durationMs={700} />
+            </p>
           </div>
-          <p className="text-base sm:text-lg font-bold text-[#0F1F3D] mt-1.5 truncate">
-            <AnimatedCounter value={metrics.allTimeTotalPaise} mode="paise" durationMs={700} />
-          </p>
-          <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-[#1E3A5F] group-hover:underline">
-            Analytics &amp; Targets
-            <ArrowUpRight className="w-3 h-3" />
+          <span className="mt-3 pt-2.5 border-t border-slate-100 inline-flex items-center justify-between text-[11px] font-semibold text-[#1E3A5F] group-hover:text-[#0F1F3D]">
+            <span>Analytics &amp; Targets</span>
+            <ArrowUpRight className="w-3.5 h-3.5 text-[#B8923A]" />
           </span>
         </button>
 
         <button
           type="button"
           onClick={() => onNavigate('employees')}
-          className="text-left bg-white border border-slate-200/90 rounded-xl p-4 hover:border-[#0F1F3D]/35 hover:bg-slate-50/40 transition-all cursor-pointer group"
+          className="text-left bg-white border border-slate-200/95 rounded-xl p-4 hover:border-[#B8923A] hover:shadow-xs transition-all cursor-pointer group flex flex-col justify-between"
         >
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-[11px] font-medium text-slate-500 truncate">Active Employees</p>
-            <Users className="w-3.5 h-3.5 text-[#1E3A5F] shrink-0" />
+          <div>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-slate-600 truncate">Active Employees</p>
+              <Users className="w-4 h-4 text-[#1E3A5F] shrink-0" />
+            </div>
+            <p className="text-lg font-bold text-[#0F1F3D] mt-2 font-mono tabular-nums">
+              <AnimatedCounter value={metrics.activeEmployees} mode="integer" durationMs={650} />
+              <span className="text-xs font-normal text-slate-400">
+                {' '}
+                / {employees.length}
+              </span>
+            </p>
           </div>
-          <p className="text-base sm:text-lg font-bold text-[#0F1F3D] mt-1.5">
-            <AnimatedCounter value={metrics.activeEmployees} mode="integer" durationMs={650} />
-            <span className="text-xs font-normal text-slate-400 font-mono">
-              {' '}
-              / {employees.length}
-            </span>
-          </p>
-          <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-[#1E3A5F] group-hover:underline">
-            Employee Master
-            <ArrowUpRight className="w-3 h-3" />
+          <span className="mt-3 pt-2.5 border-t border-slate-100 inline-flex items-center justify-between text-[11px] font-semibold text-[#1E3A5F] group-hover:text-[#0F1F3D]">
+            <span>Employee Master</span>
+            <ArrowUpRight className="w-3.5 h-3.5 text-[#B8923A]" />
           </span>
         </button>
 
         <button
           type="button"
           onClick={() => onNavigate('branches')}
-          className="text-left bg-white border border-slate-200/90 rounded-xl p-4 hover:border-[#0F1F3D]/35 hover:bg-slate-50/40 transition-all cursor-pointer group"
+          className="text-left bg-white border border-slate-200/95 rounded-xl p-4 hover:border-[#B8923A] hover:shadow-xs transition-all cursor-pointer group flex flex-col justify-between"
         >
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-[11px] font-medium text-slate-500 truncate">Retail Branches</p>
-            <Building2 className="w-3.5 h-3.5 text-[#B8923A] shrink-0" />
+          <div>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-slate-600 truncate">Retail Branches</p>
+              <Building2 className="w-4 h-4 text-[#B8923A] shrink-0" />
+            </div>
+            <p className="text-lg font-bold text-[#0F1F3D] mt-2 font-mono tabular-nums">
+              <AnimatedCounter value={metrics.activeBranches} mode="integer" durationMs={650} />
+              <span className="text-xs font-normal text-slate-400">
+                {' '}
+                / {branches.length || 12}
+              </span>
+            </p>
           </div>
-          <p className="text-base sm:text-lg font-bold text-[#0F1F3D] mt-1.5">
-            <AnimatedCounter value={metrics.activeBranches} mode="integer" durationMs={650} />
-            <span className="text-xs font-normal text-slate-400 font-mono">
-              {' '}
-              / {branches.length || 12}
-            </span>
-          </p>
-          <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-[#1E3A5F] group-hover:underline">
-            Branch Master
-            <ArrowUpRight className="w-3 h-3" />
+          <span className="mt-3 pt-2.5 border-t border-slate-100 inline-flex items-center justify-between text-[11px] font-semibold text-[#1E3A5F] group-hover:text-[#0F1F3D]">
+            <span>Branch Master</span>
+            <ArrowUpRight className="w-3.5 h-3.5 text-[#B8923A]" />
           </span>
         </button>
 
         <button
           type="button"
           onClick={() => onNavigate(metrics.pendingBatches > 0 ? 'history' : 'import')}
-          className="text-left bg-white border border-slate-200/90 rounded-xl p-4 hover:border-[#0F1F3D]/35 hover:bg-slate-50/40 transition-all cursor-pointer group"
+          className="text-left bg-white border border-slate-200/95 rounded-xl p-4 hover:border-[#B8923A] hover:shadow-xs transition-all cursor-pointer group flex flex-col justify-between"
         >
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-[11px] font-medium text-slate-500 truncate">Pending Batches</p>
-            <Clock
-              className={`w-3.5 h-3.5 shrink-0 ${
-                metrics.pendingBatches > 0 ? 'text-amber-600' : 'text-emerald-600'
-              }`}
-            />
+          <div>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-slate-600 truncate">Pending Batches</p>
+              <Clock
+                className={`w-4 h-4 shrink-0 ${
+                  metrics.pendingBatches > 0 ? 'text-amber-600' : 'text-emerald-600'
+                }`}
+              />
+            </div>
+            <p className="text-lg font-bold text-[#0F1F3D] mt-2 font-mono tabular-nums">
+              <AnimatedCounter value={metrics.pendingBatches} mode="integer" durationMs={650} />
+            </p>
           </div>
-          <p className="text-base sm:text-lg font-bold text-[#0F1F3D] mt-1.5">
-            <AnimatedCounter value={metrics.pendingBatches} mode="integer" durationMs={650} />
-          </p>
-          <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-[#1E3A5F] group-hover:underline">
-            {metrics.pendingBatches > 0 ? 'Review Batches' : 'Upload Excel'}
-            <ArrowUpRight className="w-3 h-3" />
+          <span className="mt-3 pt-2.5 border-t border-slate-100 inline-flex items-center justify-between text-[11px] font-semibold text-[#1E3A5F] group-hover:text-[#0F1F3D]">
+            <span>{metrics.pendingBatches > 0 ? 'Review Batches' : 'Upload Excel'}</span>
+            <ArrowUpRight className="w-3.5 h-3.5 text-[#B8923A]" />
           </span>
         </button>
 
         <button
           type="button"
           onClick={() => onNavigate('payouts')}
-          className="text-left bg-white border border-slate-200/90 rounded-xl p-4 hover:border-[#0F1F3D]/35 hover:bg-slate-50/40 transition-all cursor-pointer group col-span-2 sm:col-span-1"
+          className="text-left bg-white border border-slate-200/95 rounded-xl p-4 hover:border-[#B8923A] hover:shadow-xs transition-all cursor-pointer group col-span-2 sm:col-span-1 flex flex-col justify-between"
         >
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-[11px] font-medium text-slate-500 truncate">Open Queries</p>
-            <MessageSquare
-              className={`w-3.5 h-3.5 shrink-0 ${
-                metrics.openQueries > 0 ? 'text-amber-600' : 'text-emerald-600'
-              }`}
-            />
+          <div>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-slate-600 truncate">Open Queries</p>
+              <MessageSquare
+                className={`w-4 h-4 shrink-0 ${
+                  metrics.openQueries > 0 ? 'text-amber-600' : 'text-emerald-600'
+                }`}
+              />
+            </div>
+            <p className="text-lg font-bold text-[#0F1F3D] mt-2 font-mono tabular-nums">
+              <AnimatedCounter value={metrics.openQueries} mode="integer" durationMs={650} />
+            </p>
           </div>
-          <p className="text-base sm:text-lg font-bold text-[#0F1F3D] mt-1.5">
-            <AnimatedCounter value={metrics.openQueries} mode="integer" durationMs={650} />
-          </p>
-          <span className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-[#1E3A5F] group-hover:underline">
-            {metrics.openQueries > 0 ? 'Resolve Queries' : 'Payouts Desk'}
-            <ArrowUpRight className="w-3 h-3" />
+          <span className="mt-3 pt-2.5 border-t border-slate-100 inline-flex items-center justify-between text-[11px] font-semibold text-[#1E3A5F] group-hover:text-[#0F1F3D]">
+            <span>{metrics.openQueries > 0 ? 'Resolve Queries' : 'Payouts Desk'}</span>
+            <ArrowUpRight className="w-3.5 h-3.5 text-[#B8923A]" />
           </span>
         </button>
       </div>
@@ -616,45 +626,55 @@ export function AdminOverview({
       {/* Main two-column operational section */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
         {/* Branch-wise incentive distribution */}
-        <section className="xl:col-span-7 bg-white border border-slate-200/90 rounded-xl p-6">
-          <div className="flex items-center justify-between gap-4 mb-5">
+        <section className="xl:col-span-7 bg-white border border-slate-200/95 rounded-2xl p-5 sm:p-6 shadow-2xs">
+          <div className="flex items-center justify-between gap-4 pb-4 mb-5 border-b border-slate-100">
             <div>
-              <h2 className="text-base font-semibold text-[#0F1F3D]">
+              <h2 className="text-base font-bold text-[#0F1F3D]">
                 Branch-Wise Incentives
               </h2>
               {selectedMonth && (
-                <p className="text-xs text-slate-500 mt-0.5">{formatMonthLabel(selectedMonth)}</p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {formatMonthLabel(selectedMonth)} · 12 Retail Branches Distribution
+                </p>
               )}
             </div>
+            <button
+              type="button"
+              onClick={() => onNavigate('branch-reports')}
+              className="text-xs font-semibold text-[#1E3A5F] hover:text-[#0F1F3D] inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+            >
+              <span>Branch Reports</span>
+              <ArrowUpRight className="w-3.5 h-3.5 text-[#B8923A]" />
+            </button>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5 p-3.5 rounded-xl bg-[#F8FAFC] border border-slate-200/80 text-xs">
-            <div>
-              <p className="text-slate-500 font-medium">New Items Sale</p>
-              <p className="font-mono tabular-nums font-semibold text-[#0F1F3D] text-sm mt-0.5">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 sm:gap-0 sm:divide-x sm:divide-slate-200/90 mb-5 p-4 rounded-xl bg-[#F8FAFC] border-2 border-[#B8923A]/55 shadow-2xs text-xs">
+            <div className="sm:pr-4">
+              <p className="text-slate-500 font-semibold">New Items Sale</p>
+              <p className="font-mono tabular-nums font-bold text-[#0F1F3D] text-base mt-1">
                 {formatINRFromPaise(metrics.totalComp1Paise)}
               </p>
-              <p className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
+              <p className="text-[11px] text-slate-500 font-mono tabular-nums mt-1">
                 Sale: {formatINRFromPaise(metrics.totalSaleAmt1Paise)} · Qty:{' '}
                 {formatQty(metrics.totalSaleQty1)}
               </p>
             </div>
-            <div>
-              <p className="text-slate-500 font-medium">Old Items Sale</p>
-              <p className="font-mono tabular-nums font-semibold text-[#0F1F3D] text-sm mt-0.5">
+            <div className="sm:px-4 pt-3 sm:pt-0 border-t sm:border-t-0 border-slate-200/70">
+              <p className="text-slate-500 font-semibold">Old Items Sale</p>
+              <p className="font-mono tabular-nums font-bold text-[#0F1F3D] text-base mt-1">
                 {formatINRFromPaise(metrics.totalComp2Paise)}
               </p>
-              <p className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
+              <p className="text-[11px] text-slate-500 font-mono tabular-nums mt-1">
                 Sale: {formatINRFromPaise(metrics.totalSaleAmt2Paise)} · Qty:{' '}
                 {formatQty(metrics.totalSaleQty2)}
               </p>
             </div>
-            <div>
-              <p className="text-slate-500 font-medium">Other Items Sale</p>
-              <p className="font-mono tabular-nums font-semibold text-[#0F1F3D] text-sm mt-0.5">
+            <div className="sm:pl-4 pt-3 sm:pt-0 border-t sm:border-t-0 border-slate-200/70">
+              <p className="text-slate-500 font-semibold">Other Items Sale</p>
+              <p className="font-mono tabular-nums font-bold text-[#0F1F3D] text-base mt-1">
                 {formatINRFromPaise(metrics.totalComp3Paise)}
               </p>
-              <p className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
+              <p className="text-[11px] text-slate-500 font-mono tabular-nums mt-1">
                 Sale: {formatINRFromPaise(metrics.totalSaleAmt3Paise)} · Qty:{' '}
                 {formatQty(metrics.totalSaleQty3)}
               </p>
@@ -675,27 +695,35 @@ export function AdminOverview({
               </button>
             </div>
           ) : (
-            <div className="space-y-3.5">
-              {metrics.branchBreakdown.map((item) => {
+            <div className="divide-y divide-slate-100 border border-slate-200/80 rounded-xl overflow-hidden bg-white">
+              {metrics.branchBreakdown.map((item, idx) => {
                 const widthPct =
                   item.totalPaise > 0
                     ? Math.max(4, Math.round((item.totalPaise / metrics.maxBranchPaise) * 100))
                     : 0;
                 return (
-                  <div key={item.branchId} className="space-y-1.5">
+                  <div
+                    key={item.branchId}
+                    className="p-3.5 hover:bg-slate-50/70 transition-colors space-y-2"
+                  >
                     <div className="flex items-center justify-between text-sm gap-4">
-                      <div className="min-w-0">
-                        <span className="text-[#0F1F3D] font-medium truncate block">
-                          {item.name}
+                      <div className="min-w-0 flex items-baseline gap-2">
+                        <span className="text-[11px] font-mono text-slate-400 shrink-0">
+                          {String(idx + 1).padStart(2, '0')}.
                         </span>
-                        {(item.totalSaleAmtPaise > 0 || item.totalSaleQty > 0) && (
-                          <span className="text-[11px] text-slate-500 font-mono tabular-nums">
-                            Sale: {formatINRFromPaise(item.totalSaleAmtPaise)} · Qty:{' '}
-                            {formatQty(item.totalSaleQty)}
+                        <div className="min-w-0">
+                          <span className="text-[#0F1F3D] font-semibold truncate block">
+                            {item.name}
                           </span>
-                        )}
+                          {(item.totalSaleAmtPaise > 0 || item.totalSaleQty > 0) && (
+                            <span className="text-[11px] text-slate-500 font-mono tabular-nums">
+                              Sale: {formatINRFromPaise(item.totalSaleAmtPaise)} · Qty:{' '}
+                              {formatQty(item.totalSaleQty)}
+                            </span>
+                          )}
+                        </div>
                       </div>
-                      <span className="font-mono tabular-nums text-[#0F1F3D] font-semibold shrink-0">
+                      <span className="font-mono tabular-nums text-[#0F1F3D] font-bold shrink-0">
                         {formatINRFromPaise(item.totalPaise)}
                       </span>
                     </div>
@@ -713,15 +741,19 @@ export function AdminOverview({
         </section>
 
         {/* Recent Import Batches */}
-        <section className="xl:col-span-5 bg-white border border-slate-200/90 rounded-xl p-6">
-          <div className="flex items-center justify-between gap-4 mb-5">
-            <h2 className="text-base font-semibold text-[#0F1F3D]">Recent Import Batches</h2>
+        <section className="xl:col-span-5 bg-white border border-slate-200/95 rounded-2xl p-5 sm:p-6 shadow-2xs">
+          <div className="flex items-center justify-between gap-4 pb-4 mb-5 border-b border-slate-100">
+            <div>
+              <h2 className="text-base font-bold text-[#0F1F3D]">Recent Import Batches</h2>
+              <p className="text-xs text-slate-500 mt-0.5">Latest Excel uploads &amp; audit status</p>
+            </div>
             <button
               type="button"
               onClick={() => onNavigate('history')}
-              className="text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer whitespace-nowrap"
+              className="text-xs font-semibold text-[#1E3A5F] hover:text-[#0F1F3D] inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
             >
-              View All
+              <span>View All</span>
+              <ArrowUpRight className="w-3.5 h-3.5 text-[#B8923A]" />
             </button>
           </div>
 
@@ -731,7 +763,7 @@ export function AdminOverview({
               <p className="text-sm text-slate-600">No Excel imports uploaded yet</p>
             </div>
           ) : (
-            <div className="divide-y divide-slate-100">
+            <div className="divide-y divide-slate-100 border border-slate-200/80 rounded-xl overflow-hidden bg-white">
               {recentBatches.map((batch) => {
                 const statusColor =
                   batch.status === 'PUBLISHED'
@@ -747,14 +779,19 @@ export function AdminOverview({
                     ? batch.periodStart || batch.businessDate
                     : `${batch.periodStart || batch.businessDate} → ${batch.periodEnd || batch.businessDate}`;
                 return (
-                  <div key={batch.batchId} className="py-3.5 first:pt-0 last:pb-0">
+                  <div
+                    key={batch.batchId}
+                    className="p-3.5 hover:bg-slate-50/70 transition-colors"
+                  >
                     <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm font-medium text-[#0F1F3D] truncate">{batch.fileName}</p>
-                      <span className={`text-xs font-semibold shrink-0 ${statusColor}`}>
+                      <p className="text-sm font-semibold text-[#0F1F3D] truncate">
+                        {batch.fileName}
+                      </p>
+                      <span className={`text-xs font-bold shrink-0 ${statusColor}`}>
                         {batch.status}
                       </span>
                     </div>
-                    <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+                    <div className="mt-1.5 flex items-center justify-between text-xs text-slate-500">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="font-mono font-semibold text-[#9A7625]">{batchType}</span>
                         <span aria-hidden="true">·</span>
@@ -762,7 +799,7 @@ export function AdminOverview({
                         <span aria-hidden="true">·</span>
                         <span>{batch.totalRows} rows</span>
                       </div>
-                      <span className="font-mono tabular-nums text-[#0F1F3D] font-medium shrink-0">
+                      <span className="font-mono tabular-nums text-[#0F1F3D] font-bold shrink-0">
                         {formatINRFromPaise(batch.totalIncentivePaise)}
                       </span>
                     </div>

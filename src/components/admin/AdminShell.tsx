@@ -475,35 +475,38 @@ export function AdminShell() {
                 : item.id === 'history'
                   ? pendingApprovalCount
                   : 0;
+            const showDividerAfter = item.id === 'import' || item.id === 'salary';
             return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setActiveTab(item.id)}
-                className={`w-full h-10 px-3 rounded-xl text-sm font-medium inline-flex items-center justify-between gap-2 transition-all whitespace-nowrap cursor-pointer ${
-                  active
-                    ? 'bg-white text-[#0F1F3D] font-semibold shadow-xs'
-                    : 'text-slate-300 hover:bg-white/10 hover:text-white'
-                }`}
-              >
-                <span className="inline-flex items-center gap-3 min-w-0">
-                  <Icon
-                    className={`w-4 h-4 shrink-0 ${
-                      active ? 'text-[#B8923A]' : 'text-slate-400'
-                    }`}
-                  />
-                  <span className="truncate">{item.label}</span>
-                </span>
-                {countBadge > 0 && (
-                  <span
-                    className={`text-[11px] font-mono font-bold ${
-                      active ? 'text-[#9A7625]' : 'text-[#DFC27D]'
-                    }`}
-                  >
-                    {countBadge}
+              <React.Fragment key={item.id}>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab(item.id)}
+                  className={`w-full h-10 px-3 rounded-xl text-sm font-medium inline-flex items-center justify-between gap-2 transition-all whitespace-nowrap cursor-pointer ${
+                    active
+                      ? 'bg-white text-[#0F1F3D] font-semibold shadow-xs ring-1 ring-[#DFC27D]/60'
+                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-3 min-w-0">
+                    <Icon
+                      className={`w-4 h-4 shrink-0 ${
+                        active ? 'text-[#B8923A]' : 'text-slate-400'
+                      }`}
+                    />
+                    <span className="truncate">{item.label}</span>
                   </span>
-                )}
-              </button>
+                  {countBadge > 0 && (
+                    <span
+                      className={`text-[11px] font-mono font-bold ${
+                        active ? 'text-[#9A7625]' : 'text-[#DFC27D]'
+                      }`}
+                    >
+                      {countBadge}
+                    </span>
+                  )}
+                </button>
+                {showDividerAfter && <div className="my-1.5 border-t border-white/10" />}
+              </React.Fragment>
             );
           })}
 
