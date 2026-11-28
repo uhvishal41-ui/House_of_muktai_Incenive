@@ -886,6 +886,9 @@ export function AdminShell() {
                     batches={batches}
                     incentives={incentives}
                     monthlySummaries={monthlySummaries}
+                    salarySlips={salarySlips}
+                    payoutRecords={payoutRecords}
+                    payrollLockSettings={payrollLockSettings}
                     employeeQueries={employeeQueries}
                     onNavigate={(tab) => setActiveTab(tab)}
                   />
