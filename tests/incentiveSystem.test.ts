@@ -6369,9 +6369,9 @@ test('86. ElevenLabs strictly uses ONLY selected ELEVENLABS_VOICE_ID (never swit
 });
 
 // =========================================================================
-// TEST 87: Strict ElevenLabs-Only Single Voice (Zero Robotic/Alternate Fallback) & 100% Feminine Marathi Persona
+// TEST 87: Dual-Engine Sarvam AI + ElevenLabs TTS (Zero Robotic Fallback) & 100% Feminine Marathi Persona
 // =========================================================================
-test('87. Voice assistant enforces strict ElevenLabs-only single voice (zero speechSynthesis/premade fallback) and 100% feminine Marathi persona', async () => {
+test('87. Voice assistant supports dual Sarvam AI + ElevenLabs engines with zero speechSynthesis fallback and 100% feminine Marathi persona', async () => {
   const voiceServiceSrc = fs.readFileSync(
     path.resolve(process.cwd(), 'server/voiceService.ts'),
     'utf-8',
@@ -6400,8 +6400,9 @@ test('87. Voice assistant enforces strict ElevenLabs-only single voice (zero spe
   assert.equal(voiceServiceSrc.includes('FREE_PREMADE_FEMALE_VOICES'), false);
   assert.equal(voiceServiceSrc.includes('EXAVITQu4vr4xnSDxMaL'), false);
 
-  // 2. Exact Marathi quota message & strict feminine Marathi persona
-  assert.ok(assistantUiSrc.includes('आजचा कोटा संपला आहे'));
+  // 2. Dual engine switcher UI & strict feminine Marathi persona
+  assert.ok(assistantUiSrc.includes('Sarvam AI (मृणाल)'));
+  assert.ok(assistantUiSrc.includes('ElevenLabs'));
   assert.ok(assistantUiSrc.includes('मी तुमची काय मदत करू शकते?'));
   assert.ok(voiceToolsSrc.includes('मी तुमची काय मदत करू शकते?'));
   assert.ok(voiceToolsSrc.includes('मी फाईल लगेच अपलोड करते.'));
@@ -6409,21 +6410,29 @@ test('87. Voice assistant enforces strict ElevenLabs-only single voice (zero spe
   assert.ok(voiceExecSrc.includes('मी सेव्ह करते.'));
   assert.equal(voiceExecSrc.includes('मी सेव्ह करतो'), false);
 
-  // 3. Server throws ElevenLabsSpeechError instead of falling back to Gemini/Google TTS when key is missing
+  // 3. Server supports dual providers (default sarvam) and still throws cleanly when keys are missing
   const {
     synthesizeMarathiSpeech,
+    synthesizeDualProviderSpeech,
     ElevenLabsSpeechError,
+    DualTtsUnavailableError,
     getVoiceCapabilitiesStatus,
     resetElevenLabsRuntimeStateForTest,
+    resetSarvamRuntimeStateForTest,
   } = await import('../server/voiceService.ts');
 
   resetElevenLabsRuntimeStateForTest();
-  const prevKey = process.env.ELEVENLABS_API_KEY;
+  resetSarvamRuntimeStateForTest();
+  const prevElKey = process.env.ELEVENLABS_API_KEY;
+  const prevSarvamKey = process.env.SARVAM_API_KEY;
   delete process.env.ELEVENLABS_API_KEY;
+  delete process.env.SARVAM_API_KEY;
   try {
     const caps = getVoiceCapabilitiesStatus();
-    assert.equal(caps.elevenLabsOnly, true);
-    assert.equal(caps.ttsPrimaryProvider, 'elevenlabs');
+    assert.equal(caps.defaultProvider, 'sarvam');
+    assert.deepEqual(caps.availableProviders, ['sarvam', 'elevenlabs']);
+    assert.equal(caps.sarvamSpeaker, 'mrunal');
+    assert.equal(caps.sarvamModelId, 'bulbul:v3');
 
     await assert.rejects(
       async () => {
@@ -6432,9 +6441,25 @@ test('87. Voice assistant enforces strict ElevenLabs-only single voice (zero spe
       (err: unknown) =>
         err instanceof ElevenLabsSpeechError && err.reason === 'missing_key',
     );
+
+    await assert.rejects(
+      async () => {
+        await synthesizeDualProviderSpeech({
+          text: 'नमस्कार मुक्ताई!',
+          provider: 'sarvam',
+          forceRefresh: true,
+        });
+      },
+      (err: unknown) =>
+        err instanceof DualTtsUnavailableError &&
+        err.sarvamStatus === 'missing_key' &&
+        err.elevenLabsStatus === 'missing_key',
+    );
   } finally {
-    if (prevKey !== undefined) process.env.ELEVENLABS_API_KEY = prevKey;
+    if (prevElKey !== undefined) process.env.ELEVENLABS_API_KEY = prevElKey;
+    if (prevSarvamKey !== undefined) process.env.SARVAM_API_KEY = prevSarvamKey;
     resetElevenLabsRuntimeStateForTest();
+    resetSarvamRuntimeStateForTest();
   }
 });
 

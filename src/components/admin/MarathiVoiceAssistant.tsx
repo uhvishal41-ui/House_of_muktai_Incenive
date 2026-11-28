@@ -27,11 +27,13 @@ import {
   callVoiceConverseApi,
   callVoiceTranscribeApi,
   fetchVoiceCapabilitiesStatus,
+  getSavedTtsProvider,
+  saveTtsProvider,
   speakNaturalMarathi,
   stopMarathiSpeechPlayback,
   unlockVoiceAudioPlayback,
-  type ElevenLabsFallbackReason,
   type SpeechPlaybackMeta,
+  type TtsUnavailableDetails,
   type VoiceCapabilitiesStatus,
   type VoiceContentMessage,
   type VoiceTtsProvider,
@@ -123,10 +125,13 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
   const [errorNote, setErrorNote] = useState('');
   const [textCommand, setTextCommand] = useState('');
   const [pendingConfirm, setPendingConfirm] = useState<VoicePendingConfirmation | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<VoiceTtsProvider>(() =>
+    getSavedTtsProvider(),
+  );
   const [ttsBadge, setTtsBadge] = useState<VoiceTtsProvider | null>(null);
+  const [ttsFallbackUsed, setTtsFallbackUsed] = useState(false);
   const [voiceCaps, setVoiceCaps] = useState<VoiceCapabilitiesStatus | null>(null);
-  const [ttsAlertReason, setTtsAlertReason] = useState<ElevenLabsFallbackReason | null>(null);
-  const [ttsAlertMessage, setTtsAlertMessage] = useState<string>('');
+  const [ttsUnavailable, setTtsUnavailable] = useState<TtsUnavailableDetails | null>(null);
   const [testingVoice, setTestingVoice] = useState(false);
   const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
@@ -156,6 +161,7 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
   const maxListenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mutedRef = useRef(muted);
+  const selectedProviderRef = useRef<VoiceTtsProvider>(selectedProvider);
   const envRef = useRef(env);
   const phaseRef = useRef<AssistantPhase>(phase);
   const wakeWordEnabledRef = useRef(wakeWordEnabled);
@@ -164,6 +170,11 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
   useEffect(() => {
     mutedRef.current = muted;
   }, [muted]);
+
+  useEffect(() => {
+    selectedProviderRef.current = selectedProvider;
+    saveTtsProvider(selectedProvider);
+  }, [selectedProvider]);
 
   useEffect(() => {
     envRef.current = env;
@@ -203,7 +214,7 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     setWakeWordActive(false);
   }, []);
 
-  // Cleanup voice/mic handles on unmount (zero browser speechSynthesis used — ElevenLabs only)
+  // Cleanup voice/mic handles on unmount (zero robotic browser TTS used — Sarvam AI + ElevenLabs only)
   useEffect(() => {
     return () => {
       isListeningSessionRef.current = false;
@@ -227,14 +238,8 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     const caps = await fetchVoiceCapabilitiesStatus();
     if (caps) {
       setVoiceCaps(caps);
-      if (caps.elevenLabsStatus === 'ready') {
-        setTtsAlertReason(null);
-        setTtsAlertMessage('');
-      } else {
-        setTtsAlertReason(caps.elevenLabsStatus);
-        if (caps.statusMessageMr) {
-          setTtsAlertMessage(caps.statusMessageMr);
-        }
+      if (caps.sarvamConfigured || caps.elevenLabsConfigured) {
+        setTtsUnavailable(null);
       }
     }
   }, []);
@@ -245,10 +250,25 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     }
   }, [overlayOpen, refreshVoiceCaps]);
 
+  const handleSelectProvider = useCallback((nextProvider: VoiceTtsProvider) => {
+    unlockVoiceAudioPlayback();
+    stopMarathiSpeechPlayback();
+    setSelectedProvider(nextProvider);
+    selectedProviderRef.current = nextProvider;
+    saveTtsProvider(nextProvider);
+    setTtsUnavailable(null);
+    setTtsFallbackUsed(false);
+    setPhase((cur) => (cur === 'speaking' ? 'idle' : cur));
+  }, []);
+
   const speakReply = useCallback(
     async (
       replyText: string,
-      options?: { forceRefresh?: boolean; showUnavailableInReplyBox?: boolean },
+      options?: {
+        provider?: VoiceTtsProvider;
+        forceRefresh?: boolean;
+        showUnavailableInReplyBox?: boolean;
+      },
     ) => {
       if (!replyText.trim()) {
         setPhase('idle');
@@ -258,31 +278,33 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
         setPhase('idle');
         return;
       }
+      const activeProvider = options?.provider || selectedProviderRef.current;
       setPhase('speaking');
       try {
         const result = await speakNaturalMarathi(replyText, {
+          provider: activeProvider,
           muted: mutedRef.current,
           forceRefresh: options?.forceRefresh,
-          onStart: (p, _meta?: SpeechPlaybackMeta) => {
+          onStart: (p, meta?: SpeechPlaybackMeta) => {
             setTtsBadge(p);
-            setTtsAlertReason(null);
-            setTtsAlertMessage('');
+            setTtsFallbackUsed(Boolean(meta?.fallbackUsed));
+            setTtsUnavailable(null);
           },
-          onUnavailable: (reason, errorMessage) => {
+          onUnavailable: (details) => {
             setTtsBadge(null);
-            setTtsAlertReason(reason);
-            setTtsAlertMessage(errorMessage);
+            setTtsFallbackUsed(false);
+            setTtsUnavailable(details);
             if (options?.showUnavailableInReplyBox) {
-              setAssistantReply(errorMessage);
-              setErrorNote(errorMessage);
+              setAssistantReply(details.errorMessage);
+              setErrorNote(details.errorMessage);
             }
           },
         });
-        if (result === 'elevenlabs') {
-          setTtsBadge('elevenlabs');
+        if (result === 'sarvam' || result === 'elevenlabs') {
+          setTtsBadge(result);
         }
       } catch {
-        // Strict selected ElevenLabs voice only: never fall back to any other or robotic voice
+        // Strictly never fall back to robotic browser TTS
       } finally {
         setPhase((cur) => (cur === 'speaking' ? 'idle' : cur));
       }
@@ -295,11 +317,17 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     unlockVoiceAudioPlayback();
     setTestingVoice(true);
     setErrorNote('');
-    const needsLiveRecoveryCheck = Boolean(ttsAlertReason || !voiceCaps?.elevenLabsConfigured);
+    const needsLiveRecoveryCheck = Boolean(
+      ttsUnavailable ||
+        (selectedProvider === 'sarvam'
+          ? !voiceCaps?.sarvamConfigured
+          : !voiceCaps?.elevenLabsConfigured),
+    );
     try {
       await speakReply(
         'नमस्कार! मी मुक्ताई, तुमची मराठी व्हॉइस असिस्टंट. सांगा, मी तुमची काय मदत करू शकते?',
         {
+          provider: selectedProvider,
           forceRefresh: needsLiveRecoveryCheck,
           showUnavailableInReplyBox: true,
         },
@@ -310,7 +338,7 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     } finally {
       setTestingVoice(false);
     }
-  }, [phase, refreshVoiceCaps, speakReply, testingVoice, ttsAlertReason, voiceCaps]);
+  }, [phase, refreshVoiceCaps, selectedProvider, speakReply, testingVoice, ttsUnavailable, voiceCaps]);
 
   const processUserCommand = useCallback(
     async (spokenText: string) => {
@@ -999,7 +1027,9 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
                       : phase === 'processing'
                         ? 'मल्टी-स्टेप कृती सुरू आहे...'
                         : phase === 'speaking'
-                          ? `बोलत आहे${ttsBadge === 'elevenlabs' ? ' · ElevenLabs (निवडलेला आवाज)' : ''}`
+                          ? `बोलत आहे · ${
+                              ttsBadge === 'elevenlabs' ? 'ElevenLabs' : 'Sarvam AI (मृणाल)'
+                            }${ttsFallbackUsed ? ' · ऑटो-बॅकअप' : ''}`
                           : wakeWordEnabled
                             ? 'हँड्स-फ्री चालू · “हे मुक्ताई...” म्हणून बोला'
                             : 'बोलण्यासाठी माईक दाबा किंवा खाली टाईप करा'}
@@ -1054,54 +1084,18 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
 
             {/* Body */}
             <div className="p-3.5 space-y-2.5 max-h-[420px] overflow-y-auto">
-              {/* Compact Voice Engine Readiness & 1-Click Voice Test Strip */}
-              {voiceCaps && (
-                <div
-                  className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-[11px] ${
-                    voiceCaps.elevenLabsConfigured && !ttsAlertReason
-                      ? 'bg-emerald-50/90 border-emerald-200/80 text-emerald-950'
-                      : (ttsAlertReason || voiceCaps.elevenLabsStatus) === 'quota_cooldown'
-                        ? 'bg-rose-50/95 border-rose-300 text-rose-950'
-                        : 'bg-amber-50/90 border-amber-200/90 text-amber-950'
-                  }`}
-                >
-                  <div className="min-w-0 flex items-center gap-1.5">
-                    <span
-                      className={`w-2 h-2 rounded-full shrink-0 ${
-                        voiceCaps.elevenLabsConfigured && !ttsAlertReason
-                          ? 'bg-emerald-600'
-                          : (ttsAlertReason || voiceCaps.elevenLabsStatus) === 'quota_cooldown'
-                            ? 'bg-rose-600'
-                            : 'bg-amber-500'
-                      }`}
-                    />
-                    <span className="truncate font-medium">
-                      {voiceCaps.elevenLabsConfigured && !ttsAlertReason
-                        ? `ElevenLabs · निवडलेला आवाज (ID …${voiceCaps.elevenLabsVoiceId.slice(-4)})`
-                        : (ttsAlertReason || voiceCaps.elevenLabsStatus) === 'quota_cooldown'
-                          ? 'आजचा कोटा संपला आहे · आवाज बंद'
-                          : (ttsAlertReason || voiceCaps.elevenLabsStatus) === 'missing_voice_id'
-                            ? 'Render मध्ये ELEVENLABS_VOICE_ID सेट नाही'
-                            : (ttsAlertReason || voiceCaps.elevenLabsStatus) ===
-                                'voice_paid_plan_required'
-                              ? 'निवडलेला Voice ID Paid Plan साठी आहे'
-                              : (ttsAlertReason || voiceCaps.elevenLabsStatus) ===
-                                  'invalid_key_format'
-                                ? 'ElevenLabs Key चुकीची (sk_... हवी) · आवाज बंद'
-                                : (ttsAlertReason || voiceCaps.elevenLabsStatus) === 'auth_rejected'
-                                  ? 'ElevenLabs Key नाकारली · आवाज बंद'
-                                  : (ttsAlertReason || voiceCaps.elevenLabsStatus) ===
-                                      'free_tier_ip_blocked'
-                                    ? 'Render IP वर ElevenLabs फ्री ब्लॉक · आवाज बंद'
-                                    : 'ElevenLabs Key सेट नाही · आवाज बंद'}
-                    </span>
-                  </div>
+              {/* Dual Voice Engine Switcher (Sarvam AI मृणाल <-> ElevenLabs) + 1-Click Voice Test */}
+              <div className="rounded-xl border border-slate-200/90 bg-slate-50/90 p-2 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10.5px] font-bold text-[#0F1F3D]">
+                    आवाज इंजिन निवडा (Auto-Backup सक्रिय)
+                  </span>
                   <button
                     type="button"
                     disabled={testingVoice || phase === 'processing'}
                     onClick={() => void handleTestVoice()}
-                    className="shrink-0 h-6 px-2 rounded-md bg-white/90 hover:bg-white border border-slate-200/90 text-[#0F1F3D] text-[10.5px] font-semibold inline-flex items-center gap-1 cursor-pointer transition-colors disabled:opacity-60"
-                    title="तुमचा निवडलेला ElevenLabs आवाज लगेच तपासा"
+                    className="shrink-0 h-6 px-2 rounded-md bg-white hover:bg-[#FDF8EC] border border-slate-200/90 text-[#0F1F3D] text-[10.5px] font-semibold inline-flex items-center gap-1 cursor-pointer transition-colors disabled:opacity-60"
+                    title="निवडलेला मराठी आवाज लगेच तपासा"
                   >
                     {testingVoice ? (
                       <Loader2 className="w-3 h-3 animate-spin" />
@@ -1111,40 +1105,125 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
                     <span>आवाज तपासा</span>
                   </button>
                 </div>
-              )}
 
-              {/* Prominent Screen Alert Banner when Quota Exhausted or Selected Voice Blocked */}
-              {ttsAlertReason && (
+                <div className="grid grid-cols-2 gap-1.5" role="radiogroup" aria-label="Voice TTS Engine">
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={selectedProvider === 'sarvam'}
+                    onClick={() => handleSelectProvider('sarvam')}
+                    className={`px-2.5 py-1.5 rounded-lg border text-left transition-all cursor-pointer ${
+                      selectedProvider === 'sarvam'
+                        ? 'bg-[#0F1F3D] text-white border-[#0F1F3D] shadow-sm'
+                        : 'bg-white text-[#0F1F3D] border-slate-200 hover:border-[#B8923A]/60'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[11px] font-bold truncate">Sarvam AI (मृणाल)</span>
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                          voiceCaps
+                            ? voiceCaps.sarvamConfigured
+                              ? 'bg-emerald-400'
+                              : 'bg-amber-400'
+                            : 'bg-slate-300'
+                        }`}
+                      />
+                    </div>
+                    <p
+                      className={`text-[9.5px] truncate mt-0.5 ${
+                        selectedProvider === 'sarvam' ? 'text-slate-300' : 'text-slate-500'
+                      }`}
+                    >
+                      {voiceCaps?.sarvamConfigured
+                        ? 'तयार · bulbul:v3 (मराठी)'
+                        : voiceCaps?.sarvamStatus === 'missing_key'
+                          ? 'SARVAM_API_KEY सेट करा'
+                          : voiceCaps?.sarvamStatus === 'quota_cooldown'
+                            ? 'कोटा मर्यादा · बॅकअप चालू'
+                            : 'डिफॉल्ट मराठी आवाज'}
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={selectedProvider === 'elevenlabs'}
+                    onClick={() => handleSelectProvider('elevenlabs')}
+                    className={`px-2.5 py-1.5 rounded-lg border text-left transition-all cursor-pointer ${
+                      selectedProvider === 'elevenlabs'
+                        ? 'bg-[#0F1F3D] text-white border-[#0F1F3D] shadow-sm'
+                        : 'bg-white text-[#0F1F3D] border-slate-200 hover:border-[#B8923A]/60'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[11px] font-bold truncate">ElevenLabs</span>
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                          voiceCaps
+                            ? voiceCaps.elevenLabsConfigured
+                              ? 'bg-emerald-400'
+                              : 'bg-amber-400'
+                            : 'bg-slate-300'
+                        }`}
+                      />
+                    </div>
+                    <p
+                      className={`text-[9.5px] truncate mt-0.5 ${
+                        selectedProvider === 'elevenlabs' ? 'text-slate-300' : 'text-slate-500'
+                      }`}
+                    >
+                      {voiceCaps?.elevenLabsConfigured
+                        ? `तयार · ID …${voiceCaps.elevenLabsVoiceId.slice(-4)}`
+                        : voiceCaps?.elevenLabsStatus === 'voice_paid_plan_required'
+                          ? 'Paid Plan आवश्यक · बॅकअप चालू'
+                          : voiceCaps?.elevenLabsStatus === 'quota_cooldown'
+                            ? 'कोटा संपला · बॅकअप चालू'
+                            : voiceCaps?.elevenLabsStatus === 'free_tier_ip_blocked'
+                              ? 'IP ब्लॉक · बॅकअप चालू'
+                              : 'निवडलेला Voice ID'}
+                    </p>
+                  </button>
+                </div>
+
+                {ttsFallbackUsed && ttsBadge && !ttsUnavailable && (
+                  <div className="rounded-lg bg-sky-50 border border-sky-200 px-2.5 py-1.5 text-[10.5px] text-sky-900 font-medium flex items-center justify-between gap-2">
+                    <span className="truncate">
+                      स्वयंचलित बॅकअप:{' '}
+                      <strong>
+                        {ttsBadge === 'sarvam' ? 'Sarvam AI (मृणाल)' : 'ElevenLabs'}
+                      </strong>{' '}
+                      मधून आवाज प्ले केला.
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Clean Marathi Error Toast/Banner when BOTH Sarvam AI and ElevenLabs fail (zero robotic fallback) */}
+              {ttsUnavailable && (
                 <div
                   role="alert"
-                  className={`rounded-xl px-3 py-2.5 border flex items-start gap-2 text-xs ${
-                    ttsAlertReason === 'quota_cooldown'
-                      ? 'bg-rose-50 border-rose-300 text-rose-950'
-                      : 'bg-amber-50 border-amber-300 text-amber-950'
-                  }`}
+                  className="rounded-xl px-3 py-2.5 border bg-rose-50 border-rose-300 text-rose-950 flex items-start justify-between gap-2 text-xs"
                 >
-                  <AlertTriangle
-                    className={`w-4 h-4 shrink-0 mt-0.5 ${
-                      ttsAlertReason === 'quota_cooldown' ? 'text-rose-600' : 'text-amber-600'
-                    }`}
-                  />
-                  <div className="min-w-0 space-y-0.5">
-                    <p className="font-bold leading-snug">
-                      {ttsAlertReason === 'quota_cooldown'
-                        ? 'आजचा कोटा संपला आहे'
-                        : ttsAlertReason === 'voice_paid_plan_required'
-                          ? 'निवडलेला Voice ID Paid Plan साठी आहे'
-                          : ttsAlertReason === 'missing_voice_id'
-                            ? 'Render मध्ये Voice ID सेट नाही'
-                            : 'निवडलेला ElevenLabs आवाज बंद आहे'}
-                    </p>
-                    <p className="text-[11px] leading-relaxed opacity-90">
-                      {ttsAlertMessage ||
-                        (ttsAlertReason === 'quota_cooldown'
-                          ? 'आजचा कोटा संपला आहे. कृपया उद्या किंवा ElevenLabs क्रेडिट्स रिचार्ज केल्यानंतर पुन्हा प्रयत्न करा.'
-                          : 'इतर कोणताही पर्यायी किंवा रोबोटिक आवाज वापरला गेला नाही.')}
-                    </p>
+                  <div className="flex items-start gap-2 min-w-0">
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+                    <div className="min-w-0 space-y-0.5">
+                      <p className="font-bold leading-snug">
+                        सध्या दोन्ही व्हॉइस इंजिन उपलब्ध नाहीत
+                      </p>
+                      <p className="text-[11px] leading-relaxed opacity-90">
+                        {ttsUnavailable.errorMessage}
+                      </p>
+                    </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setTtsUnavailable(null)}
+                    className="p-0.5 rounded text-rose-500 hover:text-rose-800 cursor-pointer shrink-0"
+                    aria-label="Close voice error"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               )}
 
@@ -1275,13 +1354,6 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
                     </div>
                   </div>
                   <p className="font-medium text-[13px] leading-relaxed">{assistantReply}</p>
-                  {ttsAlertReason === 'quota_cooldown' &&
-                    !assistantReply.includes('आजचा कोटा संपला आहे') && (
-                      <div className="mt-2 pt-2 border-t border-rose-200/90 flex items-center gap-1.5 text-[11px] font-semibold text-rose-700">
-                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                        <span>आजचा कोटा संपला आहे — आवाज बंद आहे.</span>
-                      </div>
-                    )}
                 </div>
               )}
 

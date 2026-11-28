@@ -23,4 +23,9 @@ services:
         sync: false
       - key: ELEVENLABS_MODEL_ID
         value: eleven_flash_v2_5
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: SARVAM_MODEL_ID
+        value: bulbul:v3
+
 

@@ -35,7 +35,13 @@ export interface VoiceConverseResponse {
   usedModel?: string;
 }
 
-export type VoiceTtsProvider = 'elevenlabs';
+export type VoiceTtsProvider = 'sarvam' | 'elevenlabs';
+export type SarvamHealthStatus =
+  | 'ready'
+  | 'missing_key'
+  | 'auth_rejected'
+  | 'quota_cooldown'
+  | 'voice_error';
 export type ElevenLabsHealthStatus =
   | 'ready'
   | 'missing_key'
@@ -55,10 +61,38 @@ export type ElevenLabsFallbackReason =
   | 'quota_cooldown'
   | 'voice_error';
 
+export const TTS_PROVIDER_STORAGE_KEY = 'hom_voice_tts_provider';
+
+export function getSavedTtsProvider(): VoiceTtsProvider {
+  if (typeof window === 'undefined') return 'sarvam';
+  try {
+    const raw = window.localStorage.getItem(TTS_PROVIDER_STORAGE_KEY);
+    return raw === 'elevenlabs' ? 'elevenlabs' : 'sarvam';
+  } catch {
+    return 'sarvam';
+  }
+}
+
+export function saveTtsProvider(provider: VoiceTtsProvider): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(TTS_PROVIDER_STORAGE_KEY, provider);
+  } catch {
+    // ignore storage restrictions
+  }
+}
+
 export interface VoiceCapabilitiesStatus {
   geminiConfigured: boolean;
+  defaultProvider: VoiceTtsProvider;
+  availableProviders: VoiceTtsProvider[];
+  sarvamConfigured: boolean;
+  sarvamStatus: SarvamHealthStatus;
+  sarvamModelId: string;
+  sarvamSpeaker: string;
+  sarvamStatusMessageMr?: string;
   elevenLabsConfigured: boolean;
-  elevenLabsOnly: true;
+  elevenLabsOnly: boolean;
   elevenLabsStatus: ElevenLabsHealthStatus;
   elevenLabsVoiceId: string;
   elevenLabsVoiceIdCustom: boolean;
@@ -69,10 +103,19 @@ export interface VoiceCapabilitiesStatus {
 
 export interface SpeechPlaybackMeta {
   provider: VoiceTtsProvider;
+  requestedProvider?: VoiceTtsProvider;
+  fallbackUsed?: boolean;
   modelUsed?: string;
   voiceId?: string;
   cacheHit?: boolean;
   streamed?: boolean;
+}
+
+export interface TtsUnavailableDetails {
+  requestedProvider: VoiceTtsProvider;
+  sarvamStatus?: SarvamHealthStatus;
+  elevenLabsStatus?: ElevenLabsFallbackReason;
+  errorMessage: string;
 }
 
 async function getAdminAuthToken(): Promise<string> {
@@ -240,29 +283,33 @@ function normalizeClientCacheKey(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 900);
 }
 
-interface CachedElevenLabsAudio {
-  provider: 'elevenlabs';
+export function buildClientTtsCacheKey(provider: VoiceTtsProvider, text: string): string {
+  return `${provider}::${normalizeClientCacheKey(text)}`;
+}
+
+interface CachedTtsAudio {
+  provider: VoiceTtsProvider;
   mimeType: string;
   bytes: Uint8Array;
   modelUsed?: string;
   voiceId?: string;
 }
 
-const MAX_CLIENT_TTS_CACHE_ITEMS = 48;
-const clientTtsAudioCache = new Map<string, CachedElevenLabsAudio>();
+const MAX_CLIENT_TTS_CACHE_ITEMS = 64;
+const clientTtsAudioCache = new Map<string, CachedTtsAudio>();
 
-function readClientTtsCache(key: string): CachedElevenLabsAudio | null {
+function readClientTtsCache(key: string): CachedTtsAudio | null {
   const hit = clientTtsAudioCache.get(key);
   if (!hit) return null;
-  // Refresh LRU recency so hot phrases ("आवाज तपासा", confirmations) stay instant
+  // Refresh LRU recency so repeated Marathi phrases never re-spend credits on either engine
   clientTtsAudioCache.delete(key);
   clientTtsAudioCache.set(key, hit);
   return hit;
 }
 
-function storeClientTtsCache(key: string, entry: CachedElevenLabsAudio): void {
+function storeClientTtsCache(key: string, entry: CachedTtsAudio): void {
   if (!entry.bytes || entry.bytes.byteLength === 0) return;
-  if (entry.bytes.byteLength > 350 * 1024) return;
+  if (entry.bytes.byteLength > 600 * 1024) return;
   if (clientTtsAudioCache.has(key)) {
     clientTtsAudioCache.delete(key);
   } else if (clientTtsAudioCache.size >= MAX_CLIENT_TTS_CACHE_ITEMS) {
@@ -521,7 +568,7 @@ async function playStreamedMpegResponse(params: {
     if (totalBytes > 0) {
       const fullBytes = concatUint8Arrays(collectedChunks, totalBytes);
       storeClientTtsCache(cacheKey, {
-        provider: 'elevenlabs',
+        provider: meta.provider,
         mimeType,
         bytes: fullBytes,
         modelUsed: meta.modelUsed,
@@ -591,52 +638,54 @@ async function playStreamedMpegResponse(params: {
 }
 
 /**
- * Strictly plays ONLY the owner's selected ElevenLabs voice (from Render ELEVENLABS_VOICE_ID).
- * Zero alternate voices and zero robotic OS / browser TTS fallback are ever used.
- *
- * Ultra-low-latency path:
- * 1. Client in-memory LRU cache -> <10ms instant playback (0 network calls).
- * 2. Streaming binary `/api/v1/voice/tts/stream` (ElevenLabs `/stream` + `eleven_flash_v2_5` +
- *    `optimize_streaming_latency=3` + `mp3_22050_32`) -> plays on first audio chunk via MediaSource,
- *    with instant WebAudio fallback for server cache HITs or iframe autoplay policies.
+ * Dual-Engine Marathi TTS Playback (Sarvam AI "मृणाल" + ElevenLabs) with Smart Auto-Fallback.
+ * - Audio is cached strictly by `provider + text` so repeated Marathi replies never re-spend credits.
+ * - NEVER falls back to robotic browser TTS.
+ * - If both engines fail, invokes `onUnavailable` so the UI shows a clean Marathi error banner.
  */
 export async function speakNaturalMarathi(
   text: string,
   options?: {
+    provider?: VoiceTtsProvider;
     muted?: boolean;
     forceRefresh?: boolean;
     onStart?: (provider: VoiceTtsProvider, meta?: SpeechPlaybackMeta) => void;
-    onUnavailable?: (reason: ElevenLabsFallbackReason, errorMessage: string) => void;
+    onUnavailable?: (details: TtsUnavailableDetails) => void;
   },
 ): Promise<VoiceTtsProvider | 'muted' | 'unavailable'> {
   const cleanText = normalizeClientCacheKey(text);
   if (!cleanText || options?.muted) return 'muted';
 
+  const requestedProvider: VoiceTtsProvider = options?.provider || getSavedTtsProvider();
+  const requestedCacheKey = buildClientTtsCacheKey(requestedProvider, cleanText);
+
   stopMarathiSpeechPlayback();
   const gen = playbackGeneration;
 
   try {
-    // 1. Instant client in-memory LRU cache hit (zero API delay)
+    // 1. Instant client in-memory LRU cache hit keyed by `provider + text` (zero API credits spent)
     if (!options?.forceRefresh) {
-      const cached = readClientTtsCache(cleanText);
+      const cached = readClientTtsCache(requestedCacheKey);
       if (cached) {
         const meta: SpeechPlaybackMeta = {
-          provider: 'elevenlabs',
+          provider: cached.provider,
+          requestedProvider,
+          fallbackUsed: cached.provider !== requestedProvider,
           modelUsed: cached.modelUsed,
           voiceId: cached.voiceId,
           cacheHit: true,
           streamed: false,
         };
         await playAudioBytes(cached.bytes, cached.mimeType, gen, () =>
-          options?.onStart?.('elevenlabs', meta),
+          options?.onStart?.(cached.provider, meta),
         );
-        return 'elevenlabs';
+        return cached.provider;
       }
     }
 
-    // 2. Direct binary streaming request to server proxy (ElevenLabs `/stream`)
+    // 2. Request audio from server proxy (supports both Sarvam AI WAV & ElevenLabs MP3 + Smart Auto-Fallback)
     const token = await getAdminAuthToken();
-    if (gen !== playbackGeneration) return 'elevenlabs';
+    if (gen !== playbackGeneration) return requestedProvider;
 
     const abortController = new AbortController();
     activeStreamAbortController = abortController;
@@ -649,85 +698,110 @@ export async function speakNaturalMarathi(
       },
       body: JSON.stringify({
         text: cleanText,
+        provider: requestedProvider,
         ...(options?.forceRefresh ? { forceRefresh: true } : {}),
       }),
       signal: abortController.signal,
     });
 
-    if (gen !== playbackGeneration) return 'elevenlabs';
+    if (gen !== playbackGeneration) return requestedProvider;
 
     if (!resp.ok) {
       const errJson = (await resp.json().catch(() => ({}))) as {
         error?: string;
+        sarvamStatus?: SarvamHealthStatus;
         elevenLabsStatus?: ElevenLabsFallbackReason;
       };
-      const reason: ElevenLabsFallbackReason = errJson.elevenLabsStatus || 'voice_error';
       const errorMessage =
-        errJson.error || 'तुमचा निवडलेला ElevenLabs आवाज सध्या उपलब्ध नाही.';
-      options?.onUnavailable?.(reason, errorMessage);
+        errJson.error ||
+        'Sarvam AI आणि ElevenLabs दोन्ही आवाज सध्या उपलब्ध नाहीत. कृपया API Key किंवा कोटा तपासा.';
+      options?.onUnavailable?.({
+        requestedProvider,
+        sarvamStatus: errJson.sarvamStatus,
+        elevenLabsStatus: errJson.elevenLabsStatus,
+        errorMessage,
+      });
       return 'unavailable';
     }
 
-    const mimeType = resp.headers.get('Content-Type') || 'audio/mpeg';
+    const actualProvider: VoiceTtsProvider =
+      resp.headers.get('X-Voice-Provider') === 'elevenlabs' ? 'elevenlabs' : 'sarvam';
+    const fallbackUsed =
+      resp.headers.get('X-Voice-Fallback') === '1' || actualProvider !== requestedProvider;
+    const mimeType =
+      resp.headers.get('Content-Type') ||
+      (actualProvider === 'sarvam' ? 'audio/wav' : 'audio/mpeg');
     const modelUsed = resp.headers.get('X-Voice-Model') || undefined;
     const voiceId = resp.headers.get('X-Voice-Id') || undefined;
     const serverCacheHit = resp.headers.get('X-Voice-Cache') === 'HIT';
+    const actualCacheKey = buildClientTtsCacheKey(actualProvider, cleanText);
 
     const meta: SpeechPlaybackMeta = {
-      provider: 'elevenlabs',
+      provider: actualProvider,
+      requestedProvider,
+      fallbackUsed,
       modelUsed,
       voiceId,
       cacheHit: serverCacheHit,
-      streamed: !serverCacheHit,
+      streamed: !serverCacheHit && mimeType.toLowerCase().includes('mpeg'),
     };
 
-    // For live upstream ElevenLabs streams, start progressive chunk-by-chunk playback immediately via MSE
-    if (!serverCacheHit && resp.body && supportsStreamingMpegMse()) {
+    // Progressive MSE streaming applies ONLY to live audio/mpeg streams (ElevenLabs);
+    // WAV audio (Sarvam AI) and cached clips play directly via WebAudio/Blob Audio.
+    if (
+      !serverCacheHit &&
+      mimeType.toLowerCase().includes('mpeg') &&
+      resp.body &&
+      supportsStreamingMpegMse()
+    ) {
       const played = await playStreamedMpegResponse({
         response: resp,
-        cacheKey: cleanText,
+        cacheKey: actualCacheKey,
         mimeType,
         meta,
         gen,
-        onStart: () => options?.onStart?.('elevenlabs', meta),
+        onStart: () => options?.onStart?.(actualProvider, meta),
       });
       if (played) {
-        return 'elevenlabs';
+        return actualProvider;
       }
-      if (gen !== playbackGeneration) return 'elevenlabs';
+      if (gen !== playbackGeneration) return actualProvider;
     }
 
-    // For server cache HITs or browsers without audio/mpeg MSE: read raw binary MP3 directly (no base64 overhead!)
     const arrayBuf = await resp.arrayBuffer();
-    if (gen !== playbackGeneration) return 'elevenlabs';
+    if (gen !== playbackGeneration) return actualProvider;
     if (arrayBuf.byteLength === 0) {
-      options?.onUnavailable?.(
-        'voice_error',
-        'तुमचा निवडलेला ElevenLabs आवाज सध्या उपलब्ध नाही.',
-      );
+      options?.onUnavailable?.({
+        requestedProvider,
+        errorMessage: 'Sarvam AI आणि ElevenLabs दोन्ही आवाज सध्या उपलब्ध नाहीत.',
+      });
       return 'unavailable';
     }
 
     const bytes = new Uint8Array(arrayBuf);
-    storeClientTtsCache(cleanText, {
-      provider: 'elevenlabs',
+    storeClientTtsCache(actualCacheKey, {
+      provider: actualProvider,
       mimeType,
       bytes,
       modelUsed,
       voiceId,
     });
 
-    await playAudioBytes(bytes, mimeType, gen, () => options?.onStart?.('elevenlabs', meta));
-    return 'elevenlabs';
+    await playAudioBytes(bytes, mimeType, gen, () => options?.onStart?.(actualProvider, meta));
+    return actualProvider;
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
-      return 'elevenlabs';
+      return requestedProvider;
     }
     if (gen !== playbackGeneration) {
-      return 'elevenlabs';
+      return requestedProvider;
     }
-    console.warn('[Voice TTS Client] ElevenLabs playback unavailable (robotic fallback disabled):', err);
-    options?.onUnavailable?.('voice_error', 'ElevenLabs आवाज प्ले होऊ शकला नाही.');
+    console.warn('[Voice TTS Client] Both voice engines unavailable (robotic fallback disabled):', err);
+    options?.onUnavailable?.({
+      requestedProvider,
+      errorMessage:
+        'व्हॉइस आवाज प्ले होऊ शकला नाही. Sarvam AI आणि ElevenLabs दोन्ही सध्या उपलब्ध नाहीत.',
+    });
     return 'unavailable';
   } finally {
     if (gen === playbackGeneration) {

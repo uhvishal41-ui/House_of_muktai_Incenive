@@ -44,13 +44,35 @@ const ALLOWED_ELEVENLABS_MODELS: readonly ElevenLabsModelId[] = [
 export const ELEVENLABS_STREAM_OUTPUT_FORMAT = 'mp3_22050_32';
 export const ELEVENLABS_OPTIMIZE_STREAMING_LATENCY = 3;
 
-interface CachedSpeechBufferEntry {
-  provider: 'elevenlabs';
-  mimeType: string;
-  buffer: Buffer;
-  modelUsed: ElevenLabsModelId;
-  voiceId: string;
-}
+export type VoiceTtsProvider = 'sarvam' | 'elevenlabs';
+export type SarvamHealthStatus =
+  | 'ready'
+  | 'missing_key'
+  | 'auth_rejected'
+  | 'quota_cooldown'
+  | 'voice_error';
+
+export const SARVAM_TTS_ENDPOINT = 'https://api.sarvam.ai/text-to-speech';
+export const DEFAULT_SARVAM_MODEL_ID = 'bulbul:v3';
+export const DEFAULT_SARVAM_SPEAKER = 'mrunal';
+export const SARVAM_TARGET_LANGUAGE_CODE = 'mr-IN';
+export const SARVAM_DEFAULT_PACE = 1.0;
+
+type CachedSpeechBufferEntry =
+  | {
+      provider: 'elevenlabs';
+      mimeType: string;
+      buffer: Buffer;
+      modelUsed: ElevenLabsModelId;
+      voiceId: string;
+    }
+  | {
+      provider: 'sarvam';
+      mimeType: string;
+      buffer: Buffer;
+      modelUsed: string;
+      voiceId: string;
+    };
 
 let cachedClient: GoogleGenAI | null = null;
 let cachedKey = '';
@@ -59,8 +81,10 @@ let elevenLabsCooldownUntil = 0;
 let freeTierIpBlockedCooldownUntil = 0;
 let invalidElevenLabsKeyCached = '';
 let paidOnlyVoiceIdCached = '';
+let sarvamCooldownUntil = 0;
+let invalidSarvamKeyCached = '';
 const ttsAudioCache = new Map<string, CachedSpeechBufferEntry>();
-const MAX_TTS_CACHE_ITEMS = 80;
+const MAX_TTS_CACHE_ITEMS = 120;
 
 export function isPlausibleElevenLabsApiKey(key: string): boolean {
   if (!key) return false;
@@ -252,6 +276,82 @@ export function resetElevenLabsRuntimeStateForTest(): void {
   ttsAudioCache.clear();
 }
 
+export function resetSarvamRuntimeStateForTest(): void {
+  sarvamCooldownUntil = 0;
+  invalidSarvamKeyCached = '';
+  ttsAudioCache.clear();
+}
+
+export function resolveSarvamConfig(env: NodeJS.ProcessEnv = process.env): {
+  apiKey: string;
+  modelId: string;
+  speaker: string;
+  languageCode: string;
+  pace: number;
+  status: SarvamHealthStatus;
+} {
+  const apiKey = (env.SARVAM_API_KEY || '').trim();
+  const modelId = (env.SARVAM_MODEL_ID || '').trim() || DEFAULT_SARVAM_MODEL_ID;
+  const speaker = (env.SARVAM_SPEAKER || '').trim() || DEFAULT_SARVAM_SPEAKER;
+
+  let status: SarvamHealthStatus = 'ready';
+  if (!apiKey) {
+    status = 'missing_key';
+  } else if (apiKey === invalidSarvamKeyCached) {
+    status = 'auth_rejected';
+  } else if (Date.now() < sarvamCooldownUntil) {
+    status = 'quota_cooldown';
+  }
+
+  return {
+    apiKey,
+    modelId,
+    speaker,
+    languageCode: SARVAM_TARGET_LANGUAGE_CODE,
+    pace: SARVAM_DEFAULT_PACE,
+    status,
+  };
+}
+
+export function buildSarvamRequestPayload(params: {
+  text: string;
+  modelId?: string;
+  speaker?: string;
+  useLegacyInputsArray?: boolean;
+}): Record<string, unknown> {
+  const model = (params.modelId || DEFAULT_SARVAM_MODEL_ID).trim() || DEFAULT_SARVAM_MODEL_ID;
+  const speaker = (params.speaker || DEFAULT_SARVAM_SPEAKER).trim() || DEFAULT_SARVAM_SPEAKER;
+  if (params.useLegacyInputsArray) {
+    return {
+      inputs: [params.text],
+      target_language_code: SARVAM_TARGET_LANGUAGE_CODE,
+      speaker,
+      model,
+      pace: SARVAM_DEFAULT_PACE,
+    };
+  }
+  return {
+    text: params.text,
+    target_language_code: SARVAM_TARGET_LANGUAGE_CODE,
+    speaker,
+    model,
+    pace: SARVAM_DEFAULT_PACE,
+  };
+}
+
+export function getSarvamErrorMessageMr(reason: SarvamHealthStatus): string {
+  switch (reason) {
+    case 'missing_key':
+      return 'Sarvam AI API Key सेट केलेली नाही. कृपया Settings > Secrets किंवा Environment Variables मध्ये SARVAM_API_KEY अ‍ॅड करा.';
+    case 'auth_rejected':
+      return 'Sarvam AI ने ही API Key नाकारली आहे. कृपया वैध SARVAM_API_KEY तपासा.';
+    case 'quota_cooldown':
+      return 'Sarvam AI चा आजचा कोटा किंवा मर्यादा संपली आहे. कृपया थोड्या वेळाने पुन्हा प्रयत्न करा.';
+    default:
+      return 'Sarvam AI आवाज सध्या उपलब्ध नाही. कृपया काही सेकंदांनी पुन्हा प्रयत्न करा.';
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -295,30 +395,48 @@ function getGeminiClient(): GoogleGenAI {
 
 export interface VoiceCapabilitiesStatus {
   geminiConfigured: boolean;
+  defaultProvider: VoiceTtsProvider;
+  availableProviders: VoiceTtsProvider[];
+  sarvamConfigured: boolean;
+  sarvamStatus: SarvamHealthStatus;
+  sarvamModelId: string;
+  sarvamSpeaker: string;
+  sarvamStatusMessageMr?: string;
   elevenLabsConfigured: boolean;
-  elevenLabsOnly: true;
+  elevenLabsOnly: boolean;
   elevenLabsStatus: ElevenLabsHealthStatus;
   elevenLabsVoiceId: string;
   elevenLabsVoiceIdCustom: boolean;
   elevenLabsModelId: ElevenLabsModelId;
   statusMessageMr?: string;
-  ttsPrimaryProvider: 'elevenlabs';
+  ttsPrimaryProvider: VoiceTtsProvider;
 }
 
 export function getVoiceCapabilitiesStatus(): VoiceCapabilitiesStatus {
   const geminiConfigured = Boolean((process.env.GEMINI_API_KEY || '').trim());
+  const sarvam = resolveSarvamConfig(process.env);
   const el = resolveElevenLabsConfig(process.env);
+  const sarvamConfigured = sarvam.status === 'ready';
   const elevenLabsConfigured = el.status === 'ready';
   return {
     geminiConfigured,
+    defaultProvider: 'sarvam',
+    availableProviders: ['sarvam', 'elevenlabs'],
+    sarvamConfigured,
+    sarvamStatus: sarvam.status,
+    sarvamModelId: sarvam.modelId,
+    sarvamSpeaker: sarvam.speaker,
+    ...(sarvam.status !== 'ready'
+      ? { sarvamStatusMessageMr: getSarvamErrorMessageMr(sarvam.status) }
+      : {}),
     elevenLabsConfigured,
-    elevenLabsOnly: true,
+    elevenLabsOnly: false,
     elevenLabsStatus: el.status,
     elevenLabsVoiceId: el.voiceId,
     elevenLabsVoiceIdCustom: el.voiceIdIsCustom,
     elevenLabsModelId: el.primaryModelId,
     ...(el.status !== 'ready' ? { statusMessageMr: getElevenLabsErrorMessageMr(el.status) } : {}),
-    ttsPrimaryProvider: 'elevenlabs',
+    ttsPrimaryProvider: sarvamConfigured ? 'sarvam' : 'elevenlabs',
   };
 }
 
@@ -598,7 +716,14 @@ function buildTtsCacheKey(
   elConfig: ReturnType<typeof resolveElevenLabsConfig>,
   cleanText: string,
 ): string {
-  return `${elConfig.voiceId}::${elConfig.primaryModelId}::${ELEVENLABS_STREAM_OUTPUT_FORMAT}::${cleanText}`;
+  return `elevenlabs::${elConfig.voiceId}::${elConfig.primaryModelId}::${ELEVENLABS_STREAM_OUTPUT_FORMAT}::${cleanText}`;
+}
+
+function buildSarvamCacheKey(
+  sarvamConfig: ReturnType<typeof resolveSarvamConfig>,
+  cleanText: string,
+): string {
+  return `sarvam::${sarvamConfig.speaker}::${sarvamConfig.modelId}::${sarvamConfig.languageCode}::${cleanText}`;
 }
 
 function readTtsCache(key: string): CachedSpeechBufferEntry | null {
@@ -700,7 +825,7 @@ export async function openMarathiSpeechStream(
   const cacheKey = buildTtsCacheKey(config, cleanText);
   if (!options?.forceRefresh) {
     const cached = readTtsCache(cacheKey);
-    if (cached) {
+    if (cached && cached.provider === 'elevenlabs') {
       return {
         provider: 'elevenlabs',
         mimeType: cached.mimeType,
@@ -853,5 +978,450 @@ export async function synthesizeMarathiSpeech(
 
   throw new ElevenLabsSpeechError('voice_error', getElevenLabsErrorMessageMr('voice_error'));
 }
+
+export class SarvamSpeechError extends Error {
+  readonly reason: SarvamHealthStatus;
+  constructor(reason: SarvamHealthStatus, message: string) {
+    super(message);
+    this.name = 'SarvamSpeechError';
+    this.reason = reason;
+  }
+}
+
+export class DualTtsUnavailableError extends Error {
+  readonly requestedProvider: VoiceTtsProvider;
+  readonly sarvamStatus: SarvamHealthStatus;
+  readonly elevenLabsStatus: ElevenLabsFallbackReason;
+  constructor(params: {
+    message: string;
+    requestedProvider: VoiceTtsProvider;
+    sarvamStatus: SarvamHealthStatus;
+    elevenLabsStatus: ElevenLabsFallbackReason;
+  }) {
+    super(params.message);
+    this.name = 'DualTtsUnavailableError';
+    this.requestedProvider = params.requestedProvider;
+    this.sarvamStatus = params.sarvamStatus;
+    this.elevenLabsStatus = params.elevenLabsStatus;
+  }
+}
+
+function detectAudioMimeFromBuffer(buf: Buffer): string {
+  if (buf.byteLength >= 4) {
+    // RIFF....WAVE header
+    if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46) {
+      return 'audio/wav';
+    }
+    // ID3 tag or MPEG frame sync
+    if (
+      (buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33) ||
+      (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0)
+    ) {
+      return 'audio/mpeg';
+    }
+  }
+  return 'audio/wav';
+}
+
+function classifySarvamHttpError(httpStatus: number, rawBody: string): SarvamHealthStatus {
+  const lower = (rawBody || '').toLowerCase();
+  if (
+    httpStatus === 401 ||
+    httpStatus === 403 ||
+    lower.includes('invalid api key') ||
+    lower.includes('unauthorized') ||
+    lower.includes('subscription')
+  ) {
+    return 'auth_rejected';
+  }
+  if (
+    httpStatus === 429 ||
+    httpStatus === 402 ||
+    lower.includes('quota') ||
+    lower.includes('rate limit') ||
+    lower.includes('insufficient') ||
+    lower.includes('credit')
+  ) {
+    return 'quota_cooldown';
+  }
+  return 'voice_error';
+}
+
+async function callSarvamTtsHttp(params: {
+  apiKey: string;
+  payload: Record<string, unknown>;
+  timeoutMs: number;
+}): Promise<{
+  ok: boolean;
+  status: number;
+  audioBase64?: string;
+  rawError?: string;
+}> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), params.timeoutMs);
+  try {
+    const resp = await fetch(SARVAM_TTS_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'api-subscription-key': params.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(params.payload),
+      signal: controller.signal,
+    });
+
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => '');
+      return { ok: false, status: resp.status, rawError: errBody };
+    }
+
+    const contentType = (resp.headers.get('content-type') || '').toLowerCase();
+    if (contentType.startsWith('audio/')) {
+      const ab = await resp.arrayBuffer();
+      if (ab.byteLength > 0) {
+        return { ok: true, status: resp.status, audioBase64: Buffer.from(ab).toString('base64') };
+      }
+      return { ok: false, status: 502, rawError: 'Empty audio response' };
+    }
+
+    const json = (await resp.json().catch(() => ({}))) as {
+      audios?: unknown;
+      audio?: unknown;
+    };
+    const firstAudio =
+      Array.isArray(json.audios) && typeof json.audios[0] === 'string'
+        ? json.audios[0]
+        : typeof json.audio === 'string'
+          ? json.audio
+          : '';
+    if (!firstAudio) {
+      return { ok: false, status: 502, rawError: 'Missing audio data in Sarvam response' };
+    }
+    return { ok: true, status: resp.status, audioBase64: firstAudio };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      rawError: err instanceof Error ? err.message : 'Sarvam request failed',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export interface OpenedDualSpeechResult {
+  provider: VoiceTtsProvider;
+  requestedProvider: VoiceTtsProvider;
+  fallbackUsed: boolean;
+  primaryFailureReason?: string;
+  mimeType: string;
+  modelUsed: string;
+  voiceId: string;
+  cacheHit: boolean;
+  buffer?: Buffer;
+  stream?: ReadableStream<Uint8Array>;
+  onCompleteBuffer?: (fullBuffer: Buffer) => void;
+}
+
+export async function openSarvamSpeechBuffer(
+  text: string,
+  options?: { forceRefresh?: boolean },
+): Promise<{
+  provider: 'sarvam';
+  mimeType: string;
+  modelUsed: string;
+  voiceId: string;
+  cacheHit: boolean;
+  buffer: Buffer;
+}> {
+  const cleanText = normalizeTtsCacheText(text);
+  if (!cleanText) {
+    throw new SarvamSpeechError('voice_error', 'बोलण्यासाठी मजकूर उपलब्ध नाही.');
+  }
+
+  if (options?.forceRefresh) {
+    sarvamCooldownUntil = 0;
+    invalidSarvamKeyCached = '';
+  }
+
+  const config = resolveSarvamConfig(process.env);
+  if (config.status !== 'ready') {
+    throw new SarvamSpeechError(config.status, getSarvamErrorMessageMr(config.status));
+  }
+
+  const cacheKey = buildSarvamCacheKey(config, cleanText);
+  if (!options?.forceRefresh) {
+    const cached = readTtsCache(cacheKey);
+    if (cached && cached.provider === 'sarvam') {
+      return {
+        provider: 'sarvam',
+        mimeType: cached.mimeType,
+        modelUsed: cached.modelUsed,
+        voiceId: cached.voiceId,
+        cacheHit: true,
+        buffer: cached.buffer,
+      };
+    }
+  }
+
+  // Attempt 1: Exact requested settings (target_language_code: "mr-IN", speaker: "mrunal", model: "bulbul:v3", pace: 1.0)
+  let usedSpeaker = config.speaker;
+  let attempt = await callSarvamTtsHttp({
+    apiKey: config.apiKey,
+    payload: buildSarvamRequestPayload({
+      text: cleanText,
+      modelId: config.modelId,
+      speaker: usedSpeaker,
+    }),
+    timeoutMs: 10_000,
+  });
+
+  // Compatibility retry if Sarvam REST API version expects `inputs: [...]` or a built-in bulbul:v3 Marathi female speaker
+  if (!attempt.ok && (attempt.status === 400 || attempt.status === 422)) {
+    const errLower = (attempt.rawError || '').toLowerCase();
+    const needsInputsArray = errLower.includes('inputs') && errLower.includes('required');
+    const unsupportedSpeaker = errLower.includes('speaker');
+
+    if (needsInputsArray || unsupportedSpeaker) {
+      const retrySpeaker = unsupportedSpeaker && usedSpeaker.toLowerCase() === 'mrunal' ? 'shruti' : usedSpeaker;
+      const retryAttempt = await callSarvamTtsHttp({
+        apiKey: config.apiKey,
+        payload: buildSarvamRequestPayload({
+          text: cleanText,
+          modelId: config.modelId,
+          speaker: retrySpeaker,
+          useLegacyInputsArray: needsInputsArray,
+        }),
+        timeoutMs: 10_000,
+      });
+      if (retryAttempt.ok) {
+        attempt = retryAttempt;
+        usedSpeaker = retrySpeaker;
+      }
+    }
+  }
+
+  if (!attempt.ok || !attempt.audioBase64) {
+    const errKind = classifySarvamHttpError(attempt.status, attempt.rawError || '');
+    if (errKind === 'auth_rejected') {
+      invalidSarvamKeyCached = config.apiKey;
+    } else if (errKind === 'quota_cooldown') {
+      sarvamCooldownUntil = Date.now() + 5 * 60_000;
+    }
+    throw new SarvamSpeechError(errKind, getSarvamErrorMessageMr(errKind));
+  }
+
+  const buffer = Buffer.from(attempt.audioBase64, 'base64');
+  if (buffer.byteLength === 0) {
+    throw new SarvamSpeechError('voice_error', getSarvamErrorMessageMr('voice_error'));
+  }
+
+  const mimeType = detectAudioMimeFromBuffer(buffer);
+  storeTtsCache(cacheKey, {
+    provider: 'sarvam',
+    mimeType,
+    buffer,
+    modelUsed: config.modelId,
+    voiceId: usedSpeaker,
+  });
+
+  return {
+    provider: 'sarvam',
+    mimeType,
+    modelUsed: config.modelId,
+    voiceId: usedSpeaker,
+    cacheHit: false,
+    buffer,
+  };
+}
+
+/**
+ * Dual-Engine Marathi TTS with Smart Auto-Fallback (Sarvam AI <-> ElevenLabs).
+ * Default provider is "sarvam". If the chosen provider fails (missing key, quota, IP block, or API error),
+ * automatically attempts the other engine before returning an error. Never uses browser robotic speech.
+ */
+export async function openDualProviderSpeechStream(params: {
+  text: string;
+  provider?: VoiceTtsProvider;
+  forceRefresh?: boolean;
+}): Promise<OpenedDualSpeechResult> {
+  const requestedProvider: VoiceTtsProvider =
+    params.provider === 'elevenlabs' ? 'elevenlabs' : 'sarvam';
+  const secondaryProvider: VoiceTtsProvider =
+    requestedProvider === 'sarvam' ? 'elevenlabs' : 'sarvam';
+
+  let primaryError: unknown = null;
+  let sarvamErrStatus: SarvamHealthStatus = resolveSarvamConfig(process.env).status;
+  let elevenLabsErrStatus: ElevenLabsFallbackReason = resolveElevenLabsConfig(process.env).status === 'ready'
+    ? 'voice_error'
+    : (resolveElevenLabsConfig(process.env).status as ElevenLabsFallbackReason);
+
+  const tryEngine = async (engine: VoiceTtsProvider): Promise<OpenedDualSpeechResult> => {
+    if (engine === 'sarvam') {
+      const res = await openSarvamSpeechBuffer(params.text, {
+        forceRefresh: params.forceRefresh,
+      });
+      return {
+        provider: 'sarvam',
+        requestedProvider,
+        fallbackUsed: engine !== requestedProvider,
+        mimeType: res.mimeType,
+        modelUsed: res.modelUsed,
+        voiceId: res.voiceId,
+        cacheHit: res.cacheHit,
+        buffer: res.buffer,
+      };
+    }
+
+    const res = await openMarathiSpeechStream(params.text, {
+      forceRefresh: params.forceRefresh,
+    });
+    return {
+      provider: 'elevenlabs',
+      requestedProvider,
+      fallbackUsed: engine !== requestedProvider,
+      mimeType: res.mimeType,
+      modelUsed: res.modelUsed,
+      voiceId: res.voiceId,
+      cacheHit: res.cacheHit,
+      buffer: res.buffer,
+      stream: res.stream,
+      onCompleteBuffer: res.onCompleteBuffer,
+    };
+  };
+
+  try {
+    return await tryEngine(requestedProvider);
+  } catch (err) {
+    primaryError = err;
+    if (err instanceof SarvamSpeechError) {
+      sarvamErrStatus = err.reason;
+    } else if (err instanceof ElevenLabsSpeechError) {
+      elevenLabsErrStatus = err.reason;
+    }
+  }
+
+  // Smart Auto-Fallback to the alternate engine before reporting any error
+  try {
+    const fallbackResult = await tryEngine(secondaryProvider);
+    const primaryReason =
+      primaryError instanceof SarvamSpeechError
+        ? primaryError.reason
+        : primaryError instanceof ElevenLabsSpeechError
+          ? primaryError.reason
+          : 'voice_error';
+    return {
+      ...fallbackResult,
+      fallbackUsed: true,
+      primaryFailureReason: primaryReason,
+    };
+  } catch (fallbackErr) {
+    if (fallbackErr instanceof SarvamSpeechError) {
+      sarvamErrStatus = fallbackErr.reason;
+    } else if (fallbackErr instanceof ElevenLabsSpeechError) {
+      elevenLabsErrStatus = fallbackErr.reason;
+    }
+
+    const primaryDetail =
+      primaryError instanceof Error ? primaryError.message : 'निवडलेले व्हॉइस इंजिन उपलब्ध नाही.';
+    const secondaryDetail =
+      fallbackErr instanceof Error ? fallbackErr.message : 'बॅकअप व्हॉइस इंजिन उपलब्ध नाही.';
+    const combinedMessage =
+      requestedProvider === 'sarvam'
+        ? `Sarvam AI आणि ElevenLabs दोन्ही आवाज सध्या उपलब्ध नाहीत. Sarvam AI: ${primaryDetail} | बॅकअप (ElevenLabs): ${secondaryDetail}`
+        : `ElevenLabs आणि Sarvam AI दोन्ही आवाज सध्या उपलब्ध नाहीत. ElevenLabs: ${primaryDetail} | बॅकअप (Sarvam AI): ${secondaryDetail}`;
+
+    throw new DualTtsUnavailableError({
+      message: combinedMessage,
+      requestedProvider,
+      sarvamStatus: sarvamErrStatus,
+      elevenLabsStatus: elevenLabsErrStatus,
+    });
+  }
+}
+
+export interface DualSynthesizedSpeechResult {
+  provider: VoiceTtsProvider;
+  requestedProvider: VoiceTtsProvider;
+  fallbackUsed: boolean;
+  primaryFailureReason?: string;
+  mimeType: string;
+  audioBase64: string;
+  modelUsed?: string;
+  voiceId?: string;
+  cacheHit?: boolean;
+}
+
+export async function synthesizeDualProviderSpeech(params: {
+  text: string;
+  provider?: VoiceTtsProvider;
+  forceRefresh?: boolean;
+}): Promise<DualSynthesizedSpeechResult> {
+  const opened = await openDualProviderSpeechStream(params);
+
+  if (opened.buffer) {
+    return {
+      provider: opened.provider,
+      requestedProvider: opened.requestedProvider,
+      fallbackUsed: opened.fallbackUsed,
+      ...(opened.primaryFailureReason ? { primaryFailureReason: opened.primaryFailureReason } : {}),
+      mimeType: opened.mimeType,
+      audioBase64: opened.buffer.toString('base64'),
+      modelUsed: opened.modelUsed,
+      voiceId: opened.voiceId,
+      cacheHit: opened.cacheHit,
+    };
+  }
+
+  if (opened.stream) {
+    const reader = opened.stream.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          chunks.push(value);
+          totalBytes += value.byteLength;
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (totalBytes === 0) {
+      throw new DualTtsUnavailableError({
+        message: 'Sarvam AI आणि ElevenLabs दोन्ही आवाज सध्या उपलब्ध नाहीत.',
+        requestedProvider: opened.requestedProvider,
+        sarvamStatus: resolveSarvamConfig(process.env).status,
+        elevenLabsStatus: 'voice_error',
+      });
+    }
+
+    const fullBuffer = Buffer.concat(chunks, totalBytes);
+    opened.onCompleteBuffer?.(fullBuffer);
+    return {
+      provider: opened.provider,
+      requestedProvider: opened.requestedProvider,
+      fallbackUsed: opened.fallbackUsed,
+      ...(opened.primaryFailureReason ? { primaryFailureReason: opened.primaryFailureReason } : {}),
+      mimeType: opened.mimeType,
+      audioBase64: fullBuffer.toString('base64'),
+      modelUsed: opened.modelUsed,
+      voiceId: opened.voiceId,
+      cacheHit: opened.cacheHit,
+    };
+  }
+
+  throw new DualTtsUnavailableError({
+    message: 'Sarvam AI आणि ElevenLabs दोन्ही आवाज सध्या उपलब्ध नाहीत.',
+    requestedProvider: opened.requestedProvider,
+    sarvamStatus: resolveSarvamConfig(process.env).status,
+    elevenLabsStatus: 'voice_error',
+  });
+}
+
 
 

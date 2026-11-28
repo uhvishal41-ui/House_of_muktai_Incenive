@@ -21,11 +21,12 @@ import {
   parseExcelBuffer,
 } from './server/excelEngine.ts';
 import {
+  DualTtsUnavailableError,
   ElevenLabsSpeechError,
   getVoiceCapabilitiesStatus,
-  openMarathiSpeechStream,
+  openDualProviderSpeechStream,
   runMarathiVoiceTurn,
-  synthesizeMarathiSpeech,
+  synthesizeDualProviderSpeech,
   transcribeMarathiVoiceAudio,
 } from './server/voiceService.ts';
 import type { VoiceWorkspaceContext } from './server/voiceTools.ts';
@@ -322,8 +323,157 @@ const voiceConverseSchema = z.object({
 
 const voiceTtsSchema = z.object({
   text: z.string().min(1).max(900),
+  provider: z.enum(['sarvam', 'elevenlabs']).default('sarvam'),
   forceRefresh: z.boolean().optional(),
 });
+
+async function handleDualJsonTts(req: AuthenticatedRequest, res: express.Response): Promise<void> {
+  try {
+    const parsed = voiceTtsSchema.parse(req.body ?? {});
+    const result = await synthesizeDualProviderSpeech({
+      text: parsed.text,
+      provider: parsed.provider,
+      forceRefresh: parsed.forceRefresh,
+    });
+    res.setHeader('X-Voice-Provider', result.provider);
+    res.setHeader('X-Voice-Requested-Provider', result.requestedProvider);
+    res.setHeader('X-Voice-Fallback', result.fallbackUsed ? '1' : '0');
+    res.setHeader('X-Voice-Cache', result.cacheHit ? 'HIT' : 'MISS');
+    res.json(result);
+  } catch (err) {
+    if (err instanceof DualTtsUnavailableError) {
+      res.status(503).json({
+        error: err.message,
+        requestedProvider: err.requestedProvider,
+        sarvamStatus: err.sarvamStatus,
+        elevenLabsStatus: err.elevenLabsStatus,
+        elevenLabsOnly: false,
+      });
+      return;
+    }
+    if (err instanceof ElevenLabsSpeechError) {
+      res.status(503).json({
+        error: err.message,
+        elevenLabsStatus: err.reason,
+        elevenLabsOnly: false,
+      });
+      return;
+    }
+    if (err instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid TTS request payload.' });
+      return;
+    }
+    const message =
+      err instanceof Error
+        ? err.message
+        : 'Sarvam AI आणि ElevenLabs दोन्ही व्हॉइस इंजिन सध्या उपलब्ध नाहीत.';
+    res.status(503).json({ error: message, elevenLabsOnly: false });
+  }
+}
+
+async function handleDualStreamTts(req: AuthenticatedRequest, res: express.Response): Promise<void> {
+  try {
+    const parsed = voiceTtsSchema.parse(req.body ?? {});
+    const opened = await openDualProviderSpeechStream({
+      text: parsed.text,
+      provider: parsed.provider,
+      forceRefresh: parsed.forceRefresh,
+    });
+
+    res.status(200);
+    res.setHeader('Content-Type', opened.mimeType);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, max-age=600');
+    res.setHeader('X-Voice-Provider', opened.provider);
+    res.setHeader('X-Voice-Requested-Provider', opened.requestedProvider);
+    res.setHeader('X-Voice-Fallback', opened.fallbackUsed ? '1' : '0');
+    res.setHeader('X-Voice-Model', opened.modelUsed);
+    res.setHeader('X-Voice-Id', opened.voiceId);
+    res.setHeader('X-Voice-Cache', opened.cacheHit ? 'HIT' : 'MISS');
+
+    if (opened.buffer) {
+      res.setHeader('Content-Length', String(opened.buffer.byteLength));
+      res.end(opened.buffer);
+      return;
+    }
+
+    if (opened.stream) {
+      res.flushHeaders?.();
+      const reader = opened.stream.getReader();
+      const chunks: Uint8Array[] = [];
+      let totalBytes = 0;
+      let clientClosed = false;
+
+      req.on('close', () => {
+        clientClosed = true;
+        void reader.cancel().catch(() => {});
+      });
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.byteLength > 0) {
+            chunks.push(value);
+            totalBytes += value.byteLength;
+            if (!clientClosed && !res.writableEnded) {
+              res.write(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      if (!clientClosed && totalBytes > 0) {
+        opened.onCompleteBuffer?.(Buffer.concat(chunks, totalBytes));
+      }
+      if (!res.writableEnded) {
+        res.end();
+      }
+      return;
+    }
+
+    res.status(503).json({
+      error: 'Sarvam AI आणि ElevenLabs दोन्ही आवाज सध्या उपलब्ध नाहीत.',
+      elevenLabsStatus: 'voice_error',
+      sarvamStatus: 'voice_error',
+      elevenLabsOnly: false,
+    });
+  } catch (err) {
+    if (res.headersSent) {
+      if (!res.writableEnded) res.end();
+      return;
+    }
+    if (err instanceof DualTtsUnavailableError) {
+      res.status(503).json({
+        error: err.message,
+        requestedProvider: err.requestedProvider,
+        sarvamStatus: err.sarvamStatus,
+        elevenLabsStatus: err.elevenLabsStatus,
+        elevenLabsOnly: false,
+      });
+      return;
+    }
+    if (err instanceof ElevenLabsSpeechError) {
+      res.status(503).json({
+        error: err.message,
+        elevenLabsStatus: err.reason,
+        elevenLabsOnly: false,
+      });
+      return;
+    }
+    if (err instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid TTS request payload.' });
+      return;
+    }
+    const message =
+      err instanceof Error
+        ? err.message
+        : 'Sarvam AI आणि ElevenLabs दोन्ही आवाज सध्या उपलब्ध नाहीत.';
+    res.status(503).json({ error: message, elevenLabsOnly: false });
+  }
+}
 
 export function createApiRouter(authMiddleware = verifyFirebaseBearerToken) {
   const router = express.Router();
@@ -640,116 +790,15 @@ export function createApiRouter(authMiddleware = verifyFirebaseBearerToken) {
     '/voice/tts',
     authMiddleware,
     requireSuperAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const parsed = voiceTtsSchema.parse(req.body ?? {});
-        const result = await synthesizeMarathiSpeech(parsed.text, {
-          forceRefresh: parsed.forceRefresh,
-        });
-        res.json(result);
-      } catch (err) {
-        if (err instanceof ElevenLabsSpeechError) {
-          res.status(503).json({
-            error: err.message,
-            elevenLabsStatus: err.reason,
-            elevenLabsOnly: true,
-          });
-          return;
-        }
-        const message =
-          err instanceof Error ? err.message : 'ElevenLabs speech synthesis unavailable.';
-        res.status(503).json({ error: message, elevenLabsOnly: true });
-      }
-    },
+    handleDualJsonTts,
   );
 
-  // Ultra-low-latency streaming MP3 audio proxy (ElevenLabs /stream -> browser chunk-by-chunk)
+  // Dual-engine binary/streaming audio proxy (Sarvam AI WAV or ElevenLabs streaming MP3 + Smart Auto-Fallback)
   router.post(
     '/voice/tts/stream',
     authMiddleware,
     requireSuperAdmin,
-    async (req: AuthenticatedRequest, res) => {
-      try {
-        const parsed = voiceTtsSchema.parse(req.body ?? {});
-        const opened = await openMarathiSpeechStream(parsed.text, {
-          forceRefresh: parsed.forceRefresh,
-        });
-
-        res.status(200);
-        res.setHeader('Content-Type', opened.mimeType);
-        res.setHeader('X-Content-Type-Options', 'nosniff');
-        res.setHeader('Cache-Control', 'private, max-age=600');
-        res.setHeader('X-Voice-Provider', opened.provider);
-        res.setHeader('X-Voice-Model', opened.modelUsed);
-        res.setHeader('X-Voice-Id', opened.voiceId);
-        res.setHeader('X-Voice-Cache', opened.cacheHit ? 'HIT' : 'MISS');
-
-        if (opened.buffer) {
-          res.setHeader('Content-Length', String(opened.buffer.byteLength));
-          res.end(opened.buffer);
-          return;
-        }
-
-        if (opened.stream) {
-          res.flushHeaders?.();
-          const reader = opened.stream.getReader();
-          const chunks: Uint8Array[] = [];
-          let totalBytes = 0;
-          let clientClosed = false;
-
-          req.on('close', () => {
-            clientClosed = true;
-            void reader.cancel().catch(() => {});
-          });
-
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              if (value && value.byteLength > 0) {
-                chunks.push(value);
-                totalBytes += value.byteLength;
-                if (!clientClosed && !res.writableEnded) {
-                  res.write(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
-                }
-              }
-            }
-          } finally {
-            reader.releaseLock();
-          }
-
-          if (!clientClosed && totalBytes > 0) {
-            opened.onCompleteBuffer?.(Buffer.concat(chunks, totalBytes));
-          }
-          if (!res.writableEnded) {
-            res.end();
-          }
-          return;
-        }
-
-        res.status(503).json({
-          error: 'तुमचा निवडलेला ElevenLabs आवाज सध्या उपलब्ध नाही.',
-          elevenLabsStatus: 'voice_error',
-          elevenLabsOnly: true,
-        });
-      } catch (err) {
-        if (res.headersSent) {
-          if (!res.writableEnded) res.end();
-          return;
-        }
-        if (err instanceof ElevenLabsSpeechError) {
-          res.status(503).json({
-            error: err.message,
-            elevenLabsStatus: err.reason,
-            elevenLabsOnly: true,
-          });
-          return;
-        }
-        const message =
-          err instanceof Error ? err.message : 'ElevenLabs speech synthesis unavailable.';
-        res.status(503).json({ error: message, elevenLabsOnly: true });
-      }
-    },
+    handleDualStreamTts,
   );
 
   return router;
@@ -781,7 +830,14 @@ export function createExpressApp(authMiddleware = verifyFirebaseBearerToken) {
           origin: true,
           credentials: false,
           allowedHeaders: ['Content-Type', 'Authorization'],
-          exposedHeaders: ['X-Voice-Provider', 'X-Voice-Model', 'X-Voice-Id', 'X-Voice-Cache'],
+          exposedHeaders: [
+            'X-Voice-Provider',
+            'X-Voice-Requested-Provider',
+            'X-Voice-Fallback',
+            'X-Voice-Model',
+            'X-Voice-Id',
+            'X-Voice-Cache',
+          ],
         });
         return;
       }
@@ -798,6 +854,10 @@ export function createExpressApp(authMiddleware = verifyFirebaseBearerToken) {
     legacyHeaders: false,
     message: { error: 'Too many API requests. Please wait a moment and try again.' },
   });
+
+  // Direct /api/tts endpoints (dual-engine Sarvam AI + ElevenLabs with Smart Auto-Fallback)
+  app.post('/api/tts', apiLimiter, authMiddleware, requireSuperAdmin, handleDualJsonTts);
+  app.post('/api/tts/stream', apiLimiter, authMiddleware, requireSuperAdmin, handleDualStreamTts);
 
   app.use('/api/v1', apiLimiter);
   app.use('/api/v1', createApiRouter(authMiddleware));
