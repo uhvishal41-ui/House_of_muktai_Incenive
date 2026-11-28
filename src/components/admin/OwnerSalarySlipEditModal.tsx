@@ -10,6 +10,7 @@ import type { SalarySlip, SalarySlipPaymentMode } from '../../types/incentive';
 
 interface Props {
   slip: SalarySlip;
+  isMainOwner?: boolean;
   onClose: () => void;
   onSaved: (updated: SalarySlip) => Promise<void>;
 }
@@ -31,7 +32,7 @@ function numStrToFloat(str: string): number {
   return Math.round(num * 100) / 100;
 }
 
-export function OwnerSalarySlipEditModal({ slip, onClose, onSaved }: Props) {
+export function OwnerSalarySlipEditModal({ slip, isMainOwner = false, onClose, onSaved }: Props) {
   const [totalDays, setTotalDays] = useState(String(slip.totalDays ?? 30));
   const [presentDays, setPresentDays] = useState(String(slip.presentDays ?? slip.paidDays ?? 0));
   const [paidDays, setPaidDays] = useState(String(slip.paidDays ?? 0));
@@ -212,7 +213,7 @@ export function OwnerSalarySlipEditModal({ slip, onClose, onSaved }: Props) {
             <h3 className="text-sm sm:text-base font-bold flex items-center gap-2">
               <Crown className="w-4 h-4 text-[#DFC27D] shrink-0" />
               <span className="truncate">
-                Main Owner · Direct Edit Salary Slip ({formatMonthLabel(slip.monthKey)})
+                {isMainOwner ? 'Main Owner' : 'Admin'} · Edit &amp; Save Salary Slip ({formatMonthLabel(slip.monthKey)})
               </span>
             </h3>
             <p className="text-xs text-slate-300 mt-0.5 truncate">
@@ -407,7 +408,7 @@ export function OwnerSalarySlipEditModal({ slip, onClose, onSaved }: Props) {
                 maxLength={240}
                 value={remarks}
                 onChange={(e) => setRemarks(e.target.value)}
-                placeholder="Optional Owner revision note"
+                placeholder="Optional revision note"
                 className="w-full h-8 px-2.5 rounded-lg border border-slate-300 bg-white text-xs text-slate-900"
               />
             </label>

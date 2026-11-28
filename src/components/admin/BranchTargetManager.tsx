@@ -13,7 +13,6 @@ import {
   UserCheck,
   Users,
 } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
 import {
   formatINRFromPaise,
   formatMonthLabel,
@@ -101,7 +100,6 @@ export function BranchTargetManager({
   onRefresh,
   onFeedback,
 }: Props) {
-  const { isMainOwner } = useAuth();
   const [internalTargetMonth, setInternalTargetMonth] = useState<string>(
     () => controlledTargetMonth || selectedAnalyticsMonth || getCurrentMonthKeyIST(),
   );
@@ -1465,7 +1463,7 @@ export function BranchTargetManager({
                         >
                           {card.progress.salePct}%
                         </span>
-                        {isMainOwner && card.branchTarget && (
+                        {card.branchTarget && (
                           <button
                             type="button"
                             onClick={(e) => {
@@ -1473,7 +1471,7 @@ export function BranchTargetManager({
                               void handleDeleteTarget(card.branchTarget!.targetId);
                             }}
                             className="p-1 text-slate-400 hover:text-red-700 cursor-pointer"
-                            title="Main Owner only: delete branch target"
+                            title="Delete branch target"
                             aria-label={`Delete ${card.branchName} branch target`}
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -1703,17 +1701,15 @@ export function BranchTargetManager({
                             >
                               <Edit3 className="w-3.5 h-3.5" />
                             </button>
-                            {isMainOwner && (
-                              <button
-                                type="button"
-                                onClick={() => void handleDeleteTarget(row.target.targetId)}
-                                className="p-1.5 rounded-md text-slate-400 hover:text-red-700 hover:bg-red-50 cursor-pointer"
-                                title="Main Owner only: delete employee target"
-                                aria-label={`Delete target for ${row.target.employeeName}`}
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
+                            <button
+                              type="button"
+                              onClick={() => void handleDeleteTarget(row.target.targetId)}
+                              className="p-1.5 rounded-md text-slate-400 hover:text-red-700 hover:bg-red-50 cursor-pointer"
+                              title="Delete employee target"
+                              aria-label={`Delete target for ${row.target.employeeName}`}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
                         </td>
                       </tr>

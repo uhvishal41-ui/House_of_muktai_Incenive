@@ -1322,12 +1322,6 @@ export async function executeVoiceToolCall(
           return { ok: true, voidedAdjustmentId: targetAdj.adjustmentId };
         }
 
-        if (!env.isMainOwner) {
-          return {
-            ok: false,
-            error: 'Only Main Owner can permanently delete adjustments. Super Admin can VOID it instead.',
-          };
-        }
         if (asBool(args.confirmed) !== true) {
           env.onPendingConfirmation({
             toolName: 'manage_incentive_adjustment',
@@ -1490,9 +1484,6 @@ export async function executeVoiceToolCall(
       }
 
       if (action === 'DELETE') {
-        if (!env.isMainOwner) {
-          return { ok: false, error: 'Only Main Owner can permanently delete a payout record.' };
-        }
         const { exact } = findMatchingEmployees(asStr(args.employeeIdentifier), env.employees);
         if (!exact) return { ok: false, error: 'Employee not found.' };
         const rec = env.payoutRecords.find(
@@ -1522,10 +1513,10 @@ export async function executeVoiceToolCall(
       const action = asStr(args.action).toUpperCase();
       const monthKey = normalizeMonthInput(asStr(args.monthKey));
 
-      if (!env.isMainOwner) {
+      if (action === 'DELETE_MONTH' && !env.isMainOwner) {
         return {
           ok: false,
-          error: 'Only Main Owner can directly edit, move, or delete published salary slips.',
+          error: 'Only Main Owner can bulk-delete all salary slips for an entire month.',
         };
       }
       if (isMonthPayrollLockedLocal(monthKey, env.payrollLockSettings)) {
@@ -2191,7 +2182,6 @@ export async function executeVoiceToolCall(
           return { ok: true, targetId: saved.targetId, branchName: branch.branchName, targetRupees: amtRupees };
         }
         if (action === 'DELETE') {
-          if (!env.isMainOwner) return { ok: false, error: 'Only Main Owner can delete targets.' };
           const branch = branchRaw ? resolveBranchMatch(branchRaw, env.branches) : null;
           const { exact } = empIdent ? findMatchingEmployees(empIdent, env.employees) : { exact: null };
           const found = env.salesTargets.find(
@@ -2260,7 +2250,6 @@ export async function executeVoiceToolCall(
           };
         }
         if (action === 'DELETE') {
-          if (!env.isMainOwner) return { ok: false, error: 'Only Main Owner can delete loan records.' };
           const loan = env.employeeLoans.find((l) => l.employeeId === exact.employeeId);
           if (!loan) return { ok: false, error: `No loan record found for ${exact.fullName}.` };
           if (asBool(args.confirmed) !== true) {
@@ -2300,7 +2289,6 @@ export async function executeVoiceToolCall(
           return { ok: true, resolvedQueryId: qRec.queryId, employeeName: qRec.employeeName };
         }
         if (action === 'DELETE') {
-          if (!env.isMainOwner) return { ok: false, error: 'Only Main Owner can delete employee queries.' };
           if (asBool(args.confirmed) !== true) {
             env.onPendingConfirmation({
               toolName: 'manage_branches_targets_loans',
@@ -2585,7 +2573,13 @@ export async function executeVoiceToolCall(
 
       if (reportType === 'COMPLETE_BRANCH_PACK') {
         await downloadCompleteBranchReportPackXlsx(filterInput);
-        return { ok: true, reportType, monthKey, branch: branch?.branchName || 'All Branches' };
+        return {
+          ok: true,
+          reportType,
+          monthKey,
+          branch: branch?.branchName || 'All Branches',
+          directReplyMr: `${branch?.branchName || 'सर्व शाखांचा'} संपूर्ण एक्सेल रिपोर्ट डाउनलोड झाला आहे.`,
+        };
       }
       if (reportType === 'BANK_NEFT_XLSX') {
         await downloadBankNeftExportXlsx(filterInput);
@@ -2807,48 +2801,84 @@ export async function executeVoiceToolCall(
       const empIdRaw = asStr(args.employeeIdentifier);
       const branchRaw = asStr(args.branch);
       const deptRaw = asStr(args.department);
+      const rawMonthArg = asStr(args.monthKey);
       const docTypeRaw = asStr(args.documentType).toUpperCase();
       const requestedDocType: 'AUTO' | 'SALARY_SLIP' | 'INCENTIVE_SUMMARY' =
         docTypeRaw === 'SALARY_SLIP' || docTypeRaw === 'INCENTIVE_SUMMARY' ? docTypeRaw : 'AUTO';
       const portalUrl = typeof window !== 'undefined' ? window.location.origin : '';
 
-      const resolveLatestMonth = (empIds?: Set<string>): string => {
-        const rawMonth = asStr(args.monthKey);
-        if (rawMonth) return normalizeMonthInput(rawMonth);
-        const slipMonths = env.salarySlips
-          .filter((s) => !empIds || empIds.has(s.employeeId.toUpperCase()))
-          .map((s) => s.monthKey);
-        const incMonths = env.monthlySummaries
-          .filter((s) => s.sourceType !== 'NO_DATA' && (!empIds || empIds.has(s.employeeId.toUpperCase())))
-          .map((s) => s.monthKey);
-        const pool =
+      const normEmpKey = (id?: string): string => (id || '').trim().toUpperCase();
+      const stripZeroEmpKey = (id?: string): string => normEmpKey(id).replace(/^0+/, '') || normEmpKey(id);
+      const matchesEmpRecord = (recordEmpId: string, emp: Employee): boolean => {
+        const recKey = normEmpKey(recordEmpId);
+        const recNoZero = stripZeroEmpKey(recordEmpId);
+        const empKey = normEmpKey(emp.employeeId);
+        const empNoZero = stripZeroEmpKey(emp.employeeId);
+        if (recKey === empKey || (recNoZero && recNoZero === empNoZero)) return true;
+        if (emp.saleId) {
+          const saleKey = normEmpKey(emp.saleId);
+          const saleNoZero = stripZeroEmpKey(emp.saleId);
+          if (recKey === saleKey || (recNoZero && recNoZero === saleNoZero)) return true;
+        }
+        return false;
+      };
+
+      const collectMonthsForStaff = (
+        staff: Employee[],
+        kind: 'SALARY_SLIP' | 'INCENTIVE_SUMMARY' | 'BOTH',
+      ): string[] => {
+        const months = new Set<string>();
+        if (kind === 'SALARY_SLIP' || kind === 'BOTH') {
+          for (const s of env.salarySlips) {
+            if (staff.some((emp) => matchesEmpRecord(s.employeeId, emp))) {
+              months.add(s.monthKey);
+            }
+          }
+        }
+        if (kind === 'INCENTIVE_SUMMARY' || kind === 'BOTH') {
+          for (const s of env.monthlySummaries) {
+            if (s.sourceType !== 'NO_DATA' && staff.some((emp) => matchesEmpRecord(s.employeeId, emp))) {
+              months.add(s.monthKey);
+            }
+          }
+        }
+        return Array.from(months).sort((a, b) => b.localeCompare(a));
+      };
+
+      const resolveLatestMonth = (staff: Employee[]): string => {
+        if (rawMonthArg) return normalizeMonthInput(rawMonthArg);
+        const primaryMonths = collectMonthsForStaff(
+          staff,
           requestedDocType === 'SALARY_SLIP'
-            ? slipMonths
+            ? 'SALARY_SLIP'
             : requestedDocType === 'INCENTIVE_SUMMARY'
-              ? incMonths
-              : [...slipMonths, ...incMonths];
-        const sorted = Array.from(new Set(pool)).sort((a, b) => b.localeCompare(a));
-        return sorted[0] || getCurrentMonthKeyIST();
+              ? 'INCENTIVE_SUMMARY'
+              : 'BOTH',
+        );
+        if (primaryMonths.length > 0) return primaryMonths[0];
+        const anyMonths = collectMonthsForStaff(staff, 'BOTH');
+        return anyMonths[0] || getCurrentMonthKeyIST();
       };
 
       const buildItemForEmployee = (
         emp: Employee,
         monthKey: string,
+        docMode: 'AUTO' | 'SALARY_SLIP' | 'INCENTIVE_SUMMARY',
       ): VoiceWhatsAppRecipientItem | null => {
         const slip = env.salarySlips.find(
-          (s) => s.employeeId.toUpperCase() === emp.employeeId.toUpperCase() && s.monthKey === monthKey,
+          (s) => s.monthKey === monthKey && matchesEmpRecord(s.employeeId, emp),
         );
         const inc = env.monthlySummaries.find(
           (s) =>
-            s.employeeId.toUpperCase() === emp.employeeId.toUpperCase() &&
             s.monthKey === monthKey &&
-            s.sourceType !== 'NO_DATA',
+            s.sourceType !== 'NO_DATA' &&
+            matchesEmpRecord(s.employeeId, emp),
         );
 
         let chosenType: 'SALARY_SLIP' | 'INCENTIVE_SUMMARY' | null = null;
-        if (requestedDocType === 'SALARY_SLIP' && slip) chosenType = 'SALARY_SLIP';
-        else if (requestedDocType === 'INCENTIVE_SUMMARY' && inc) chosenType = 'INCENTIVE_SUMMARY';
-        else if (requestedDocType === 'AUTO') {
+        if (docMode === 'SALARY_SLIP' && slip) chosenType = 'SALARY_SLIP';
+        else if (docMode === 'INCENTIVE_SUMMARY' && inc) chosenType = 'INCENTIVE_SUMMARY';
+        else if (docMode === 'AUTO') {
           if (slip) chosenType = 'SALARY_SLIP';
           else if (inc) chosenType = 'INCENTIVE_SUMMARY';
         }
@@ -2872,7 +2902,7 @@ export async function executeVoiceToolCall(
           const adjNet = env.adjustments
             .filter(
               (a) =>
-                a.employeeId.toUpperCase() === emp.employeeId.toUpperCase() &&
+                matchesEmpRecord(a.employeeId, emp) &&
                 a.monthKey === monthKey &&
                 a.status === 'ACTIVE',
             )
@@ -2901,6 +2931,91 @@ export async function executeVoiceToolCall(
         };
       };
 
+      const resolveItemsWithSmartFallback = (staff: Employee[]): {
+        items: VoiceWhatsAppRecipientItem[];
+        effectiveMonthKey: string;
+        requestedMonthKey: string;
+        fallbackReasonMr: string;
+      } => {
+        const requestedMonthKey = resolveLatestMonth(staff);
+
+        const buildAll = (
+          mKey: string,
+          docMode: 'AUTO' | 'SALARY_SLIP' | 'INCENTIVE_SUMMARY',
+        ): VoiceWhatsAppRecipientItem[] => {
+          const out: VoiceWhatsAppRecipientItem[] = [];
+          for (const emp of staff) {
+            const it = buildItemForEmployee(emp, mKey, docMode);
+            if (it) out.push(it);
+          }
+          return out;
+        };
+
+        // 1. Exact match for requested month + doc type
+        const primary = buildAll(requestedMonthKey, requestedDocType);
+        if (primary.length > 0) {
+          return {
+            items: primary,
+            effectiveMonthKey: requestedMonthKey,
+            requestedMonthKey,
+            fallbackReasonMr: '',
+          };
+        }
+
+        // 2. If SALARY_SLIP requested (or AUTO) and requested month had none, check latest available Salary Slip month for these staff
+        if (requestedDocType === 'SALARY_SLIP' || requestedDocType === 'AUTO') {
+          const staffSlipMonths = collectMonthsForStaff(staff, 'SALARY_SLIP');
+          for (const altMonth of staffSlipMonths) {
+            const altItems = buildAll(altMonth, 'SALARY_SLIP');
+            if (altItems.length > 0) {
+              return {
+                items: altItems,
+                effectiveMonthKey: altMonth,
+                requestedMonthKey,
+                fallbackReasonMr:
+                  altMonth !== requestedMonthKey
+                    ? `${formatMonthLabel(requestedMonthKey)} च्या सॅलरी स्लिप अद्याप अपलोड नसल्याने उपलब्ध असलेल्या ${formatMonthLabel(altMonth)} च्या सॅलरी स्लिप तयार केल्या आहेत.`
+                    : '',
+              };
+            }
+          }
+        }
+
+        // 3. Fallback to Incentive Statement (same month first, then latest available incentive month)
+        const sameMonthInc = buildAll(requestedMonthKey, 'INCENTIVE_SUMMARY');
+        if (sameMonthInc.length > 0) {
+          return {
+            items: sameMonthInc,
+            effectiveMonthKey: requestedMonthKey,
+            requestedMonthKey,
+            fallbackReasonMr:
+              requestedDocType === 'SALARY_SLIP'
+                ? `${formatMonthLabel(requestedMonthKey)} च्या सॅलरी स्लिप अद्याप अपलोड नसल्याने, त्याऐवजी ${formatMonthLabel(requestedMonthKey)} चे इन्सेंटिव्ह स्टेटमेंट तयार केले आहे.`
+                : '',
+          };
+        }
+
+        const staffIncMonths = collectMonthsForStaff(staff, 'INCENTIVE_SUMMARY');
+        for (const altMonth of staffIncMonths) {
+          const altInc = buildAll(altMonth, 'INCENTIVE_SUMMARY');
+          if (altInc.length > 0) {
+            return {
+              items: altInc,
+              effectiveMonthKey: altMonth,
+              requestedMonthKey,
+              fallbackReasonMr: `${formatMonthLabel(requestedMonthKey)} साठी सॅलरी स्लिप अपलोड नसल्याने उपलब्ध असलेल्या ${formatMonthLabel(altMonth)} चे इन्सेंटिव्ह स्टेटमेंट तयार केले आहे.`,
+            };
+          }
+        }
+
+        return {
+          items: [],
+          effectiveMonthKey: requestedMonthKey,
+          requestedMonthKey,
+          fallbackReasonMr: '',
+        };
+      };
+
       // Mode A: Single employee WhatsApp dispatch
       if (empIdRaw) {
         env.onLiveStatus(`WhatsApp स्लिप तयार करत आहे (${empIdRaw})...`);
@@ -2916,12 +3031,16 @@ export async function executeVoiceToolCall(
           return { ok: false, error: `No employee found matching "${empIdRaw}".` };
         }
 
-        const monthKey = resolveLatestMonth(new Set([exact.employeeId.toUpperCase()]));
-        const item = buildItemForEmployee(exact, monthKey);
+        const resolved = resolveItemsWithSmartFallback([exact]);
+        const item = resolved.items[0] || null;
         if (!item) {
+          const globalSlipMonths = Array.from(new Set(env.salarySlips.map((s) => s.monthKey)))
+            .sort((a, b) => b.localeCompare(a))
+            .slice(0, 4)
+            .map(formatMonthLabel);
           return {
             ok: false,
-            error: `No ${requestedDocType === 'SALARY_SLIP' ? 'salary slip' : requestedDocType === 'INCENTIVE_SUMMARY' ? 'incentive record' : 'salary slip or incentive record'} found for ${exact.fullName} in ${formatMonthLabel(monthKey)}.`,
+            error: `No salary slip or incentive record found for ${exact.fullName} (${exact.employeeId}) in ${formatMonthLabel(resolved.requestedMonthKey)} or any other uploaded month. Uploaded salary slip months in workspace: ${globalSlipMonths.join(', ') || 'None'}.`,
           };
         }
 
@@ -2935,17 +3054,18 @@ export async function executeVoiceToolCall(
         });
 
         const docLabelMr = item.docType === 'SALARY_SLIP' ? 'सॅलरी स्लिप' : 'इन्सेंटिव्ह स्टेटमेंट';
+        const fallbackPrefix = resolved.fallbackReasonMr ? `${resolved.fallbackReasonMr} ` : '';
         return {
           ok: true,
           employeeId: exact.employeeId,
           employeeName: exact.fullName,
-          monthKey,
+          monthKey: resolved.effectiveMonthKey,
           docType: item.docType,
           amountLabel: item.amountLabel,
           hasPhone: item.hasPhone,
           directReplyMr: item.hasPhone
-            ? `${exact.fullName} यांची ${item.monthLabel} ची ${docLabelMr} (${item.amountLabel}) WhatsApp वर पाठवण्यासाठी तयार आहे. खालील हिरव्या 'WhatsApp वर पाठवा' बटणावर क्लिक करा.`
-            : `${exact.fullName} यांची ${item.monthLabel} ची ${docLabelMr} तयार केली आहे, पण त्यांचा मोबाईल नंबर सेव्ह नाही. तुम्ही खालील बटणावरून नंबर निवडून पाठवू शकता किंवा त्यांचा नंबर सांगा म्हणजे मी सेव्ह करते.`,
+            ? `${fallbackPrefix}${exact.fullName} यांची ${item.monthLabel} ची ${docLabelMr} (${item.amountLabel}) WhatsApp वर पाठवण्यासाठी तयार आहे. खालील हिरव्या 'WhatsApp वर पाठवा' बटणावर क्लिक करा.`
+            : `${fallbackPrefix}${exact.fullName} यांची ${item.monthLabel} ची ${docLabelMr} तयार केली आहे, पण त्यांचा मोबाईल नंबर सेव्ह नाही. तुम्ही खालील बटणावरून नंबर निवडून पाठवू शकता किंवा त्यांचा नंबर सांगा म्हणजे मी सेव्ह करते.`,
         };
       }
 
@@ -2964,42 +3084,95 @@ export async function executeVoiceToolCall(
       const resolvedDept =
         deptRaw && deptRaw.toUpperCase() !== 'ALL' ? resolveDepartmentSelection(deptRaw) : null;
 
-      const filteredStaff = env.employees.filter((e) => {
-        if (e.status !== 'ACTIVE') return false;
-        if (targetBranch && e.branchId !== targetBranch.branchId) return false;
-        if (resolvedDept?.departmentId && e.departmentId !== resolvedDept.departmentId) return false;
-        if (
-          resolvedDept &&
-          !resolvedDept.departmentId &&
-          resolvedDept.departmentName &&
-          !(e.departmentName || '').toLowerCase().includes(resolvedDept.departmentName.toLowerCase())
-        ) {
-          return false;
+      const matchesBranch = (emp: Employee): boolean => {
+        if (!targetBranch) return true;
+        if (emp.branchId.trim().toUpperCase() === targetBranch.branchId.trim().toUpperCase()) return true;
+        return normalizeBranchKey(emp.branchName || '') === normalizeBranchKey(targetBranch.branchName);
+      };
+
+      const matchesDepartment = (emp: Employee): boolean => {
+        if (!resolvedDept) return true;
+        const empDeptId = emp.departmentId || resolveDepartmentSelection(emp.departmentName || '').departmentId;
+        if (resolvedDept.departmentId) {
+          if (empDeptId === resolvedDept.departmentId) return true;
+          // Also check if employee's latest salary slip carries the matching department
+          const slipWithDept = env.salarySlips.find(
+            (s) =>
+              matchesEmpRecord(s.employeeId, emp) &&
+              (s.departmentId === resolvedDept.departmentId ||
+                resolveDepartmentSelection(s.departmentName || '').departmentId === resolvedDept.departmentId),
+          );
+          return Boolean(slipWithDept);
+        }
+        if (resolvedDept.departmentName) {
+          return (emp.departmentName || '')
+            .toLowerCase()
+            .includes(resolvedDept.departmentName.toLowerCase());
         }
         return true;
-      });
+      };
 
-      const empIdSet = new Set(filteredStaff.map((e) => e.employeeId.toUpperCase()));
-      const monthKey = resolveLatestMonth(empIdSet);
-      env.onLiveStatus(`WhatsApp डिस्पॅच यादी तयार करत आहे (${formatMonthLabel(monthKey)})...`);
+      const branchActiveStaff = env.employees.filter((e) => e.status === 'ACTIVE' && matchesBranch(e));
+      const filteredStaff = branchActiveStaff.filter(matchesDepartment);
 
-      const allItems: VoiceWhatsAppRecipientItem[] = [];
-      for (const emp of filteredStaff) {
-        const it = buildItemForEmployee(emp, monthKey);
-        if (it) allItems.push(it);
-      }
-
-      if (allItems.length === 0) {
+      if (filteredStaff.length === 0) {
+        const scopeDesc = [targetBranch?.branchName, resolvedDept?.departmentName].filter(Boolean).join(' · ');
         return {
           ok: false,
-          error: `No salary slips or incentive records found for ${formatMonthLabel(monthKey)}${targetBranch ? ` in ${targetBranch.branchName}` : ''}.`,
+          error: resolvedDept
+            ? `${targetBranch?.branchName || 'All Branches'} has 0 ACTIVE employees assigned to ${resolvedDept.departmentName} in Employee Master (branch has ${branchActiveStaff.length} total ACTIVE employees).`
+            : `No ACTIVE employees found in ${scopeDesc || 'selected scope'}.`,
+          directReplyMr: resolvedDept
+            ? `${targetBranch?.branchName || 'निवडलेल्या शाखेत'} सध्या ${resolvedDept.departmentName} विभागात एकही Active कर्मचारी नेमलेला नाही (शाखेत एकूण ${branchActiveStaff.length} Active कर्मचारी आहेत).`
+            : `${scopeDesc || 'निवडलेल्या शाखेत'} एकही Active कर्मचारी सापडला नाही.`,
+        };
+      }
+
+      const resolved = resolveItemsWithSmartFallback(filteredStaff);
+      const monthKey = resolved.effectiveMonthKey;
+      env.onLiveStatus(`WhatsApp डिस्पॅच यादी तयार करत आहे (${formatMonthLabel(monthKey)})...`);
+      const allItems = resolved.items;
+
+      if (allItems.length === 0) {
+        const branchSlipMonths = Array.from(
+          new Set(
+            env.salarySlips
+              .filter((s) => !targetBranch || s.branchId === targetBranch.branchId)
+              .map((s) => s.monthKey),
+          ),
+        )
+          .sort((a, b) => b.localeCompare(a))
+          .slice(0, 4)
+          .map(formatMonthLabel);
+        const branchIncMonths = Array.from(
+          new Set(
+            env.monthlySummaries
+              .filter((s) => s.sourceType !== 'NO_DATA' && (!targetBranch || s.branchId === targetBranch.branchId))
+              .map((s) => s.monthKey),
+          ),
+        )
+          .sort((a, b) => b.localeCompare(a))
+          .slice(0, 4)
+          .map(formatMonthLabel);
+        const scopeLabelErr =
+          [targetBranch?.branchName, resolvedDept?.departmentName].filter(Boolean).join(' · ') || 'निवडलेली शाखा';
+        return {
+          ok: false,
+          matchedStaffCount: filteredStaff.length,
+          branchSalarySlipMonths: branchSlipMonths,
+          branchIncentiveMonths: branchIncMonths,
+          error: `Found ${filteredStaff.length} ACTIVE staff in ${scopeLabelErr}, but none of them have any published Salary Slip or Incentive records in ${formatMonthLabel(resolved.requestedMonthKey)} or any other month. Branch salary slip months: ${branchSlipMonths.join(', ') || 'None'}. Branch incentive months: ${branchIncMonths.join(', ') || 'None'}.`,
+          directReplyMr: `${scopeLabelErr} मधील ${filteredStaff.length} कर्मचाऱ्यांसाठी सध्या कोणतीही सॅलरी स्लिप किंवा इन्सेंटिव्ह नोंद अपलोड केलेली नाही.${branchSlipMonths.length > 0 ? ` या शाखेसाठी सॅलरी स्लिप फक्त ${branchSlipMonths.join(', ')} महिन्यांच्या आहेत.` : ' कृपया आधी या शाखेची सॅलरी शीट अपलोड करा.'}`,
         };
       }
 
       const missingPhoneCount = allItems.filter((i) => !i.hasPhone).length;
-      const scopeLabel = [targetBranch?.branchName, resolvedDept?.departmentName]
-        .filter(Boolean)
-        .join(' · ') || 'सर्व शाखा';
+      const scopeLabel =
+        [targetBranch?.branchName, resolvedDept?.departmentName].filter(Boolean).join(' · ') || 'सर्व शाखा';
+      const usedDocLabelMr = allItems.every((i) => i.docType === 'INCENTIVE_SUMMARY')
+        ? 'इन्सेंटिव्ह स्टेटमेंट'
+        : 'सॅलरी स्लिप';
+      const fallbackPrefix = resolved.fallbackReasonMr ? `${resolved.fallbackReasonMr} ` : '';
 
       env.onActionCard?.({
         type: 'whatsapp',
@@ -3017,7 +3190,8 @@ export async function executeVoiceToolCall(
         totalMatched: allItems.length,
         readyWithPhone: allItems.length - missingPhoneCount,
         missingPhoneCount,
-        directReplyMr: `${scopeLabel} मधील ${allItems.length} कर्मचाऱ्यांच्या ${formatMonthLabel(monthKey)} च्या WhatsApp स्लिप लिंक्स खाली तयार केल्या आहेत. एका क्लिकवर पाठवू शकता.`,
+        fallbackNote: resolved.fallbackReasonMr || undefined,
+        directReplyMr: `${fallbackPrefix}${scopeLabel} मधील ${allItems.length} कर्मचाऱ्यांच्या ${formatMonthLabel(monthKey)} च्या ${usedDocLabelMr} WhatsApp लिंक्स खाली तयार केल्या आहेत. एका क्लिकवर पाठवू शकता.`,
       };
     }
 

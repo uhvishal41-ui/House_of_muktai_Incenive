@@ -6,9 +6,14 @@ import {
 } from './voiceTools.ts';
 
 const GEMINI_CONVERSE_MODEL = 'gemini-4-hydrogen';
+const GEMINI_CONVERSE_FAST_MODEL = 'gemini-3.1-flash-lite';
 const GEMINI_CONVERSE_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
 const GEMINI_TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
 const DEFAULT_ELEVENLABS_MODEL_ID: ElevenLabsModelId = 'eleven_flash_v2_5';
+const GEMINI_FAST_TIMEOUT_MS = 9_000;
+const GEMINI_HEAVY_TIMEOUT_MS = 22_000;
+const GEMINI_TRANSCRIBE_TIMEOUT_MS = 12_000;
+const SARVAM_TTS_TIMEOUT_MS = 5_000;
 
 export type ElevenLabsModelId = 'eleven_flash_v2_5' | 'eleven_v3' | 'eleven_multilingual_v2';
 export type ElevenLabsHealthStatus =
@@ -83,8 +88,28 @@ let invalidElevenLabsKeyCached = '';
 let paidOnlyVoiceIdCached = '';
 let sarvamCooldownUntil = 0;
 let invalidSarvamKeyCached = '';
+let sarvamLearnedLegacyInputs = false;
+let sarvamLearnedSpeakerOverride = '';
 const ttsAudioCache = new Map<string, CachedSpeechBufferEntry>();
 const MAX_TTS_CACHE_ITEMS = 120;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
 
 export function isPlausibleElevenLabsApiKey(key: string): boolean {
   if (!key) return false;
@@ -279,6 +304,8 @@ export function resetElevenLabsRuntimeStateForTest(): void {
 export function resetSarvamRuntimeStateForTest(): void {
   sarvamCooldownUntil = 0;
   invalidSarvamKeyCached = '';
+  sarvamLearnedLegacyInputs = false;
+  sarvamLearnedSpeakerOverride = '';
   ttsAudioCache.clear();
 }
 
@@ -464,17 +491,25 @@ export async function transcribeMarathiVoiceAudio(params: {
   };
 
   try {
-    const response = await ai.models.generateContent({
-      model: GEMINI_TRANSCRIBE_MODEL,
-      contents: requestContents,
-    });
+    const response = await withTimeout(
+      ai.models.generateContent({
+        model: GEMINI_TRANSCRIBE_MODEL,
+        contents: requestContents,
+      }),
+      GEMINI_TRANSCRIBE_TIMEOUT_MS,
+      'Gemini transcribe',
+    );
     return { transcript: (response.text || '').trim() };
   } catch (err) {
-    if (!isRetryableOrQuotaError(err)) throw err;
-    const fallback = await ai.models.generateContent({
-      model: GEMINI_CONVERSE_FALLBACK_MODEL,
-      contents: requestContents,
-    });
+    if (!isRetryableOrQuotaError(err) && !String(err).includes('timed out')) throw err;
+    const fallback = await withTimeout(
+      ai.models.generateContent({
+        model: GEMINI_CONVERSE_FALLBACK_MODEL,
+        contents: requestContents,
+      }),
+      GEMINI_FAST_TIMEOUT_MS,
+      'Gemini transcribe fallback',
+    );
     return { transcript: (fallback.text || '').trim() };
   }
 }
@@ -561,46 +596,55 @@ export async function runMarathiVoiceTurn(params: {
   contents: Content[];
   context: VoiceWorkspaceContext;
   preferredModel?: string;
+  multiStep?: boolean;
 }): Promise<VoiceConverseResult> {
   const ai = getGeminiClient();
   const systemInstruction = buildMarathiAssistantSystemInstruction(params.context);
 
   const invokeModel = async (modelName: string, contentsToSend: Content[]) =>
-    ai.models.generateContent({
-      model: modelName,
-      contents: contentsToSend,
-      config: {
-        systemInstruction,
-        ...(modelName === GEMINI_CONVERSE_MODEL
-          ? {
-              // Per Gemini 4 spec: ThinkingLevel.LOW is the lowest-latency level supported on gemini-4-hydrogen
-              thinkingConfig: {
-                thinkingLevel: ThinkingLevel.LOW,
-              },
-            }
-          : {}),
-        tools: [
-          {
-            functionDeclarations: VOICE_FUNCTION_DECLARATIONS,
-          },
-        ],
-      },
-    });
+    withTimeout(
+      ai.models.generateContent({
+        model: modelName,
+        contents: contentsToSend,
+        config: {
+          systemInstruction,
+          ...(modelName === GEMINI_CONVERSE_MODEL
+            ? {
+                // Per Gemini 4 spec: ThinkingLevel.LOW is the lowest-latency level supported on gemini-4-hydrogen
+                thinkingConfig: {
+                  thinkingLevel: ThinkingLevel.LOW,
+                },
+              }
+            : {}),
+          tools: [
+            {
+              functionDeclarations: VOICE_FUNCTION_DECLARATIONS,
+            },
+          ],
+        },
+      }),
+      modelName === GEMINI_CONVERSE_FAST_MODEL ? GEMINI_FAST_TIMEOUT_MS : GEMINI_HEAVY_TIMEOUT_MS,
+      `Gemini voice (${modelName})`,
+    );
 
   const now = Date.now();
   const hasToolsInHistory = hasFunctionCallParts(params.contents);
   const pinnedModel =
     params.preferredModel === GEMINI_CONVERSE_MODEL ||
-    params.preferredModel === GEMINI_CONVERSE_FALLBACK_MODEL
+    params.preferredModel === GEMINI_CONVERSE_FAST_MODEL
       ? params.preferredModel
       : undefined;
 
-  // Choose initial model: stay pinned to the same model mid-tool-loop so thoughtSignature stays 100% valid!
+  // Smart routing:
+  // - Complex multi-step commands go straight to gemini-4-hydrogen (ThinkingLevel.LOW) for reliable 1-turn parallel tool calling
+  // - Single-step commands go to ultra-fast gemini-3.1-flash-lite (~1s) with automatic failover to gemini-4-hydrogen
   const firstModel =
     pinnedModel ||
-    (now < primaryConverseCooldownUntil ? GEMINI_CONVERSE_FALLBACK_MODEL : GEMINI_CONVERSE_MODEL);
+    (params.multiStep || now < primaryConverseCooldownUntil
+      ? GEMINI_CONVERSE_MODEL
+      : GEMINI_CONVERSE_FAST_MODEL);
   const secondModel =
-    firstModel === GEMINI_CONVERSE_MODEL ? GEMINI_CONVERSE_FALLBACK_MODEL : GEMINI_CONVERSE_MODEL;
+    firstModel === GEMINI_CONVERSE_FAST_MODEL ? GEMINI_CONVERSE_MODEL : GEMINI_CONVERSE_FAST_MODEL;
 
   let response;
   let usedModel = firstModel;
@@ -620,8 +664,13 @@ export async function runMarathiVoiceTurn(params: {
       throw firstErr;
     }
 
-    if (firstModel === GEMINI_CONVERSE_MODEL && isRetryableOrQuotaError(firstErr)) {
-      primaryConverseCooldownUntil = Date.now() + 60_000;
+    if (firstModel === GEMINI_CONVERSE_FAST_MODEL) {
+      const lowerErr = errMsg.toLowerCase();
+      if (lowerErr.includes('404') || lowerErr.includes('not found') || lowerErr.includes('unsupported')) {
+        primaryConverseCooldownUntil = Date.now() + 10 * 60_000;
+      } else if (isRetryableOrQuotaError(firstErr) || lowerErr.includes('timed out')) {
+        primaryConverseCooldownUntil = Date.now() + 45_000;
+      }
     }
 
     // If switching models mid-tool-loop, flatten prior tool call/result into clean prompt text
@@ -635,7 +684,7 @@ export async function runMarathiVoiceTurn(params: {
       usedModel = secondModel;
     } catch (secondErr) {
       if (!isRetryableOrQuotaError(secondErr)) throw secondErr;
-      await sleep(450);
+      await sleep(300);
       response = await invokeModel(secondModel, crossModelContents);
       usedModel = secondModel;
     }
@@ -843,7 +892,7 @@ export async function openMarathiSpeechStream(
       voiceId: config.voiceId,
       text: cleanText,
       modelId,
-      timeoutMs: modelId === 'eleven_flash_v2_5' ? 6500 : modelId === 'eleven_v3' ? 9000 : 8000,
+      timeoutMs: modelId === 'eleven_flash_v2_5' ? 4000 : 5000,
     });
 
     if (attempt.response) {
@@ -1143,6 +1192,8 @@ export async function openSarvamSpeechBuffer(
   if (options?.forceRefresh) {
     sarvamCooldownUntil = 0;
     invalidSarvamKeyCached = '';
+    sarvamLearnedLegacyInputs = false;
+    sarvamLearnedSpeakerOverride = '';
   }
 
   const config = resolveSarvamConfig(process.env);
@@ -1165,16 +1216,17 @@ export async function openSarvamSpeechBuffer(
     }
   }
 
-  // Attempt 1: Exact requested settings (target_language_code: "mr-IN", speaker: "mrunal", model: "bulbul:v3", pace: 1.0)
-  let usedSpeaker = config.speaker;
+  // Attempt 1: Exact requested settings (or cached learned compatibility format so we never waste a retry round-trip)
+  let usedSpeaker = sarvamLearnedSpeakerOverride || config.speaker;
   let attempt = await callSarvamTtsHttp({
     apiKey: config.apiKey,
     payload: buildSarvamRequestPayload({
       text: cleanText,
       modelId: config.modelId,
       speaker: usedSpeaker,
+      useLegacyInputsArray: sarvamLearnedLegacyInputs,
     }),
-    timeoutMs: 10_000,
+    timeoutMs: SARVAM_TTS_TIMEOUT_MS,
   });
 
   // Compatibility retry if Sarvam REST API version expects `inputs: [...]` or a built-in bulbul:v3 Marathi female speaker
@@ -1191,13 +1243,15 @@ export async function openSarvamSpeechBuffer(
           text: cleanText,
           modelId: config.modelId,
           speaker: retrySpeaker,
-          useLegacyInputsArray: needsInputsArray,
+          useLegacyInputsArray: needsInputsArray || sarvamLearnedLegacyInputs,
         }),
-        timeoutMs: 10_000,
+        timeoutMs: SARVAM_TTS_TIMEOUT_MS,
       });
       if (retryAttempt.ok) {
         attempt = retryAttempt;
         usedSpeaker = retrySpeaker;
+        if (needsInputsArray) sarvamLearnedLegacyInputs = true;
+        if (unsupportedSpeaker) sarvamLearnedSpeakerOverride = retrySpeaker;
       }
     }
   }

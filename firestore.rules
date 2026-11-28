@@ -37,7 +37,8 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'SUPER_ADMIN'
         && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true
         && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.authType == 'PASSWORD'
-        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.email == request.auth.token.email;
+        && request.auth.token.email is string
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.email.lower() == request.auth.token.email.lower();
     }
 
     // Operational Admin Gate: Main Owner OR Active Admin (Password or verified Google)
@@ -1207,8 +1208,10 @@ service cloud.firestore {
           )
         );
       allow update: if isValidId(authUid) && isSuperAdmin() && isValidActiveAuthUid(incoming())
-        && incoming().authUid == existing().authUid
-        && incoming().diff(existing()).affectedKeys().hasOnly(['employeeId', 'departmentId', 'branchId', 'branchName', 'isBranchManager', 'active', 'updatedAt']);
+        && incoming().authUid == authUid
+        && (!('authUid' in existing()) || incoming().authUid == existing().authUid)
+        && incoming().diff(existing()).addedKeys().hasOnly(['employeeId', 'departmentId', 'branchId', 'branchName', 'isBranchManager', 'active', 'updatedAt'])
+        && incoming().diff(existing()).changedKeys().hasOnly(['employeeId', 'departmentId', 'branchId', 'branchName', 'isBranchManager', 'active', 'updatedAt']);
       allow delete: if isValidId(authUid) && isSuperAdmin();
     }
 
@@ -1245,9 +1248,25 @@ service cloud.firestore {
           (
             isSuperAdmin()
             && isValidEmployee(incoming())
-            && incoming().employeeId == existing().employeeId
-            && incoming().createdAt == existing().createdAt
-            && incoming().diff(existing()).affectedKeys().hasOnly([
+            && incoming().employeeId == employeeId
+            && (!('employeeId' in existing()) || incoming().employeeId == existing().employeeId)
+            && (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt)
+            && incoming().diff(existing()).addedKeys().hasOnly([
+              'saleId', 'loginId', 'authEmail', 'linkedGoogleEmail', 'authUid', 'fullName',
+              'branchId', 'branchName', 'departmentId', 'departmentName', 'photoDataUrl',
+              'designation', 'gender', 'category',
+              'fatherOrSpouseName', 'maritalStatus', 'bloodGroup', 'qualification',
+              'dateOfBirth', 'dateOfJoining', 'dateOfExit', 'exitReason',
+              'employmentType', 'reportingManager', 'shiftTiming', 'weeklyOffDay', 'uniformSize',
+              'aadhaarMasked', 'panNumber', 'uanNumber', 'pfNumber', 'esicNumber',
+              'bankName', 'bankBranchName', 'bankAccountMasked', 'bankIfsc', 'upiId', 'paymentMode',
+              'monthlyGrossSalaryPaise',
+              'phone', 'alternatePhone', 'personalEmail', 'address', 'permanentAddress',
+              'emergencyContactName', 'emergencyContact', 'nomineeName', 'nomineeRelation', 'hrRemarks',
+              'customFields',
+              'role', 'isBranchManager', 'status', 'mustChangePassword', 'credentialsProvisioned', 'createdAt', 'updatedAt'
+            ])
+            && incoming().diff(existing()).changedKeys().hasOnly([
               'saleId', 'loginId', 'authEmail', 'linkedGoogleEmail', 'authUid', 'fullName',
               'branchId', 'branchName', 'departmentId', 'departmentName', 'photoDataUrl',
               'designation', 'gender', 'category',
@@ -1297,9 +1316,17 @@ service cloud.firestore {
               'rejectionReason', 'correctionNote', 'updatedAt'
             ])
           )
-          // Action B: Main Owner ONLY post-publish batch metadata & recomputed totals update (status locked to PUBLISHED)
+          // Action B: Post-publish batch metadata & recomputed totals update (unlocked months for Super Admin; Main Owner always; status locked to PUBLISHED)
           || (
-            isMainOwner()
+            (
+              isMainOwner()
+              || (
+                isSuperAdmin()
+                && existing().businessDate is string
+                && existing().businessDate.size() >= 7
+                && !isMonthPayrollLocked(existing().businessDate[0:7])
+              )
+            )
             && existing().status == 'PUBLISHED'
             && incoming().status == 'PUBLISHED'
             && incoming().diff(existing()).affectedKeys().hasOnly([
@@ -1489,7 +1516,7 @@ service cloud.firestore {
             ])
           )
         );
-      allow delete: if isValidId(payoutId) && isMainOwner() && !isMonthPayrollLocked(existing().monthKey);
+      allow delete: if isValidId(payoutId) && isSuperAdmin() && !isMonthPayrollLocked(existing().monthKey);
     }
 
     // 12. Audited Bonus / Deduction / Advance Adjustments (Super Admin writes; Active Employee reads own ACTIVE + visible month)
@@ -1516,7 +1543,7 @@ service cloud.firestore {
             && incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'status', 'voidedByEmail', 'voidedAt', 'employeeVisible'])
           )
         );
-      allow delete: if isValidId(adjustmentId) && isMainOwner() && !isMonthPayrollLocked(existing().monthKey);
+      allow delete: if isValidId(adjustmentId) && isSuperAdmin() && !isMonthPayrollLocked(existing().monthKey);
     }
 
     // 13. Monthly Sales Targets (Super Admin writes; Active Employee reads own/branch + Branch Manager own branch + visible month)
@@ -1538,7 +1565,7 @@ service cloud.firestore {
           'branchId', 'branchName', 'employeeId', 'authUid', 'employeeName',
           'targetSaleAmtPaise', 'targetSaleQty', 'employeeVisible', 'updatedByEmail', 'updatedAt'
         ]);
-      allow delete: if isValidId(targetId) && isMainOwner();
+      allow delete: if isValidId(targetId) && isSuperAdmin();
     }
 
     // 14. Employee Query / Dispute Tickets (Active Employee creates & reads own; Super Admin resolves or syncs authUid on password reset)
@@ -1568,7 +1595,7 @@ service cloud.firestore {
           || incoming().diff(existing()).affectedKeys().hasOnly(['authUid'])
           || incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'updatedAt'])
         );
-      allow delete: if isValidId(queryId) && isMainOwner();
+      allow delete: if isValidId(queryId) && isSuperAdmin();
     }
 
     // 15. Portal Settings (visibility: Admin write, Active Employees read; employee_columns: Admin-only; payroll_locks: Main Owner write, Admin read)
@@ -1704,7 +1731,7 @@ service cloud.firestore {
           !isMonthPayrollLocked(existing().monthKey)
           || incoming().diff(existing()).affectedKeys().hasOnly(['authUid', 'employeeVisible', 'updatedAt'])
         );
-      allow delete: if isValidId(slipId) && isMainOwner() && !isMonthPayrollLocked(existing().monthKey);
+      allow delete: if isValidId(slipId) && isSuperAdmin() && !isMonthPayrollLocked(existing().monthKey);
     }
 
     // 19. Privacy-Isolated 12-Branch Birthday Directory (Super Admin writes; Active Employees read active celebration profiles with ZERO PII)
@@ -1718,8 +1745,14 @@ service cloud.firestore {
       allow create: if isValidId(employeeId) && isSuperAdmin() && isValidBirthdayProfile(incoming())
         && incoming().employeeId == employeeId;
       allow update: if isValidId(employeeId) && isSuperAdmin() && isValidBirthdayProfile(incoming())
-        && incoming().employeeId == existing().employeeId
-        && incoming().diff(existing()).affectedKeys().hasOnly([
+        && incoming().employeeId == employeeId
+        && (!('employeeId' in existing()) || incoming().employeeId == existing().employeeId)
+        && incoming().diff(existing()).addedKeys().hasOnly([
+          'fullName', 'branchId', 'branchName', 'departmentId', 'departmentName',
+          'designation', 'photoDataUrl', 'birthMonthDay', 'birthMonth', 'birthDay',
+          'active', 'updatedAt'
+        ])
+        && incoming().diff(existing()).changedKeys().hasOnly([
           'fullName', 'branchId', 'branchName', 'departmentId', 'departmentName',
           'designation', 'photoDataUrl', 'birthMonthDay', 'birthMonth', 'birthDay',
           'active', 'updatedAt'
@@ -1779,7 +1812,7 @@ service cloud.firestore {
           'monthlyEmiPaise', 'totalInstallments', 'paidInstallments',
           'remainingBalancePaise', 'lastDeductedMonthKey', 'status', 'remarks', 'updatedAt'
         ]);
-      allow delete: if isValidId(loanId) && isMainOwner();
+      allow delete: if isValidId(loanId) && isSuperAdmin();
     }
   }
 }

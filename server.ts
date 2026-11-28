@@ -319,6 +319,7 @@ const voiceConverseSchema = z.object({
   contents: z.array(z.record(z.string(), z.unknown())).min(1).max(32),
   context: voiceContextSchema,
   preferredModel: z.enum(['gemini-4-hydrogen', 'gemini-3.1-flash-lite']).optional(),
+  multiStep: z.boolean().optional(),
 });
 
 const voiceTtsSchema = z.object({
@@ -775,6 +776,7 @@ export function createApiRouter(authMiddleware = verifyFirebaseBearerToken) {
           contents: parsed.contents as unknown as Content[],
           context: parsed.context as VoiceWorkspaceContext,
           preferredModel: parsed.preferredModel,
+          multiStep: parsed.multiStep,
         });
         res.json(result);
       } catch (err) {

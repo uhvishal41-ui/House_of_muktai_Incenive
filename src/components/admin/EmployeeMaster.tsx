@@ -185,6 +185,15 @@ export function EmployeeMaster({
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Employee | null>(null);
   const [profileDrawerEmp, setProfileDrawerEmp] = useState<Employee | null>(null);
+  const editFormRef = useRef<HTMLFormElement | null>(null);
+
+  const scrollToEditForm = () => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        editFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+  };
 
   useEffect(() => {
     if (!voiceFilter || voiceFilter.targetTab !== 'employees') return;
@@ -546,6 +555,7 @@ export function EmployeeMaster({
     setIsBranchManager(false);
     setShowForm(true);
     setFeedback(null);
+    scrollToEditForm();
   };
 
   const openEdit = (emp: Employee) => {
@@ -578,12 +588,13 @@ export function EmployeeMaster({
     setEmergencyContact(emp.emergencyContact || '');
     setCustomFields({ ...(emp.customFields || {}) });
     setLinkedGoogleEmail(emp.linkedGoogleEmail || '');
-    setInitialPassword(emp.credentialsProvisioned ? '' : DEFAULT_EMPLOYEE_PASSWORD);
+    setInitialPassword('');
     setStatus(emp.status);
     setMustChangePassword(emp.credentialsProvisioned ? emp.mustChangePassword : true);
     setIsBranchManager(Boolean(emp.isBranchManager));
     setShowForm(true);
     setFeedback(null);
+    scrollToEditForm();
   };
 
   const handlePhotoFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1013,7 +1024,7 @@ export function EmployeeMaster({
       setPwdNewValue('');
       setFeedback({
         type: 'ok',
-        text: `Main Owner set a new portal password for ${updatedEmp.fullName} (${updatedEmp.loginId}). Previous password is revoked immediately.`,
+        text: `New portal password set for ${updatedEmp.fullName} (${updatedEmp.loginId}). Previous password is revoked immediately.`,
       });
       await onRefresh();
     } catch (err) {
@@ -1150,7 +1161,7 @@ export function EmployeeMaster({
       setFeedback({ type: 'err', text: 'Please select a valid branch from Branch Master first.' });
       return;
     }
-    if (!editing && initialPassword && initialPassword.length < 8) {
+    if (initialPassword.trim() && initialPassword.trim().length < 8) {
       setFeedback({ type: 'err', text: 'Initial password must be at least 8 characters long.' });
       return;
     }
@@ -2159,8 +2170,8 @@ export function EmployeeMaster({
         </div>
       )}
 
-      {/* Main Owner ONLY: Transient Employee Password Ready Handoff Card */}
-      {isMainOwner && updatedEmpCreds && (() => {
+      {/* Super Admin: Transient Employee Password Ready Handoff Card */}
+      {updatedEmpCreds && (() => {
         const waUrl = buildWhatsAppCredsUrl(updatedEmpCreds);
         return (
           <div className="p-4 sm:p-5 rounded-xl bg-[#FFFDF7] border-2 border-[#B8923A] shadow-xs space-y-3">
@@ -2361,8 +2372,9 @@ export function EmployeeMaster({
 
       {showForm && (
         <form
+          ref={editFormRef}
           onSubmit={handleSubmit}
-          className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs"
+          className="bg-white border-2 border-[#B8923A]/50 rounded-xl overflow-hidden shadow-sm scroll-mt-20"
         >
           {/* Form Header */}
           <div className="px-5 py-3.5 bg-[#0F1F3D] text-white flex items-center justify-between gap-3">
@@ -2618,7 +2630,7 @@ export function EmployeeMaster({
                         {editing?.credentialsProvisioned ? '(Active)' : `(${DEFAULT_EMPLOYEE_PASSWORD})`}
                       </span>
                     </label>
-                    {isMainOwner && editing && (
+                    {editing && (
                       <button
                         type="button"
                         onClick={() => openSetEmployeePasswordModal(editing)}
@@ -2637,7 +2649,9 @@ export function EmployeeMaster({
                     placeholder={
                       editing?.credentialsProvisioned
                         ? 'Credentials active'
-                        : DEFAULT_EMPLOYEE_PASSWORD
+                        : editing
+                          ? `Optional: enter password (e.g. ${DEFAULT_EMPLOYEE_PASSWORD}) to activate`
+                          : DEFAULT_EMPLOYEE_PASSWORD
                     }
                     className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-mono disabled:bg-slate-50"
                   />
@@ -3160,22 +3174,21 @@ export function EmployeeMaster({
                         <button
                           type="button"
                           onClick={() => openEdit(emp)}
-                          className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-[#0F1F3D] cursor-pointer"
+                          title="Edit employee details & save changes"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#B8923A]/50 bg-[#FDF8EC] hover:bg-[#FAF0D7] text-xs font-semibold text-[#0F1F3D] cursor-pointer"
                         >
-                          <Edit3 className="w-3.5 h-3.5" />
+                          <Edit3 className="w-3.5 h-3.5 text-[#9A7625]" />
                           Edit
                         </button>
-                        {isMainOwner && (
-                          <button
-                            type="button"
-                            onClick={() => openSetEmployeePasswordModal(emp)}
-                            title="Main Owner only: set or reset employee portal password"
-                            className="inline-flex items-center gap-1 text-xs font-semibold text-[#9A7625] hover:text-[#0F1F3D] hover:underline cursor-pointer"
-                          >
-                            <KeyRound className="w-3.5 h-3.5" />
-                            Set Password
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => openSetEmployeePasswordModal(emp)}
+                          title="Set or reset employee portal password"
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-[#9A7625] hover:text-[#0F1F3D] hover:underline cursor-pointer"
+                        >
+                          <KeyRound className="w-3.5 h-3.5" />
+                          Set Password
+                        </button>
                         {isMainOwner && (
                           <button
                             type="button"
@@ -3200,15 +3213,15 @@ export function EmployeeMaster({
         )}
       </div>
 
-      {/* Main Owner ONLY: Set / Reset Employee Password Modal */}
-      {isMainOwner && pwdTargetEmp && (
+      {/* Super Admin: Set / Reset Employee Password Modal */}
+      {pwdTargetEmp && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white border-2 border-[#B8923A]/50 rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
             <div className="px-5 py-4 bg-[#0F1F3D] text-white flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <h3 className="text-sm font-bold flex items-center gap-2">
                   <KeyRound className="w-4 h-4 text-[#DFC27D] shrink-0" />
-                  Main Owner · Set Employee Password
+                  {isMainOwner ? 'Main Owner' : 'Admin'} · Set Employee Password
                 </h3>
                 <p className="text-xs text-slate-300 mt-0.5 truncate">
                   {pwdTargetEmp.fullName} ({pwdTargetEmp.employeeId} ·{' '}

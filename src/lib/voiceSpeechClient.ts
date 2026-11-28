@@ -126,17 +126,42 @@ async function getAdminAuthToken(): Promise<string> {
   return user.getIdToken();
 }
 
+export async function warmUpVoiceServer(): Promise<void> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      await fetch('/api/v1/health', {
+        method: 'GET',
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    // Silent background warm-up
+  }
+}
+
 export async function fetchVoiceCapabilitiesStatus(): Promise<VoiceCapabilitiesStatus | null> {
   try {
     const token = await getAdminAuthToken();
-    const resp = await fetch('/api/v1/voice/status', {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-    if (!resp.ok) return null;
-    return (await resp.json()) as VoiceCapabilitiesStatus;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    try {
+      const resp = await fetch('/api/v1/voice/status', {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      });
+      if (!resp.ok) return null;
+      return (await resp.json()) as VoiceCapabilitiesStatus;
+    } finally {
+      clearTimeout(timer);
+    }
   } catch {
     return null;
   }
@@ -147,47 +172,62 @@ export async function callVoiceTranscribeApi(params: {
   mimeType: string;
 }): Promise<{ transcript: string }> {
   const token = await getAdminAuthToken();
-  const resp = await fetch('/api/v1/voice/transcribe', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(params),
-  });
-  const data = (await resp.json().catch(() => ({}))) as { transcript?: string; error?: string };
-  if (!resp.ok) {
-    throw new Error(data.error || 'Voice transcription failed.');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12_000);
+  try {
+    const resp = await fetch('/api/v1/voice/transcribe', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(params),
+      signal: controller.signal,
+    });
+    const data = (await resp.json().catch(() => ({}))) as { transcript?: string; error?: string };
+    if (!resp.ok) {
+      throw new Error(data.error || 'Voice transcription failed.');
+    }
+    return { transcript: (data.transcript || '').trim() };
+  } finally {
+    clearTimeout(timer);
   }
-  return { transcript: (data.transcript || '').trim() };
 }
 
 export async function callVoiceConverseApi(params: {
   contents: VoiceContentMessage[];
   context: VoiceClientContext;
   preferredModel?: string;
+  multiStep?: boolean;
 }): Promise<VoiceConverseResponse> {
   const token = await getAdminAuthToken();
-  const resp = await fetch('/api/v1/voice/converse', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(params),
-  });
-  const data = (await resp.json().catch(() => ({}))) as Partial<VoiceConverseResponse> & {
-    error?: string;
-  };
-  if (!resp.ok) {
-    throw new Error(data.error || 'Voice assistant request failed.');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 42_000);
+  try {
+    const resp = await fetch('/api/v1/voice/converse', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(params),
+      signal: controller.signal,
+    });
+    const data = (await resp.json().catch(() => ({}))) as Partial<VoiceConverseResponse> & {
+      error?: string;
+    };
+    if (!resp.ok) {
+      throw new Error(data.error || 'Voice assistant request failed.');
+    }
+    return {
+      text: data.text || '',
+      functionCalls: Array.isArray(data.functionCalls) ? data.functionCalls : [],
+      modelContent: data.modelContent || null,
+      usedModel: typeof data.usedModel === 'string' ? data.usedModel : undefined,
+    };
+  } finally {
+    clearTimeout(timer);
   }
-  return {
-    text: data.text || '',
-    functionCalls: Array.isArray(data.functionCalls) ? data.functionCalls : [],
-    modelContent: data.modelContent || null,
-    usedModel: typeof data.usedModel === 'string' ? data.usedModel : undefined,
-  };
 }
 
 let activeAudioElement: HTMLAudioElement | null = null;
@@ -638,8 +678,166 @@ async function playStreamedMpegResponse(params: {
 }
 
 /**
+ * Splits long multi-sentence Marathi replies into compact chunks so Chunk 1 begins
+ * playing immediately while Chunk 2 is prefetched in parallel (cuts time-to-first-audio in half).
+ */
+export function splitMarathiTextForQuickSpeech(text: string): string[] {
+  const clean = normalizeClientCacheKey(text);
+  if (!clean) return [];
+  if (clean.length <= 145) return [clean];
+
+  const rawSegments = clean
+    .split(/(?<=[।!?])\s+|(?<=\.)\s+(?=[A-Z\u0900-\u097F])|\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (rawSegments.length <= 1) return [clean];
+
+  const chunks: string[] = [];
+  for (const seg of rawSegments) {
+    const prev = chunks[chunks.length - 1];
+    // Keep the very first chunk short (~120 chars) for ultra-fast first audio start
+    const maxLen = chunks.length <= 1 ? 120 : 210;
+    if (prev && prev.length + 1 + seg.length <= maxLen) {
+      chunks[chunks.length - 1] = `${prev} ${seg}`;
+    } else {
+      chunks.push(seg);
+    }
+  }
+  return chunks.length > 0 ? chunks : [clean];
+}
+
+async function fetchTtsChunkIntoCache(params: {
+  text: string;
+  requestedProvider: VoiceTtsProvider;
+  token: string;
+  forceRefresh?: boolean;
+  signal?: AbortSignal;
+}): Promise<
+  | {
+      ok: true;
+      actualProvider: VoiceTtsProvider;
+      fallbackUsed: boolean;
+      mimeType: string;
+      bytes: Uint8Array;
+      modelUsed?: string;
+      voiceId?: string;
+      cacheHit: boolean;
+    }
+  | {
+      ok: false;
+      details: TtsUnavailableDetails;
+    }
+> {
+  const cleanChunk = normalizeClientCacheKey(params.text);
+  const requestedCacheKey = buildClientTtsCacheKey(params.requestedProvider, cleanChunk);
+
+  if (!params.forceRefresh) {
+    const cached = readClientTtsCache(requestedCacheKey);
+    if (cached) {
+      return {
+        ok: true,
+        actualProvider: cached.provider,
+        fallbackUsed: cached.provider !== params.requestedProvider,
+        mimeType: cached.mimeType,
+        bytes: cached.bytes,
+        modelUsed: cached.modelUsed,
+        voiceId: cached.voiceId,
+        cacheHit: true,
+      };
+    }
+  }
+
+  const localController = new AbortController();
+  const timeoutTimer = setTimeout(() => localController.abort(), 10_000);
+  const onParentAbort = () => localController.abort();
+  params.signal?.addEventListener('abort', onParentAbort, { once: true });
+
+  try {
+    const resp = await fetch('/api/v1/voice/tts/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.token}`,
+      },
+      body: JSON.stringify({
+        text: cleanChunk,
+        provider: params.requestedProvider,
+        ...(params.forceRefresh ? { forceRefresh: true } : {}),
+      }),
+      signal: localController.signal,
+    });
+
+    if (!resp.ok) {
+      const errJson = (await resp.json().catch(() => ({}))) as {
+        error?: string;
+        sarvamStatus?: SarvamHealthStatus;
+        elevenLabsStatus?: ElevenLabsFallbackReason;
+      };
+      return {
+        ok: false,
+        details: {
+          requestedProvider: params.requestedProvider,
+          sarvamStatus: errJson.sarvamStatus,
+          elevenLabsStatus: errJson.elevenLabsStatus,
+          errorMessage:
+            errJson.error ||
+            'Sarvam AI आणि ElevenLabs दोन्ही आवाज सध्या उपलब्ध नाहीत. कृपया API Key किंवा कोटा तपासा.',
+        },
+      };
+    }
+
+    const actualProvider: VoiceTtsProvider =
+      resp.headers.get('X-Voice-Provider') === 'elevenlabs' ? 'elevenlabs' : 'sarvam';
+    const fallbackUsed =
+      resp.headers.get('X-Voice-Fallback') === '1' || actualProvider !== params.requestedProvider;
+    const mimeType =
+      resp.headers.get('Content-Type') ||
+      (actualProvider === 'sarvam' ? 'audio/wav' : 'audio/mpeg');
+    const modelUsed = resp.headers.get('X-Voice-Model') || undefined;
+    const voiceId = resp.headers.get('X-Voice-Id') || undefined;
+    const serverCacheHit = resp.headers.get('X-Voice-Cache') === 'HIT';
+    const arrayBuf = await resp.arrayBuffer();
+    if (arrayBuf.byteLength === 0) {
+      return {
+        ok: false,
+        details: {
+          requestedProvider: params.requestedProvider,
+          errorMessage: 'Sarvam AI आणि ElevenLabs दोन्ही आवाज सध्या उपलब्ध नाहीत.',
+        },
+      };
+    }
+
+    const bytes = new Uint8Array(arrayBuf);
+    const actualCacheKey = buildClientTtsCacheKey(actualProvider, cleanChunk);
+    storeClientTtsCache(actualCacheKey, {
+      provider: actualProvider,
+      mimeType,
+      bytes,
+      modelUsed,
+      voiceId,
+    });
+
+    return {
+      ok: true,
+      actualProvider,
+      fallbackUsed,
+      mimeType,
+      bytes,
+      modelUsed,
+      voiceId,
+      cacheHit: serverCacheHit,
+    };
+  } finally {
+    clearTimeout(timeoutTimer);
+    params.signal?.removeEventListener('abort', onParentAbort);
+  }
+}
+
+/**
  * Dual-Engine Marathi TTS Playback (Sarvam AI "मृणाल" + ElevenLabs) with Smart Auto-Fallback.
  * - Audio is cached strictly by `provider + text` so repeated Marathi replies never re-spend credits.
+ * - Long multi-sentence replies start speaking from Sentence 1 immediately while prefetching Sentence 2 in parallel.
  * - NEVER falls back to robotic browser TTS.
  * - If both engines fail, invokes `onUnavailable` so the UI shows a clean Marathi error banner.
  */
@@ -657,12 +855,80 @@ export async function speakNaturalMarathi(
   if (!cleanText || options?.muted) return 'muted';
 
   const requestedProvider: VoiceTtsProvider = options?.provider || getSavedTtsProvider();
-  const requestedCacheKey = buildClientTtsCacheKey(requestedProvider, cleanText);
+  const chunks = splitMarathiTextForQuickSpeech(cleanText);
 
   stopMarathiSpeechPlayback();
   const gen = playbackGeneration;
 
   try {
+    // Fast path for multi-sentence replies: stream sentence-by-sentence with parallel next-sentence prefetch
+    if (chunks.length > 1) {
+      const token = await getAdminAuthToken();
+      if (gen !== playbackGeneration) return requestedProvider;
+
+      const abortController = new AbortController();
+      activeStreamAbortController = abortController;
+
+      let startedNotified = false;
+      let lastProvider: VoiceTtsProvider = requestedProvider;
+      let nextPrefetchPromise = fetchTtsChunkIntoCache({
+        text: chunks[0],
+        requestedProvider,
+        token,
+        forceRefresh: options?.forceRefresh,
+        signal: abortController.signal,
+      });
+
+      for (let i = 0; i < chunks.length; i += 1) {
+        if (gen !== playbackGeneration) return lastProvider;
+        const currentResult = await nextPrefetchPromise;
+        if (gen !== playbackGeneration) return lastProvider;
+
+        if (!currentResult.ok) {
+          if (!startedNotified) {
+            options?.onUnavailable?.(currentResult.details);
+            return 'unavailable';
+          }
+          return lastProvider;
+        }
+
+        lastProvider = currentResult.actualProvider;
+
+        // Start fetching sentence i+1 in parallel WHILE sentence i plays!
+        if (i + 1 < chunks.length) {
+          nextPrefetchPromise = fetchTtsChunkIntoCache({
+            text: chunks[i + 1],
+            requestedProvider: currentResult.actualProvider,
+            token,
+            forceRefresh: false,
+            signal: abortController.signal,
+          });
+        }
+
+        const meta: SpeechPlaybackMeta = {
+          provider: currentResult.actualProvider,
+          requestedProvider,
+          fallbackUsed: currentResult.fallbackUsed,
+          modelUsed: currentResult.modelUsed,
+          voiceId: currentResult.voiceId,
+          cacheHit: currentResult.cacheHit,
+          streamed: false,
+        };
+
+        await playAudioBytes(currentResult.bytes, currentResult.mimeType, gen, () => {
+          if (!startedNotified) {
+            startedNotified = true;
+            options?.onStart?.(currentResult.actualProvider, meta);
+          }
+        });
+      }
+
+      return lastProvider;
+    }
+
+    // Single-chunk fast path
+    const requestedCacheKey = buildClientTtsCacheKey(requestedProvider, cleanText);
+
     // 1. Instant client in-memory LRU cache hit keyed by `provider + text` (zero API credits spent)
     if (!options?.forceRefresh) {
       const cached = readClientTtsCache(requestedCacheKey);
@@ -683,26 +949,32 @@ export async function speakNaturalMarathi(
       }
     }
 
-    // 2. Request audio from server proxy (supports both Sarvam AI WAV & ElevenLabs MP3 + Smart Auto-Fallback)
+    // 2. Request audio from server proxy with strict 10s timeout (supports Sarvam AI WAV & ElevenLabs MP3 + Auto-Fallback)
     const token = await getAdminAuthToken();
     if (gen !== playbackGeneration) return requestedProvider;
 
     const abortController = new AbortController();
     activeStreamAbortController = abortController;
+    const timeoutTimer = setTimeout(() => abortController.abort(), 10_000);
 
-    const resp = await fetch('/api/v1/voice/tts/stream', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        text: cleanText,
-        provider: requestedProvider,
-        ...(options?.forceRefresh ? { forceRefresh: true } : {}),
-      }),
-      signal: abortController.signal,
-    });
+    let resp: Response;
+    try {
+      resp = await fetch('/api/v1/voice/tts/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          text: cleanText,
+          provider: requestedProvider,
+          ...(options?.forceRefresh ? { forceRefresh: true } : {}),
+        }),
+        signal: abortController.signal,
+      });
+    } finally {
+      clearTimeout(timeoutTimer);
+    }
 
     if (gen !== playbackGeneration) return requestedProvider;
 
@@ -791,6 +1063,13 @@ export async function speakNaturalMarathi(
     return actualProvider;
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
+      if (gen === playbackGeneration) {
+        options?.onUnavailable?.({
+          requestedProvider,
+          errorMessage: 'आवाज तयार होण्यास जास्त वेळ लागला (Timeout). कृपया पुन्हा प्रयत्न करा.',
+        });
+        return 'unavailable';
+      }
       return requestedProvider;
     }
     if (gen !== playbackGeneration) {

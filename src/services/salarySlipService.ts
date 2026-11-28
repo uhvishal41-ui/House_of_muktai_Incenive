@@ -1246,7 +1246,7 @@ export async function updatePublishedSalarySlipByOwner(
       action: 'SALARY_SLIP_OWNER_EDITED',
       targetType: 'salary_slips',
       targetId: updated.slipId,
-      summary: `Main Owner directly updated salary slip for ${updated.employeeName} (${updated.employeeId}, ${updated.monthKey}): Net ₹${(updated.netPayablePaise / 100).toFixed(2)}.`,
+      summary: `${actor.email} directly updated salary slip for ${updated.employeeName} (${updated.employeeId}, ${updated.monthKey}): Net ₹${(updated.netPayablePaise / 100).toFixed(2)}.`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, 'audit_logs');

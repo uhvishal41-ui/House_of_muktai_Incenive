@@ -32,6 +32,7 @@ import {
   speakNaturalMarathi,
   stopMarathiSpeechPlayback,
   unlockVoiceAudioPlayback,
+  warmUpVoiceServer,
   type SpeechPlaybackMeta,
   type TtsUnavailableDetails,
   type VoiceCapabilitiesStatus,
@@ -42,6 +43,7 @@ import {
   describeVoiceToolStepMr,
   extractWakeWordCommand,
   isMultiStepVoiceCommand,
+  matchInstantLocalVoiceCommand,
   playWakeActivationChime,
   type VoiceActionCard,
   type VoiceExecutionStep,
@@ -84,8 +86,10 @@ interface SpeechRecognitionEventLike {
 
 const MAX_HISTORY_MESSAGES = 6;
 const MAX_TOOL_LOOPS = 10;
-const SILENCE_AUTO_SUBMIT_MS = 1450;
-const MAX_LISTEN_DURATION_MS = 35000;
+const SILENCE_AUTO_SUBMIT_MS = 850;
+const NO_SPEECH_IDLE_TIMEOUT_MS = 5500;
+const MAX_LISTEN_DURATION_MS = 10000;
+const WAKE_MIC_HANDOFF_DELAY_MS = 180;
 const WAKE_WORD_STORAGE_KEY = 'hom_voice_wake_word_enabled';
 
 function getSpeechRecognitionCtor(): (new () => SpeechRecognitionLike) | null {
@@ -108,6 +112,9 @@ function toFriendlyMarathiError(err: unknown): string {
   }
   if (lower.includes('network') || lower.includes('failed to fetch')) {
     return 'इंटरनेट किंवा सर्व्हरशी संपर्क तुटला आहे. कृपया कनेक्शन तपासून पुन्हा प्रयत्न करा.';
+  }
+  if (lower.includes('aborted') || lower.includes('abort') || lower.includes('timed out') || lower.includes('timeout')) {
+    return 'सर्व्हरकडून उत्तर यायला थोडा जास्त वेळ लागला. कृपया पुन्हा एकदा प्रयत्न करा.';
   }
   if (lower.includes('429') || lower.includes('resource_exhausted')) {
     return 'सध्या व्हॉइस सर्व्हिसवर जास्त लोड आहे. कृपया काही सेकंदांनी पुन्हा प्रयत्न करा.';
@@ -158,8 +165,10 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
   const currentSessionTextRef = useRef<string>('');
   const isListeningSessionRef = useRef<boolean>(false);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const noSpeechTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const maxListenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wakeHandoffTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mutedRef = useRef(muted);
   const selectedProviderRef = useRef<VoiceTtsProvider>(selectedProvider);
   const envRef = useRef(env);
@@ -214,13 +223,26 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     setWakeWordActive(false);
   }, []);
 
+  // Keep server warm (avoids 40-60s Render Free cold-start lag on first "हे मुक्ताई" command)
+  useEffect(() => {
+    void warmUpVoiceServer();
+    const keepWarmInterval = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        void warmUpVoiceServer();
+      }
+    }, 9 * 60_000);
+    return () => clearInterval(keepWarmInterval);
+  }, []);
+
   // Cleanup voice/mic handles on unmount (zero robotic browser TTS used — Sarvam AI + ElevenLabs only)
   useEffect(() => {
     return () => {
       isListeningSessionRef.current = false;
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      if (noSpeechTimerRef.current) clearTimeout(noSpeechTimerRef.current);
       if (maxListenTimerRef.current) clearTimeout(maxListenTimerRef.current);
       if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+      if (wakeHandoffTimerRef.current) clearTimeout(wakeHandoffTimerRef.current);
       stopWakeWordListener();
       stopMarathiSpeechPlayback();
       try {
@@ -385,17 +407,78 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
         });
 
       try {
+        // 0ms Instant Local Shortcut for greetings, executive briefing, and direct tab navigation
+        const instantShortcut = matchInstantLocalVoiceCommand(trimmed);
+        if (instantShortcut) {
+          let instantReply = '';
+          if (instantShortcut.kind === 'reply') {
+            instantReply = instantShortcut.replyMr;
+          } else {
+            const labelMr = describeVoiceToolStepMr(instantShortcut.toolName, instantShortcut.args);
+            const stepId = `instant_${instantShortcut.toolName}`;
+            setExecutionSteps([
+              { id: stepId, toolName: instantShortcut.toolName, labelMr, status: 'running' },
+            ]);
+            const toolResult = await executeVoiceToolCall(
+              instantShortcut.toolName,
+              instantShortcut.args,
+              execEnv,
+            );
+            const succeeded = toolResult.ok === true;
+            setExecutionSteps([
+              {
+                id: stepId,
+                toolName: instantShortcut.toolName,
+                labelMr,
+                status: succeeded ? 'done' : 'error',
+              },
+            ]);
+            instantReply =
+              typeof toolResult.directReplyMr === 'string' && toolResult.directReplyMr.trim()
+                ? toolResult.directReplyMr.trim()
+                : succeeded
+                  ? 'तुम्ही दिलेला टास्क पूर्ण झाला आहे.'
+                  : '';
+          }
+
+          if (instantReply) {
+            const updatedHistory: VoiceContentMessage[] = [
+              ...historyRef.current,
+              { role: 'user', parts: [{ text: trimmed }] },
+              { role: 'model', parts: [{ text: instantReply }] },
+            ];
+            historyRef.current = updatedHistory.slice(-MAX_HISTORY_MESSAGES);
+            setLiveAction('');
+            setAssistantReply(instantReply);
+            await speakReply(instantReply);
+            return;
+          }
+        }
+
         let workingHistory = [...nextHistory];
         let finalReplyText = '';
         let stepCounter = 0;
         let pinnedModel: string | undefined;
+        const completedToolReplies: string[] = [];
 
         for (let step = 0; step < MAX_TOOL_LOOPS; step += 1) {
-          const resp = await callVoiceConverseApi({
-            contents: workingHistory,
-            context: buildCtx(),
-            ...(pinnedModel ? { preferredModel: pinnedModel } : {}),
-          });
+          let resp;
+          try {
+            resp = await callVoiceConverseApi({
+              contents: workingHistory,
+              context: buildCtx(),
+              ...(pinnedModel ? { preferredModel: pinnedModel } : {}),
+              ...(multiStepRequested ? { multiStep: true } : {}),
+            });
+          } catch (loopErr) {
+            // If earlier tool(s) in a multi-step command ALREADY succeeded, speak their real results instead of failing!
+            if (completedToolReplies.length > 0) {
+              finalReplyText = completedToolReplies.join(' ');
+              break;
+            }
+            throw loopErr;
+          }
+
           if (resp.usedModel) {
             pinnedModel = resp.usedModel;
           }
@@ -405,7 +488,11 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
           }
 
           if (!resp.functionCalls || resp.functionCalls.length === 0) {
-            finalReplyText = resp.text || 'तुम्ही दिलेला टास्क पूर्ण झाला आहे.';
+            finalReplyText =
+              resp.text ||
+              (completedToolReplies.length > 0
+                ? completedToolReplies.join(' ')
+                : 'तुम्ही दिलेला टास्क पूर्ण झाला आहे.');
             break;
           }
 
@@ -440,7 +527,21 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
               ),
             );
 
-            const cleanResponseObj = JSON.parse(JSON.stringify(toolResult)) as Record<string, unknown>;
+            // Keep functionResponse compact so Step 2 Gemini summary stays ultra-fast
+            const rawClean = JSON.parse(JSON.stringify(toolResult)) as Record<string, unknown>;
+            const serialized = JSON.stringify(rawClean);
+            const cleanResponseObj: Record<string, unknown> =
+              serialized.length > 3600
+                ? {
+                    ok: rawClean.ok,
+                    ...(typeof rawClean.directReplyMr === 'string'
+                      ? { directReplyMr: rawClean.directReplyMr }
+                      : {}),
+                    ...(typeof rawClean.error === 'string' ? { error: rawClean.error } : {}),
+                    summaryTruncated: serialized.slice(0, 2400),
+                  }
+                : rawClean;
+
             responseParts.push({
               functionResponse: {
                 ...(fc.id ? { id: fc.id } : {}),
@@ -452,6 +553,9 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
               typeof toolResult.directReplyMr === 'string' ? toolResult.directReplyMr.trim() : '';
             if (maybeDirect) {
               directInstantReply = maybeDirect;
+              if (!completedToolReplies.includes(maybeDirect)) {
+                completedToolReplies.push(maybeDirect);
+              }
             } else {
               allCallsDirectReady = false;
             }
@@ -481,7 +585,10 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
         }
 
         if (!finalReplyText) {
-          finalReplyText = 'तुम्ही दिलेला टास्क पूर्ण झाला आहे.';
+          finalReplyText =
+            completedToolReplies.length > 0
+              ? completedToolReplies.join(' ')
+              : 'तुम्ही दिलेला टास्क पूर्ण झाला आहे.';
         }
 
         // Persist ONLY clean user/model text pairs across turns so history slicing can never orphan
@@ -507,7 +614,7 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
         setErrorNote(friendly);
         setAssistantReply(friendly);
         setPhase('error');
-        // Avoid triggering another Gemini TTS call when quota is already rate-limited
+        // Avoid triggering another TTS call when quota is already rate-limited
         if (!isQuotaErr) {
           await speakReply(friendly);
         }
@@ -521,6 +628,10 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
+    if (noSpeechTimerRef.current) {
+      clearTimeout(noSpeechTimerRef.current);
+      noSpeechTimerRef.current = null;
+    }
     if (maxListenTimerRef.current) {
       clearTimeout(maxListenTimerRef.current);
       maxListenTimerRef.current = null;
@@ -528,6 +639,10 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     if (restartTimerRef.current) {
       clearTimeout(restartTimerRef.current);
       restartTimerRef.current = null;
+    }
+    if (wakeHandoffTimerRef.current) {
+      clearTimeout(wakeHandoffTimerRef.current);
+      wakeHandoffTimerRef.current = null;
     }
   }, []);
 
@@ -670,6 +785,10 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
     setPhase('listening');
 
     const scheduleSilenceAutoSubmit = () => {
+      if (noSpeechTimerRef.current) {
+        clearTimeout(noSpeechTimerRef.current);
+        noSpeechTimerRef.current = null;
+      }
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
       }
@@ -680,15 +799,23 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
       }, SILENCE_AUTO_SUBMIT_MS);
     };
 
-    // Safety cap so mic never stays open forever
+    // Fast idle timeout if user wakes with "हे मुक्ताई" and doesn't speak anything
+    noSpeechTimerRef.current = setTimeout(() => {
+      if (isListeningSessionRef.current && !finalTranscriptRef.current.trim()) {
+        void stopListeningAndProcess();
+      }
+    }, NO_SPEECH_IDLE_TIMEOUT_MS);
+
+    // Tight 10s safety cap so mic NEVER gets stuck for 35 seconds
     maxListenTimerRef.current = setTimeout(() => {
       if (isListeningSessionRef.current) {
         void stopListeningAndProcess();
       }
     }, MAX_LISTEN_DURATION_MS);
 
-    // 1. Start continuous browser SpeechRecognition for live Marathi caption + smart silence detection
+    // 1. Start continuous browser SpeechRecognition for instant zero-upload Marathi speech capture
     const SpeechCtor = getSpeechRecognitionCtor();
+    let speechRecognitionStarted = false;
     const launchRecognition = () => {
       if (!SpeechCtor || !isListeningSessionRef.current) return;
       try {
@@ -714,7 +841,7 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
           if (fullText) {
             finalTranscriptRef.current = fullText;
             setUserTranscript(fullText);
-            // Reset 2.6s silence timer on every word so mid-sentence pauses NEVER cut off the user
+            // Crisp 850ms silence auto-submit on every word for instant turnaround
             scheduleSilenceAutoSubmit();
           }
         };
@@ -728,15 +855,18 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
             setAssistantReply(friendly);
             setPhase('error');
           }
-          // Ignore transient 'no-speech' / 'aborted' / 'network' errors while recording continues
         };
 
         recognition.onend = () => {
           if (!isListeningSessionRef.current) return;
-          // Preserve spoken words and seamlessly restart Chrome SpeechRecognition if it paused mid-sentence
           if (currentSessionTextRef.current) {
             accumulatedSegmentsRef.current.push(currentSessionTextRef.current);
             currentSessionTextRef.current = '';
+          }
+          // If we already captured words and SpeechRecognition ended cleanly, submit immediately!
+          if (finalTranscriptRef.current.trim().length >= 2) {
+            void stopListeningAndProcess();
+            return;
           }
           restartTimerRef.current = setTimeout(() => {
             if (isListeningSessionRef.current) {
@@ -747,15 +877,20 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
 
         recognitionRef.current = recognition;
         recognition.start();
+        speechRecognitionStarted = true;
       } catch {
-        // MediaRecorder below still captures full HD audio cleanly
+        speechRecognitionStarted = false;
       }
     };
 
     launchRecognition();
 
-    // 2. Simultaneously record clean noise-suppressed audio in parallel for studio-grade Marathi/Minglish transcription
-    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
+    // 2. Only open MediaRecorder when browser SpeechRecognition is unavailable (prevents Chrome mic lock fights & slow audio uploads)
+    if (
+      !speechRecognitionStarted &&
+      typeof navigator !== 'undefined' &&
+      navigator.mediaDevices?.getUserMedia
+    ) {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -828,22 +963,30 @@ export function MarathiVoiceAssistant({ activeTab, actorLabel, env }: Props) {
           if (!match.triggered) return;
 
           const now = Date.now();
-          if (now - lastWakeTriggerAtRef.current < 1800) return;
+          if (now - lastWakeTriggerAtRef.current < 1500) return;
           lastWakeTriggerAtRef.current = now;
 
           stopWakeWordListener();
           playWakeActivationChime();
           unlockVoiceAudioPlayback();
 
-          if (match.commandText && match.commandText.length >= 4) {
-            // Inline command spoken right after "हे मुक्ताई" (wait briefly if still interim)
+          if (match.commandText && match.commandText.length >= 3) {
             const lastRes = event.results[event.results.length - 1];
-            if (lastRes?.isFinal || match.commandText.split(/\s+/).length >= 3) {
+            if (lastRes?.isFinal || match.commandText.split(/\s+/).length >= 2) {
               void processUserCommand(match.commandText);
               return;
             }
           }
-          void startListening();
+
+          // Clean 180ms mic handoff delay so Chrome releases wake-word mic lock cleanly before starting command listener
+          setOverlayOpen(true);
+          setLiveAction('हो, बोला... ऐकत आहे...');
+          wakeHandoffTimerRef.current = setTimeout(() => {
+            wakeHandoffTimerRef.current = null;
+            if (phaseRef.current === 'idle') {
+              void startListening();
+            }
+          }, WAKE_MIC_HANDOFF_DELAY_MS);
         };
 
         rec.onerror = (ev) => {

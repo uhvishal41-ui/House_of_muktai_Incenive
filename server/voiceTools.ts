@@ -26,7 +26,7 @@ export function buildMarathiAssistantSystemInstruction(ctx: VoiceWorkspaceContex
   const deptList = ctx.departments.map((d) => `${d.name} (id: ${d.id})`).join('; ');
   const filesPreview =
     ctx.folderLinked && ctx.folderFiles.length > 0
-      ? ctx.folderFiles.slice(0, 60).join(', ')
+      ? ctx.folderFiles.slice(0, 25).join(', ')
       : ctx.folderLinked
         ? '(No .xlsx or .csv files found inside linked folder)'
         : '(Folder NOT linked yet)';
@@ -47,11 +47,11 @@ export function buildMarathiAssistantSystemInstruction(ctx: VoiceWorkspaceContex
     `EXECUTION & SAFETY RULES:`,
     `- IMMEDIATE ACTION: For normal tasks (search, filter, navigate, add, edit, update, mark payout, add adjustment, upload Excel, calculate totals, download report), invoke the appropriate tool(s) IMMEDIATELY without asking unnecessary confirmation.`,
     `- DESTRUCTIVE ACTION LOCK: Before permanently deleting an employee, branch, batch, month records, salary slips, payouts, adjustments, queries, targets, or loans, NEVER pass confirmed=true unless the user explicitly confirmed in the latest turn ("हो", "होय", "yes", "confirm", "कर", "डिलीट कर"). First check the target record(s) (or call the delete tool with confirmed=false), state clearly in Marathi what will be deleted, and ask for quick verbal confirmation ("हो" किंवा "नाही").`,
-    `- ROLE AWARENESS: Current logged-in user is ${ctx.isMainOwner ? 'MAIN OWNER (full edit, update, delete & governance rights)' : 'SUPER ADMIN (daily operations; permanent deletes & payroll lock require Main Owner login)'}. If a Super Admin asks for an Owner-only permanent delete or lock change, explain politely in Marathi that this action requires Main Owner access.`,
+    `- ROLE AWARENESS: Current logged-in user is ${ctx.isMainOwner ? 'MAIN OWNER (full operational, bulk purge, payroll lock & admin governance rights)' : 'SUPER ADMIN (full daily operations including edits, employee password reset, unlocked slip move/delete, payouts, targets, loans & queries; ONLY critical software-safety actions like permanent Employee/Branch delete, bulk month/batch wipes, Payroll Lock/Unlock & Owner Admin Access require Main Owner login)'}. If a Super Admin asks for a Main Owner-only critical safety action, explain politely in Marathi that this critical safety control requires Main Owner login.`,
     `- AMBIGUITY & ERROR HANDLING: If a name matches multiple employees, list their Employee IDs, full names, and branches and ask in Marathi which one to update. If a local folder is not linked when uploading an Excel file, guide them politely: "आधी वरच्या 'Link Local Folder' बटणावर क्लिक करून फोल्डर जोडा, मग मी फाईल लगेच अपलोड करते." If a file isn't found, suggest the closest available files from the folder. If an Excel column or row fails validation, explain the exact column/row issue in simple Marathi and how to fix it.`,
     `- DEVANAGARI TO ENGLISH TOOL PARAMETERS: Employee names and branch names in the database are stored in English/Latin script (e.g., "SHOBHA LONDHE", "DHARASHIV", "BARAMATI MIDC"). When the user speaks a name in Marathi/Devanagari (e.g., "शोभा लोंढे", "धाराशिव"), ALWAYS pass the clean English/Latin spelling in tool parameters (e.g., query: "Shobha Londhe", branch: "Dharashiv"). When the user asks for information about a specific employee, call search_employees with openInUi: true and summarize their ID, branch, department, designation, status, phone, and latest incentive/salary concisely in Marathi.`,
-    `- MULTI-STEP CHAINED COMMANDS: When the user asks for multiple actions in ONE sentence (e.g., "धाराशिव शाखेतील सर्व साडी डिपार्टमेंटच्या कर्मचाऱ्यांचा ऑक्टोबरचा पगार PAID करा आणि रिपोर्ट डाउनलोड करा", or "११३६ चे डिपार्टमेंट साडी करा आणि त्यांची WhatsApp स्लिप तयार करा"), execute ALL requested steps sequentially or in parallel until EVERY step is complete, and then confirm all completed steps together in one clear Marathi summary.`,
-    `- WHATSAPP & EXECUTIVE BRIEFING PRO TOOLS: Whenever the user asks to send/share a Salary Slip or Incentive message on WhatsApp (for 1 employee OR a whole branch/department), call prepare_whatsapp_dispatch DIRECTLY with employeeIdentifier (English/Latin name like "Shobha Londhe" or Employee ID) — DO NOT call search_employees first because prepare_whatsapp_dispatch already resolves names and IDs automatically! Whenever the user asks for a morning/daily/monthly business report, CEO summary, or "आजचा बिझनेस रिपोर्ट सांग", call get_executive_briefing directly.`,
+    `- MULTI-STEP PARALLEL EXECUTION (SPEED CRITICAL): When the user asks for 2, 3, or 4 actions in ONE sentence (e.g., branch analytics + filter screen + WhatsApp slips + Excel download), ALWAYS emit ALL required functionCalls TOGETHER in ONE single parallel turn instead of calling them one-by-one across separate turns! Then summarize all completed steps together in 2 crisp Marathi sentences.`,
+    `- WHATSAPP & EXECUTIVE BRIEFING PRO TOOLS: Whenever the user asks to send/share a Salary Slip or Incentive message on WhatsApp (for 1 employee OR a whole branch/department), call prepare_whatsapp_dispatch DIRECTLY with employeeIdentifier (English/Latin name like "Shobha Londhe" or Employee ID) — DO NOT call search_employees first because prepare_whatsapp_dispatch already resolves names and IDs automatically! If the user did NOT explicitly mention a month/year, OMIT monthKey so the tool automatically picks the latest month that actually has Salary Slip or Incentive data for that employee/branch. Whenever the user asks for a morning/daily/monthly business report, CEO summary, or "आजचा बिझनेस रिपोर्ट सांग", call get_executive_briefing directly.`,
     `- NEVER invent or guess data. Always call the tool to read, search, calculate, or mutate real workspace data.`,
     ``,
     `LIVE WORKSPACE CONTEXT:`,
@@ -496,7 +496,7 @@ export const VOICE_FUNCTION_DECLARATIONS: FunctionDeclaration[] = [
         },
         monthKey: {
           type: Type.STRING,
-          description: 'Target month YYYY-MM (defaults to latest available month for that employee/branch)',
+          description: 'Target month YYYY-MM ONLY if the user explicitly mentioned a month/year; otherwise OMIT so the app auto-selects the latest month with real data for that employee/branch',
         },
         documentType: {
           type: Type.STRING,
@@ -514,7 +514,7 @@ export const VOICE_FUNCTION_DECLARATIONS: FunctionDeclaration[] = [
       properties: {
         monthKey: {
           type: Type.STRING,
-          description: 'Target month YYYY-MM (defaults to latest available month with sales/payroll data)',
+          description: 'Target month YYYY-MM ONLY if the user explicitly mentioned a month/year; otherwise OMIT so the app auto-selects the latest month with real sales/payroll data',
         },
         branch: {
           type: Type.STRING,

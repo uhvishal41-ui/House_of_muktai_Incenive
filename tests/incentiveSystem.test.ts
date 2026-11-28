@@ -5557,40 +5557,55 @@ test('79. Main Owner vs Super Admin privileges are separated across firestore.ru
   assert.ok(rulesText.length > 0, 'firestore.rules must exist and be non-empty');
   const rulesNoComments = rulesText.replace(/\/\/[^\n]*/g, '');
 
-  // 1. All destructive master/financial deletes are strictly Main Owner only in firestore.rules
-  const ownerDeleteCollections: Array<[string, RegExp]> = [
+  // 1a. Critical software-safety & mass-wipe deletes remain strictly Main Owner only in firestore.rules
+  const ownerOnlyDeleteCollections: Array<[string, RegExp]> = [
     ['admins', /allow delete: if isValidId\(adminUid\) && isMainOwner\(\);/],
     ['branches', /allow delete: if isValidId\(branchId\) && isMainOwner\(\);/],
     ['employees', /allow delete: if isValidId\(employeeId\) && isMainOwner\(\);/],
     ['published_incentives', /allow delete: if isValidId\(recordId\) && isMainOwner\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/],
     ['incentive_versions', /allow delete: if isValidId\(versionId\) && isMainOwner\(\);/],
     ['monthly_summaries', /allow delete: if isValidId\(summaryId\) && isMainOwner\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/],
-    ['payout_records', /allow delete: if isValidId\(payoutId\) && isMainOwner\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/],
-    ['incentive_adjustments', /allow delete: if isValidId\(adjustmentId\) && isMainOwner\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/],
-    ['sales_targets', /allow delete: if isValidId\(targetId\) && isMainOwner\(\);/],
-    ['employee_queries', /allow delete: if isValidId\(queryId\) && isMainOwner\(\);/],
-    ['salary_slips', /allow delete: if isValidId\(slipId\) && isMainOwner\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/],
-    ['employee_loans', /allow delete: if isValidId\(loanId\) && isMainOwner\(\);/],
   ];
-  for (const [col, pattern] of ownerDeleteCollections) {
+  for (const [col, pattern] of ownerOnlyDeleteCollections) {
     const m = rulesNoComments.match(new RegExp(`match \\/${col}\\/\\{[^}]+\\}\\s*\\{[\\s\\S]*?\\n    \\}`));
     assert.ok(m, `${col} match block must exist`);
-    assert.match(m[0], pattern, `${col} delete must be restricted strictly to Main Owner`);
+    assert.match(m[0], pattern, `${col} delete must remain restricted strictly to Main Owner`);
   }
 
-  // 2. import_batches allows Super Admin draft delete only, while Main Owner owns PUBLISHED edits & deletes
+  // 1b. Day-to-day operational record deletes are unlocked for Super Admin (financial collections honor payroll locks)
+  const superAdminOperationalDeleteCollections: Array<[string, RegExp]> = [
+    ['payout_records', /allow delete: if isValidId\(payoutId\) && isSuperAdmin\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/],
+    ['incentive_adjustments', /allow delete: if isValidId\(adjustmentId\) && isSuperAdmin\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/],
+    ['salary_slips', /allow delete: if isValidId\(slipId\) && isSuperAdmin\(\) && !isMonthPayrollLocked\(existing\(\)\.monthKey\);/],
+    ['sales_targets', /allow delete: if isValidId\(targetId\) && isSuperAdmin\(\);/],
+    ['employee_queries', /allow delete: if isValidId\(queryId\) && isSuperAdmin\(\);/],
+    ['employee_loans', /allow delete: if isValidId\(loanId\) && isSuperAdmin\(\);/],
+  ];
+  for (const [col, pattern] of superAdminOperationalDeleteCollections) {
+    const m = rulesNoComments.match(new RegExp(`match \\/${col}\\/\\{[^}]+\\}\\s*\\{[\\s\\S]*?\\n    \\}`));
+    assert.ok(m, `${col} match block must exist`);
+    assert.match(m[0], pattern, `${col} delete must allow Super Admin within safety constraints`);
+  }
+
+  // 1c. Monthly Payroll Locks remain strictly Main Owner write-only
+  const settingsBlock = rulesNoComments.match(/match \/portal_settings\/\{settingId\}\s*\{[\s\S]*?\n    \}/);
+  assert.ok(settingsBlock, 'portal_settings match block must exist');
+  assert.match(settingsBlock[0], /settingId == 'payroll_locks' && isMainOwner\(\)/);
+  assert.match(settingsBlock[0], /settingId == 'payroll_locks'\s*&& isMainOwner\(\)/);
+
+  // 2. import_batches allows Super Admin to edit unlocked PUBLISHED batches & delete drafts, while PUBLISHED batch delete stays strictly Main Owner
   const batchBlock = rulesNoComments.match(/match \/import_batches\/\{batchId\}\s*\{[\s\S]*?\n    \}/);
   assert.ok(batchBlock);
   assert.match(
     batchBlock[0],
-    /isMainOwner\(\)\s*&& existing\(\)\.status == 'PUBLISHED'\s*&& incoming\(\)\.status == 'PUBLISHED'/,
+    /isMainOwner\(\)\s*\|\|\s*\(\s*isSuperAdmin\(\)\s*&& existing\(\)\.businessDate is string\s*&& existing\(\)\.businessDate\.size\(\) >= 7\s*&& !isMonthPayrollLocked\(existing\(\)\.businessDate\[0:7\]\)\s*\)\s*\)\s*&& existing\(\)\.status == 'PUBLISHED'\s*&& incoming\(\)\.status == 'PUBLISHED'/,
   );
   assert.match(
     batchBlock[0],
     /allow delete: if isValidId\(batchId\) && \(\s*isMainOwner\(\)\s*\|\| \(isSuperAdmin\(\) && existing\(\)\.status != 'PUBLISHED'\)\s*\);/,
   );
 
-  // 3. Dedicated audited Main Owner service mutations exist
+  // 3. Audited destructive & inline correction service mutations exist
   const incSvc = fs.readFileSync(path.resolve(process.cwd(), 'src/services/incentiveService.ts'), 'utf-8');
   assert.ok(incSvc.includes('export async function deleteEmployeeByOwner('));
   assert.ok(incSvc.includes("'EMPLOYEE_DELETED_BY_OWNER'"));
@@ -5604,15 +5619,15 @@ test('79. Main Owner vs Super Admin privileges are separated across firestore.ru
   assert.ok(opsSvc.includes('export async function deleteIncentiveAdjustmentByOwner('));
   assert.ok(opsSvc.includes('export async function deleteEmployeeQueryByOwner('));
 
-  // 4. Admin UI components gate destructive actions & inline Owner editors behind isMainOwner
+  // 4. Admin UI components keep critical software-safety controls behind isMainOwner while exposing operational actions to Super Admin
   const uiChecks: Array<[string, string[]]> = [
     ['src/components/admin/OwnerSalarySlipEditModal.tsx', ['updatePublishedSalarySlipByOwner']],
     ['src/components/admin/SalarySlipsManager.tsx', ['isMainOwner', 'OwnerSalarySlipEditModal']],
     ['src/components/admin/EmployeeMaster.tsx', ['isMainOwner', 'deleteEmployeeByOwner']],
     ['src/components/admin/HistoryAndReports.tsx', ['isMainOwner']],
-    ['src/components/admin/AdminPayoutsAndQueries.tsx', ['isMainOwner', 'deletePayoutRecordByOwner', 'deleteIncentiveAdjustmentByOwner', 'deleteEmployeeQueryByOwner']],
+    ['src/components/admin/AdminPayoutsAndQueries.tsx', ['deletePayoutRecordByOwner', 'deleteIncentiveAdjustmentByOwner', 'deleteEmployeeQueryByOwner']],
     ['src/components/admin/BranchMaster.tsx', ['isMainOwner']],
-    ['src/components/admin/BranchTargetManager.tsx', ['isMainOwner']],
+    ['src/components/admin/BranchTargetManager.tsx', ['deleteSalesTarget']],
     ['src/components/admin/ProExecutiveSuite.tsx', ['isMainOwner']],
     ['src/components/admin/OwnerAdminAccessManager.tsx', ['Main Owner', 'Super Admin']],
   ];

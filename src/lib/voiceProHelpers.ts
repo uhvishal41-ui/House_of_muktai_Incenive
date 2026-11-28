@@ -115,6 +115,77 @@ export function isMultiStepVoiceCommand(utterance: string): boolean {
   return MULTI_STEP_CONNECTOR_REGEX.test(clean);
 }
 
+export type InstantLocalVoiceShortcut =
+  | { kind: 'reply'; replyMr: string }
+  | { kind: 'tool'; toolName: string; args: Record<string, unknown> };
+
+/**
+ * Instant 0ms local shortcut matcher for common single-step Marathi / English voice commands
+ * (greetings, today's business briefing, and direct tab navigation) so the user gets an
+ * immediate response without waiting for a cloud LLM round-trip.
+ */
+export function matchInstantLocalVoiceCommand(utterance: string): InstantLocalVoiceShortcut | null {
+  const raw = (utterance || '').trim();
+  if (!raw || isMultiStepVoiceCommand(raw)) return null;
+  const lower = raw.toLowerCase().replace(/[।?!.,]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!lower) return null;
+
+  // 1. Instant Marathi greetings
+  if (
+    /^(नमस्कार|हॅलो|हाय|हे मुक्ताई|मुक्ताई|गुड मॉर्निंग|शुभ सकाळ|hello|hi|hey|good morning|good afternoon|good evening|namaskar|kashi ahes|कशी आहेस)$/.test(
+      lower,
+    )
+  ) {
+    return {
+      kind: 'reply',
+      replyMr: 'नमस्कार! मी मुक्ताई बोलत आहे. सांगा, मी तुमची काय मदत करू शकते?',
+    };
+  }
+
+  // 2. Instant Executive Business Briefing
+  if (
+    /(आजचा|आत्ताचा|सध्याचा)?\s*(बिझनेस|व्यवसाय|मॅनेजमेंट)?\s*(रिपोर्ट|ब्रीफिंग|समरी)/.test(lower) ||
+    /^(today'?s?\s+)?(business\s+)?(briefing|report|summary)(\s+sang|\s+tell|\s+show)?$/.test(lower)
+  ) {
+    // Only shortcut when no specific branch/download/whatsapp is requested
+    if (!/(whatsapp|व्हॉट्सअ‍ॅप|डाउनलोड|download|excel|एक्सेल|pdf|शाखा|branch)/i.test(lower)) {
+      return {
+        kind: 'tool',
+        toolName: 'get_executive_briefing',
+        args: {},
+      };
+    }
+  }
+
+  // 3. Instant Tab Navigation (only short explicit open/show commands)
+  if (lower.split(' ').length <= 5 && /(उघड|उघडा|दाखव|दाखवा|जा|open|show|go to)/i.test(lower)) {
+    const navMatches: Array<{ pattern: RegExp; tab: string }> = [
+      { pattern: /(डॅशबोर्ड|ओव्हरव्ह्यू|होम|dashboard|overview|home)/i, tab: 'overview' },
+      { pattern: /(कर्मचारी|स्टाफ|मास्टर|employee|staff)/i, tab: 'employees' },
+      { pattern: /(सॅलरी|पगार|salary|payslip)/i, tab: 'salary' },
+      { pattern: /(पेआउट|क्वेरी|शंका|तक्रार|अ‍ॅडजस्टमेंट|payout|query|queries|adjustment)/i, tab: 'payouts' },
+      { pattern: /(अपलोड|एक्सेल|इम्पोर्ट|upload|import)/i, tab: 'import' },
+      { pattern: /(अ‍ॅनालिटिक्स|analytics|पी अँड एल|pnl)/i, tab: 'analytics' },
+      { pattern: /(रिपोर्ट|report)/i, tab: 'branch-reports' },
+      { pattern: /(शाखा|ब्रँच|branch|branches)/i, tab: 'branches' },
+      { pattern: /(टार्गेट|लोन|अ‍ॅडव्हान्स|प्रो|target|loan|advance|pro)/i, tab: 'pro-suite' },
+      { pattern: /(हिस्टरी|इतिहास|history|audit)/i, tab: 'history' },
+      { pattern: /(सेटिंग|ओनर|setting|owner)/i, tab: 'owner-access' },
+    ];
+    for (const item of navMatches) {
+      if (item.pattern.test(lower)) {
+        return {
+          kind: 'tool',
+          toolName: 'navigate_to_section',
+          args: { tab: item.tab },
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
 export function describeVoiceToolStepMr(toolName: string, args: Record<string, unknown>): string {
   const branch = typeof args.branch === 'string' && args.branch.trim() ? ` (${args.branch.trim()})` : '';
   const emp =

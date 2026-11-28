@@ -820,15 +820,13 @@ export async function ownerSetEmployeePassword(params: {
   mustChangePassword?: boolean;
 }): Promise<{ employee: Employee; rotated: boolean }> {
   const actor = auth.currentUser;
-  if (
-    !actor ||
-    !actor.emailVerified ||
-    (actor.email || '').trim().toLowerCase() !== MAIN_OWNER_EMAIL
-  ) {
-    throw new Error(
-      `Only the verified Main Owner (${MAIN_OWNER_EMAIL}) can set or reset employee passwords.`,
-    );
+  if (!actor) {
+    throw new Error('Super Admin authentication is required to set or reset employee passwords.');
   }
+  const actorIsMainOwner = Boolean(
+    actor.emailVerified &&
+      (actor.email || '').trim().toLowerCase() === MAIN_OWNER_EMAIL.toLowerCase(),
+  );
 
   const cleanPassword = String(params.newPassword || '').trim();
   if (cleanPassword.length < 8) {
@@ -1047,10 +1045,10 @@ export async function ownerSetEmployeePassword(params: {
   await syncEmployeeAuthUidToExistingRecords(updatedEmp.employeeId, resolvedUid);
 
   await recordAuditLog({
-    action: 'OWNER_SET_EMPLOYEE_PASSWORD',
+    action: actorIsMainOwner ? 'OWNER_SET_EMPLOYEE_PASSWORD' : 'ADMIN_SET_EMPLOYEE_PASSWORD',
     targetType: 'employee_auth',
     targetId: updatedEmp.employeeId,
-    summary: `Main Owner ${hasExistingCredential ? 'reset' : 'activated and set'} portal password for ${updatedEmp.fullName} (${updatedEmp.loginId}); previous credential revoked${mustChange ? ' (change required on next login)' : ''}.`,
+    summary: `${actorIsMainOwner ? 'Main Owner' : `Admin (${actor.email || actor.uid})`} ${hasExistingCredential ? 'reset' : 'activated and set'} portal password for ${updatedEmp.fullName} (${updatedEmp.loginId}); previous credential revoked${mustChange ? ' (change required on next login)' : ''}.`,
   });
 
   return { employee: updatedEmp, rotated: hasExistingCredential };
@@ -1313,14 +1311,25 @@ async function syncEmployeeAuthUidToExistingRecords(
     if ((d.data() as { authUid?: string }).authUid !== authUid) refsToUpdate.push(d.ref);
   }
 
+  let updatedCount = 0;
   for (let i = 0; i < refsToUpdate.length; i += 400) {
-    const wb = writeBatch(db);
-    for (const ref of refsToUpdate.slice(i, i + 400)) {
-      wb.update(ref, { authUid });
+    const chunk = refsToUpdate.slice(i, i + 400);
+    try {
+      const wb = writeBatch(db);
+      for (const ref of chunk) {
+        wb.update(ref, { authUid });
+      }
+      await wb.commit();
+      updatedCount += chunk.length;
+    } catch {
+      // Fallback per-document so a single malformed/locked legacy doc never blocks remaining syncs
+      const settled = await Promise.allSettled(
+        chunk.map((ref) => updateDoc(ref, { authUid })),
+      );
+      updatedCount += settled.filter((r) => r.status === 'fulfilled').length;
     }
-    await wb.commit();
   }
-  return refsToUpdate.length;
+  return updatedCount;
 }
 
 export async function saveEmployee(input: {
@@ -1382,21 +1391,57 @@ export async function saveEmployee(input: {
 }): Promise<{ employee: Employee; provisioningNote: string }> {
   const now = new Date().toISOString();
   const employeeId = sanitizeId(input.employeeId).slice(0, 64);
+  if (!employeeId || !/^[a-zA-Z0-9_-]{1,64}$/.test(employeeId)) {
+    throw new Error('Employee ID must contain only letters, numbers, hyphens (-), or underscores (_).');
+  }
+
   const loginId = sanitizeId(input.loginId).slice(0, 40);
-  const authEmail = loginIdToAuthEmail(loginId);
+  if (!loginId || loginId.length < 3 || !/^[A-Z0-9_-]{3,40}$/.test(loginId)) {
+    throw new Error('Login ID must be 3–40 characters using letters, numbers, hyphens (-), or underscores (_).');
+  }
+
+  const cleanFullName = input.fullName.trim().slice(0, 120);
+  if (!cleanFullName) {
+    throw new Error('Employee Full Name is required.');
+  }
+
+  const cleanBranchId = input.branchId.trim();
+  const cleanBranchName = input.branchName.trim().slice(0, 120);
+  if (!cleanBranchId || !/^[a-zA-Z0-9_-]{1,128}$/.test(cleanBranchId) || !cleanBranchName) {
+    throw new Error('Please select a valid Branch from Branch Master.');
+  }
+
+  // Always read live authoritative employee document so createdAt, authUid, and rotated authEmail never drift from Firestore
+  let liveExisting: Employee | null = input.existing || null;
+  try {
+    const liveSnap = await getDoc(doc(db, 'employees', employeeId));
+    if (liveSnap.exists()) {
+      liveExisting = liveSnap.data() as Employee;
+    }
+  } catch {
+    // Fallback to caller-provided existing record if read is transiently unavailable
+  }
+
+  const normalizedExistingLogin = liveExisting?.loginId
+    ? sanitizeId(liveExisting.loginId).slice(0, 40)
+    : '';
+  const authEmail =
+    liveExisting?.authEmail && normalizedExistingLogin === loginId
+      ? liveExisting.authEmail.trim().slice(0, 180)
+      : loginIdToAuthEmail(loginId);
 
   const rawSaleId =
-    input.saleId !== undefined ? input.saleId : (input.existing?.saleId || '');
+    input.saleId !== undefined ? input.saleId : (liveExisting?.saleId || '');
   const resolvedSaleId = rawSaleId.trim()
     ? sanitizeId(rawSaleId.trim()).toUpperCase().slice(0, 40)
     : '';
   const resolvedGender = (
-    input.gender !== undefined ? input.gender : (input.existing?.gender || '')
+    input.gender !== undefined ? input.gender : (liveExisting?.gender || '')
   )
     .trim()
     .slice(0, 20);
   const resolvedCategory = (
-    input.category !== undefined ? input.category : (input.existing?.category || '')
+    input.category !== undefined ? input.category : (liveExisting?.category || '')
   )
     .trim()
     .slice(0, 40);
@@ -1414,14 +1459,14 @@ export async function saveEmployee(input: {
     }
   }
 
-  const previousAuthUid = input.existing?.authUid || '';
+  const previousAuthUid = (liveExisting?.authUid || '').trim();
   let authUid = previousAuthUid;
-  let credentialsProvisioned = input.existing?.credentialsProvisioned || false;
+  let credentialsProvisioned = Boolean(liveExisting?.credentialsProvisioned || previousAuthUid);
   let provisioningNote = '';
 
   const effectiveInitialPassword = (
     input.initialPassword?.trim() ||
-    (!input.existing ? DEFAULT_EMPLOYEE_PASSWORD : '')
+    (!liveExisting ? DEFAULT_EMPLOYEE_PASSWORD : '')
   ).trim();
 
   if (effectiveInitialPassword.length >= 8 && !credentialsProvisioned) {
@@ -1434,7 +1479,7 @@ export async function saveEmployee(input: {
   }
 
   const resolvedDeptId =
-    input.departmentId !== undefined ? input.departmentId : (input.existing?.departmentId || '');
+    input.departmentId !== undefined ? input.departmentId : (liveExisting?.departmentId || '');
   const resolvedDept = getDepartmentById(resolvedDeptId);
   const resolvedCustomDeptName = !resolvedDept
     ? (
@@ -1442,7 +1487,7 @@ export async function saveEmployee(input: {
           ? input.departmentName
           : input.departmentId === ''
             ? ''
-            : input.existing?.departmentName || ''
+            : liveExisting?.departmentName || ''
       )
         .trim()
         .slice(0, 80)
@@ -1450,67 +1495,67 @@ export async function saveEmployee(input: {
   const resolvedPhoto =
     input.photoDataUrl !== undefined
       ? input.photoDataUrl.trim().slice(0, 45000)
-      : (input.existing?.photoDataUrl || '');
+      : (liveExisting?.photoDataUrl || '');
 
   const rawDob =
-    input.dateOfBirth !== undefined ? input.dateOfBirth : input.existing?.dateOfBirth || '';
+    input.dateOfBirth !== undefined ? input.dateOfBirth : liveExisting?.dateOfBirth || '';
   const resolvedDob = rawDob.trim() ? parseDobToIso(rawDob) || rawDob.trim().slice(0, 20) : '';
   const resolvedDoj = (
-    input.dateOfJoining !== undefined ? input.dateOfJoining : input.existing?.dateOfJoining || ''
+    input.dateOfJoining !== undefined ? input.dateOfJoining : liveExisting?.dateOfJoining || ''
   )
     .trim()
     .slice(0, 20);
   const resolvedPan = (
-    input.panNumber !== undefined ? input.panNumber : input.existing?.panNumber || ''
+    input.panNumber !== undefined ? input.panNumber : liveExisting?.panNumber || ''
   )
     .trim()
     .toUpperCase()
     .slice(0, 20);
   const resolvedUan = (
-    input.uanNumber !== undefined ? input.uanNumber : input.existing?.uanNumber || ''
+    input.uanNumber !== undefined ? input.uanNumber : liveExisting?.uanNumber || ''
   )
     .trim()
     .slice(0, 24);
   const resolvedPf = (
-    input.pfNumber !== undefined ? input.pfNumber : input.existing?.pfNumber || ''
+    input.pfNumber !== undefined ? input.pfNumber : liveExisting?.pfNumber || ''
   )
     .trim()
     .slice(0, 32);
   const resolvedEsic = (
-    input.esicNumber !== undefined ? input.esicNumber : input.existing?.esicNumber || ''
+    input.esicNumber !== undefined ? input.esicNumber : liveExisting?.esicNumber || ''
   )
     .trim()
     .slice(0, 32);
   const resolvedBankName = (
-    input.bankName !== undefined ? input.bankName : input.existing?.bankName || ''
+    input.bankName !== undefined ? input.bankName : liveExisting?.bankName || ''
   )
     .trim()
     .slice(0, 80);
   const resolvedBankAcc = maskBankAccountNumber(
     input.bankAccountMasked !== undefined
       ? input.bankAccountMasked
-      : input.existing?.bankAccountMasked || '',
+      : liveExisting?.bankAccountMasked || '',
   );
   const resolvedBankIfsc = (
-    input.bankIfsc !== undefined ? input.bankIfsc : input.existing?.bankIfsc || ''
+    input.bankIfsc !== undefined ? input.bankIfsc : liveExisting?.bankIfsc || ''
   )
     .trim()
     .toUpperCase()
     .slice(0, 20);
   const resolvedPhone = (
-    input.phone !== undefined ? input.phone : input.existing?.phone || ''
+    input.phone !== undefined ? input.phone : liveExisting?.phone || ''
   )
     .trim()
     .slice(0, 24);
   const resolvedAddress = (
-    input.address !== undefined ? input.address : input.existing?.address || ''
+    input.address !== undefined ? input.address : liveExisting?.address || ''
   )
     .trim()
     .slice(0, 240);
   const resolvedEmergencyContact = (
     input.emergencyContact !== undefined
       ? input.emergencyContact
-      : input.existing?.emergencyContact || ''
+      : liveExisting?.emergencyContact || ''
   )
     .trim()
     .slice(0, 120);
@@ -1523,83 +1568,83 @@ export async function saveEmployee(input: {
 
   const resolvedFatherOrSpouseName = pickOptStr(
     input.fatherOrSpouseName,
-    input.existing?.fatherOrSpouseName,
+    liveExisting?.fatherOrSpouseName,
     120,
   );
   const resolvedMaritalStatus = pickOptStr(
     input.maritalStatus,
-    input.existing?.maritalStatus,
+    liveExisting?.maritalStatus,
     24,
   );
   const resolvedBloodGroup = pickOptStr(
     input.bloodGroup,
-    input.existing?.bloodGroup,
+    liveExisting?.bloodGroup,
     12,
   ).toUpperCase();
   const resolvedQualification = pickOptStr(
     input.qualification,
-    input.existing?.qualification,
+    liveExisting?.qualification,
     80,
   );
-  const resolvedDateOfExit = pickOptStr(input.dateOfExit, input.existing?.dateOfExit, 20);
-  const resolvedExitReason = pickOptStr(input.exitReason, input.existing?.exitReason, 200);
+  const resolvedDateOfExit = pickOptStr(input.dateOfExit, liveExisting?.dateOfExit, 20);
+  const resolvedExitReason = pickOptStr(input.exitReason, liveExisting?.exitReason, 200);
   const resolvedEmploymentType = pickOptStr(
     input.employmentType,
-    input.existing?.employmentType,
+    liveExisting?.employmentType,
     32,
   );
   const resolvedReportingManager = pickOptStr(
     input.reportingManager,
-    input.existing?.reportingManager,
+    liveExisting?.reportingManager,
     120,
   );
-  const resolvedShiftTiming = pickOptStr(input.shiftTiming, input.existing?.shiftTiming, 60);
-  const resolvedWeeklyOffDay = pickOptStr(input.weeklyOffDay, input.existing?.weeklyOffDay, 24);
-  const resolvedUniformSize = pickOptStr(input.uniformSize, input.existing?.uniformSize, 16);
+  const resolvedShiftTiming = pickOptStr(input.shiftTiming, liveExisting?.shiftTiming, 60);
+  const resolvedWeeklyOffDay = pickOptStr(input.weeklyOffDay, liveExisting?.weeklyOffDay, 24);
+  const resolvedUniformSize = pickOptStr(input.uniformSize, liveExisting?.uniformSize, 16);
   const resolvedAadhaarMasked = maskAadhaarNumber(
     input.aadhaarMasked !== undefined
       ? input.aadhaarMasked
-      : input.existing?.aadhaarMasked || '',
+      : liveExisting?.aadhaarMasked || '',
   );
   const resolvedBankBranchName = pickOptStr(
     input.bankBranchName,
-    input.existing?.bankBranchName,
+    liveExisting?.bankBranchName,
     100,
   );
-  const resolvedUpiId = pickOptStr(input.upiId, input.existing?.upiId, 80);
-  const resolvedPaymentMode = pickOptStr(input.paymentMode, input.existing?.paymentMode, 24);
+  const resolvedUpiId = pickOptStr(input.upiId, liveExisting?.upiId, 80);
+  const resolvedPaymentMode = pickOptStr(input.paymentMode, liveExisting?.paymentMode, 24);
   const resolvedAlternatePhone = pickOptStr(
     input.alternatePhone,
-    input.existing?.alternatePhone,
+    liveExisting?.alternatePhone,
     24,
   );
   const resolvedPersonalEmail = pickOptStr(
     input.personalEmail,
-    input.existing?.personalEmail,
+    liveExisting?.personalEmail,
     180,
   ).toLowerCase();
   const resolvedPermanentAddress = pickOptStr(
     input.permanentAddress,
-    input.existing?.permanentAddress,
+    liveExisting?.permanentAddress,
     240,
   );
   const resolvedEmergencyContactName = pickOptStr(
     input.emergencyContactName,
-    input.existing?.emergencyContactName,
+    liveExisting?.emergencyContactName,
     120,
   );
-  const resolvedNomineeName = pickOptStr(input.nomineeName, input.existing?.nomineeName, 120);
+  const resolvedNomineeName = pickOptStr(input.nomineeName, liveExisting?.nomineeName, 120);
   const resolvedNomineeRelation = pickOptStr(
     input.nomineeRelation,
-    input.existing?.nomineeRelation,
+    liveExisting?.nomineeRelation,
     60,
   );
-  const resolvedHrRemarks = pickOptStr(input.hrRemarks, input.existing?.hrRemarks, 300);
+  const resolvedHrRemarks = pickOptStr(input.hrRemarks, liveExisting?.hrRemarks, 300);
 
   const rawMonthlySalary =
     input.monthlyGrossSalaryPaise !== undefined
       ? input.monthlyGrossSalaryPaise
-      : input.existing?.monthlyGrossSalaryPaise;
+      : liveExisting?.monthlyGrossSalaryPaise;
   const resolvedMonthlyGrossSalaryPaise =
     typeof rawMonthlySalary === 'number' &&
     Number.isFinite(rawMonthlySalary) &&
@@ -1610,8 +1655,16 @@ export async function saveEmployee(input: {
   const rawCustomFields =
     input.customFields !== undefined
       ? input.customFields
-      : input.existing?.customFields || {};
+      : liveExisting?.customFields || {};
   const resolvedCustomFields = sanitizeEmployeeCustomFields(rawCustomFields);
+
+  const resolvedDesignation =
+    (input.designation || liveExisting?.designation || 'Employee').trim().slice(0, 80) ||
+    'Employee';
+  const resolvedCreatedAt =
+    typeof liveExisting?.createdAt === 'string' && liveExisting.createdAt.trim()
+      ? liveExisting.createdAt.trim().slice(0, 40)
+      : now;
 
   // Phase 2 enforces EMPLOYEE role only (BRANCH_MANAGER disabled)
   const record: Employee = {
@@ -1619,16 +1672,16 @@ export async function saveEmployee(input: {
     ...(resolvedSaleId ? { saleId: resolvedSaleId } : {}),
     loginId,
     authEmail,
-    fullName: input.fullName.trim().slice(0, 120),
-    branchId: input.branchId,
-    branchName: input.branchName.trim().slice(0, 120),
+    fullName: cleanFullName,
+    branchId: cleanBranchId,
+    branchName: cleanBranchName,
     ...(resolvedDept
       ? { departmentId: resolvedDept.id, departmentName: resolvedDept.name }
       : resolvedCustomDeptName
         ? { departmentId: '' as const, departmentName: resolvedCustomDeptName }
         : {}),
     ...(resolvedPhoto ? { photoDataUrl: resolvedPhoto } : {}),
-    designation: input.designation.trim().slice(0, 80),
+    designation: resolvedDesignation,
     ...(resolvedGender ? { gender: resolvedGender } : {}),
     ...(resolvedCategory ? { category: resolvedCategory } : {}),
     ...(resolvedFatherOrSpouseName ? { fatherOrSpouseName: resolvedFatherOrSpouseName } : {}),
@@ -1661,13 +1714,13 @@ export async function saveEmployee(input: {
     role: 'EMPLOYEE',
     ...(input.isBranchManager !== undefined
       ? { isBranchManager: Boolean(input.isBranchManager) }
-      : input.existing?.isBranchManager
+      : liveExisting?.isBranchManager
         ? { isBranchManager: true }
         : {}),
     status: input.status,
     mustChangePassword: input.mustChangePassword,
     credentialsProvisioned,
-    createdAt: input.existing?.createdAt || now,
+    createdAt: resolvedCreatedAt,
     updatedAt: now,
     ...(authUid ? { authUid } : {}),
     ...(input.linkedGoogleEmail?.trim()
@@ -1695,11 +1748,15 @@ export async function saveEmployee(input: {
     const wb = writeBatch(db);
     wb.set(doc(db, 'employees', employeeId), record);
 
-    if (previousAuthUid && previousAuthUid !== authUid) {
+    if (
+      previousAuthUid &&
+      previousAuthUid !== authUid &&
+      /^[a-zA-Z0-9_-]{1,128}$/.test(previousAuthUid)
+    ) {
       wb.delete(doc(db, 'active_auth_uids', previousAuthUid));
     }
 
-    if (authUid) {
+    if (authUid && /^[a-zA-Z0-9_-]{1,128}$/.test(authUid)) {
       if (record.status === 'ACTIVE') {
         const activeEntry = buildActiveAuthUidRecord({
           authUid,
@@ -1720,27 +1777,37 @@ export async function saveEmployee(input: {
     const birthdayProfile = buildBirthdayProfileFromEmployee(record, now);
     if (birthdayProfile) {
       wb.set(doc(db, 'birthday_profiles', employeeId), birthdayProfile);
-    } else if (input.existing?.dateOfBirth || input.existing?.status === 'ACTIVE') {
+    } else if (liveExisting?.dateOfBirth || liveExisting?.status === 'ACTIVE') {
       wb.delete(doc(db, 'birthday_profiles', employeeId));
     }
 
     await wb.commit();
-
-    // If a new authUid was provisioned, immediately backfill any legacy records for this employee
-    if (authUid && authUid !== previousAuthUid) {
-      await syncEmployeeAuthUidToExistingRecords(employeeId, authUid);
-    }
-
-    await recordAuditLog({
-      action: input.existing ? 'EMPLOYEE_UPDATED' : 'EMPLOYEE_CREATED',
-      targetType: 'employee',
-      targetId: employeeId,
-      summary: `${input.existing ? 'Updated' : 'Created'} employee ${employeeId} (${record.fullName}, Login ID: ${loginId}, Branch: ${record.branchName}${resolvedDept ? `, Dept: ${resolvedDept.name}` : ''}, Status: ${record.status})`,
-    });
-    return { employee: record, provisioningNote };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `employees/${employeeId}`);
   }
+
+  // Non-blocking post-commit backfill if a new authUid was provisioned
+  if (authUid && authUid !== previousAuthUid) {
+    try {
+      await syncEmployeeAuthUidToExistingRecords(employeeId, authUid);
+    } catch {
+      // Non-blocking: employee master write already succeeded atomically
+    }
+  }
+
+  // Non-blocking audit trail write (errors never mask a committed employee save)
+  try {
+    await recordAuditLog({
+      action: liveExisting ? 'EMPLOYEE_UPDATED' : 'EMPLOYEE_CREATED',
+      targetType: 'employee',
+      targetId: employeeId,
+      summary: `${liveExisting ? 'Updated' : 'Created'} employee ${employeeId} (${record.fullName}, Login ID: ${loginId}, Branch: ${record.branchName}${resolvedDept ? `, Dept: ${resolvedDept.name}` : ''}, Status: ${record.status})`,
+    });
+  } catch {
+    // Non-blocking audit write
+  }
+
+  return { employee: record, provisioningNote };
 }
 
 /**

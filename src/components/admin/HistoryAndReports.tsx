@@ -1811,8 +1811,7 @@ export function HistoryAndReports({
                       const bEnd = b.periodEnd || b.businessDate;
                       const canEdit =
                         b.status !== 'PROCESSING' &&
-                        b.status !== 'REJECTED' &&
-                        (b.status !== 'PUBLISHED' || isMainOwner);
+                        b.status !== 'REJECTED';
                       const canDelete =
                         b.status !== 'PROCESSING' &&
                         (b.status !== 'PUBLISHED' || isMainOwner);

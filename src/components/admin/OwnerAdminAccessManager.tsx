@@ -887,33 +887,33 @@ export function OwnerAdminAccessManager({ onRefreshShell }: Props) {
             <tbody className="divide-y divide-slate-100 text-slate-700">
               <tr>
                 <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Employees &amp; Branches</td>
-                <td className="py-2.5 px-4">Add, Edit, Activate/Deactivate, Provision Logins</td>
+                <td className="py-2.5 px-4">Add, Edit &amp; Save, Activate/Deactivate, Provision Logins, <strong>Set/Reset Employee Passwords</strong></td>
                 <td className="py-2.5 px-4 font-medium text-emerald-800">All Admin rights + <strong>Permanent Delete</strong> Employee &amp; Branch</td>
               </tr>
               <tr>
                 <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Incentive Excel Batches</td>
-                <td className="py-2.5 px-4">Upload, Validate, Approve, Publish; Edit/Delete unpublished drafts</td>
-                <td className="py-2.5 px-4 font-medium text-emerald-800">All Admin rights + <strong>Edit/Delete PUBLISHED Batches</strong> &amp; <strong>Delete Whole Month</strong></td>
+                <td className="py-2.5 px-4">Upload, Validate, Approve, Publish; Edit/Delete drafts; <strong>Edit PUBLISHED Batches</strong> (Unlocked Months)</td>
+                <td className="py-2.5 px-4 font-medium text-emerald-800">All Admin rights + <strong>Delete PUBLISHED Batches</strong> &amp; <strong>Purge Whole Month</strong></td>
               </tr>
               <tr>
                 <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Monthly Salary Slips</td>
-                <td className="py-2.5 px-4">Upload Paysheet, Publish, 1-Click Sync, PDF/WhatsApp Dispatch</td>
-                <td className="py-2.5 px-4 font-medium text-emerald-800">All Admin rights + <strong>Direct Edit Slip</strong>, <strong>Move Month</strong>, <strong>Single &amp; Bulk Delete</strong></td>
+                <td className="py-2.5 px-4">Upload, Publish, <strong>Edit &amp; Save</strong>, <strong>Move Month</strong>, <strong>Single Slip Delete</strong> (Unlocked Months), Sync &amp; WhatsApp</td>
+                <td className="py-2.5 px-4 font-medium text-emerald-800">All Admin rights + <strong>Bulk Delete All Filtered Slips</strong></td>
               </tr>
               <tr>
                 <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Payouts, Adjustments &amp; Queries</td>
-                <td className="py-2.5 px-4">Mark Approved/Paid, Add/Void Adjustments, Reply &amp; Resolve Queries</td>
-                <td className="py-2.5 px-4 font-medium text-emerald-800">All Admin rights + <strong>Permanent Delete</strong> Payouts, Adjustments &amp; Queries</td>
+                <td className="py-2.5 px-4">Full Control: Mark Approved/Paid, Add/Void/Delete (Unlocked Months), Reply/Resolve/Delete Queries</td>
+                <td className="py-2.5 px-4 font-medium text-emerald-800">Full Control (plus Payroll Lock override protection)</td>
               </tr>
               <tr>
                 <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Loans &amp; Sales Targets</td>
-                <td className="py-2.5 px-4">Create &amp; Update Targets, Issue Loans, Record EMI &amp; Settle</td>
-                <td className="py-2.5 px-4 font-medium text-emerald-800">All Admin rights + <strong>Permanent Delete</strong> Loans &amp; Sales Targets</td>
+                <td className="py-2.5 px-4">Full Control: Create, Update &amp; Delete Targets; Issue Loans, Record EMI, Settle &amp; Delete Closed Loans</td>
+                <td className="py-2.5 px-4 font-medium text-emerald-800">Full Control</td>
               </tr>
               <tr>
-                <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Master Governance</td>
-                <td className="py-2.5 px-4 text-slate-400">Restricted (View-Only / No Access)</td>
-                <td className="py-2.5 px-4 font-medium text-[#9A7625]"><strong>Admin &amp; Employee Password Control</strong>, <strong>Month Payroll Lock/Unlock</strong>, <strong>Fresh Start Reset</strong></td>
+                <td className="py-2.5 px-4 font-semibold text-[#0F1F3D]">Critical Software Safety</td>
+                <td className="py-2.5 px-4 text-slate-400">Protected (Main Owner Only — Software Safety Lock)</td>
+                <td className="py-2.5 px-4 font-medium text-[#9A7625]"><strong>Admin Account &amp; Password Control</strong>, <strong>Month Payroll Lock/Unlock</strong>, <strong>Fresh Start Clean Reset</strong></td>
               </tr>
             </tbody>
           </table>

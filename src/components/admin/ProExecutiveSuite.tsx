@@ -996,17 +996,15 @@ export function ProExecutiveSuite({
                                 <span className="text-[11px] font-semibold text-emerald-700">
                                   {loan.status}
                                 </span>
-                                {isMainOwner && (
-                                  <button
-                                    type="button"
-                                    disabled={busyLoanId === loan.loanId}
-                                    onClick={() => handleDeleteLoan(loan)}
-                                    className="p-1 text-slate-400 hover:text-red-600 cursor-pointer"
-                                    title="Main Owner only: delete closed loan record"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                )}
+                                <button
+                                  type="button"
+                                  disabled={busyLoanId === loan.loanId}
+                                  onClick={() => handleDeleteLoan(loan)}
+                                  className="p-1 text-slate-400 hover:text-red-600 cursor-pointer"
+                                  title="Delete closed loan record"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
                               </div>
                             )}
                           </td>
